@@ -1,0 +1,35 @@
+plugins {
+    id 'java-library'
+    id 'net.neoforged.moddev' version '2.0.78'
+}
+
+group = 'com.physicaldestroydeform'
+version = '0.1.0'
+
+base { archivesName = 'physical-destroy-deform' }
+
+java.toolchain.languageVersion = JavaLanguageVersion.of(21)
+
+neoForge {
+    version = '21.1.172'
+    runs {
+        client { client() }
+        server { server(); programArgument '--nogui' }
+    }
+    mods {
+        physical_destroy_deform { sourceSet sourceSets.main }
+    }
+}
+
+repositories { mavenCentral() }
+
+jar {
+    manifest {
+        attributes([
+            'Specification-Title': 'Physical Destroy and Deform',
+            'Specification-Version': '0.1',
+            'Implementation-Title': project.name,
+            'Implementation-Version': project.version
+        ])
+    }
+}

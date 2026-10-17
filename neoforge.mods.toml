@@ -1,0 +1,24 @@
+modLoader="javafml"
+loaderVersion="[4,)"
+license="MIT"
+
+[[mods]]
+modId="physical_destroy_deform"
+version="0.1.0"
+displayName="Create Aeronautics: Physical Destroy and Deform"
+authors="OpenAI"
+description='''Experimental foundation for material-based block damage and deformation on Minecraft 1.21.1 / NeoForge. Sable and Aeronautics runtime integration is not yet implemented in this prototype.'''
+
+[[dependencies.physical_destroy_deform]]
+modId="neoforge"
+type="required"
+versionRange="[21.1.172,)"
+ordering="NONE"
+side="BOTH"
+
+[[dependencies.physical_destroy_deform]]
+modId="minecraft"
+type="required"
+versionRange="[1.21.1,1.22)"
+ordering="NONE"
+side="BOTH"
