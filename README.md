@@ -1,2 +1,15 @@
-# Create-Aeronautics-Pysical-Destructive-and-Deforming-
-PDD (Physical Destruction and Deforming) is a Sable-based addon for Create Aeronautics, designed to simulate realistic destruction and deformation from collisions between physical structures or static blocks. It defines hardness through mining and blast resistance, ductility through deformation, and elasticity through impact absorption.
+# PDD - Physical Destruction and Deforming
+
+A Sable-based addon for Create Aeronautics.
+
+## Features
+- Block hardness
+- Ductility and deformation
+- Elasticity and impact absorption
+
+## Development Status
+In Development
+
+## Dependencies
+- Create Aeronautics
+- Sable
