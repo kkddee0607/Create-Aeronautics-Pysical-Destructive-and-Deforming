@@ -1,25 +1,34 @@
 package com.physicaldestroydeform;
 
-/** Immutable per-block-type defaults. Share instances; do not allocate one per block. */
+/**
+ * Immutable default material properties shared by block type.
+ *
+ * <p>Hardness is this addon's 0..255 rating, not Minecraft's mining-hardness value.
+ * Ductility and elasticity are encoded as integer percentages (0..100).</p>
+ */
 public record MaterialProperties(int hardness, int ductilityPercent, int elasticityPercent) {
     public MaterialProperties {
-        hardness = clampByte(hardness);
-        ductilityPercent = clampPercent(ductilityPercent);
-        elasticityPercent = clampPercent(elasticityPercent);
+        requireRange("hardness", hardness, 0, 255);
+        requireRange("ductilityPercent", ductilityPercent, 0, 100);
+        requireRange("elasticityPercent", elasticityPercent, 0, 100);
     }
 
-    /** Hardness is a 0..255 damage-reduction rating, not vanilla block hardness. */
-    public int hardness() { return hardness; }
+    public double hardnessNormalized() {
+        return hardness / 255.0;
+    }
 
-    /** Ductility is stored as an integer percentage, 0..100, representing 0..1. */
-    public int ductilityPercent() { return ductilityPercent; }
+    public double ductility() {
+        return ductilityPercent / 100.0;
+    }
 
-    /** Elasticity is stored as an integer percentage, 0..100, representing 0..1. */
-    public int elasticityPercent() { return elasticityPercent; }
+    public double elasticity() {
+        return elasticityPercent / 100.0;
+    }
 
-    public double ductility() { return ductilityPercent / 100.0; }
-    public double elasticity() { return elasticityPercent / 100.0; }
-
-    private static int clampByte(int value) { return Math.max(0, Math.min(255, value)); }
-    private static int clampPercent(int value) { return Math.max(0, Math.min(100, value)); }
+    private static void requireRange(String name, int value, int min, int max) {
+        if (value < min || value > max) {
+            throw new IllegalArgumentException(name + " must be in range " + min + ".." + max
+                    + "; got " + value);
+        }
+    }
 }

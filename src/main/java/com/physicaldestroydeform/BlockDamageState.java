@@ -1,25 +1,43 @@
 package com.physicaldestroydeform;
 
-/** Compact per-instance state. Values are unsigned-byte-compatible 0..255 integers. */
+/**
+ * Mutable per-block damage state.
+ *
+ * <p>Only create/store this state for blocks that have actually changed. Values are kept
+ * as int in memory for simple arithmetic but are constrained to unsigned-byte ranges.</p>
+ */
 public final class BlockDamageState {
-    private int damage;          // 0..255 accumulated damage
-    private int deformation;     // 0..255 accumulated permanent deformation
-    private int crackVisual;     // 0..255 visual crack intensity
+    public static final int MAX_VALUE = 255;
+    private int damage;
+    private int deformation;
+    private int crackVisual;
 
     public int damage() { return damage; }
     public int deformation() { return deformation; }
     public int crackVisual() { return crackVisual; }
 
-    public void addDamage(int amount) { damage = clampByte(damage + Math.max(0, amount)); }
-    public void addDeformation(int amount) { deformation = clampByte(deformation + Math.max(0, amount)); }
-    public void setCrackVisual(int value) { crackVisual = clampByte(value); }
-    public boolean isPristine() { return damage == 0 && deformation == 0 && crackVisual == 0; }
+    public void addDamage(int amount) {
+        damage = saturatingAdd(damage, amount);
+    }
 
-    /** Encodes the three state bytes into a compact 24-bit value for packed storage. */
+    public void addDeformation(int amount) {
+        deformation = saturatingAdd(deformation, amount);
+    }
+
+    public void setDamage(int value) { damage = requireByteRange("damage", value); }
+    public void setDeformation(int value) { deformation = requireByteRange("deformation", value); }
+    public void setCrackVisual(int value) { crackVisual = requireByteRange("crackVisual", value); }
+
+    public boolean isPristine() {
+        return damage == 0 && deformation == 0 && crackVisual == 0;
+    }
+
+    /** Packs damage, deformation and crack intensity into the low 24 bits. */
     public int pack24() {
         return (damage & 0xFF) | ((deformation & 0xFF) << 8) | ((crackVisual & 0xFF) << 16);
     }
 
+    /** Decodes the low 24 bits; high bits are ignored. */
     public static BlockDamageState unpack24(int packed) {
         BlockDamageState state = new BlockDamageState();
         state.damage = packed & 0xFF;
@@ -28,5 +46,15 @@ public final class BlockDamageState {
         return state;
     }
 
-    private static int clampByte(int value) { return Math.max(0, Math.min(255, value)); }
+    private int saturatingAdd(int current, int amount) {
+        if (amount <= 0) return current;
+        return (int) Math.min(MAX_VALUE, (long) current + amount);
+    }
+
+    private static int requireByteRange(String name, int value) {
+        if (value < 0 || value > MAX_VALUE) {
+            throw new IllegalArgumentException(name + " must be in range 0..255; got " + value);
+        }
+        return value;
+    }
 }
