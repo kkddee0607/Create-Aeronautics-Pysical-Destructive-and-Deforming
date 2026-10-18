@@ -4,10 +4,10 @@ license="MIT"
 
 [[mods]]
 modId="physical_destroy_deform"
-version="0.1.0"
-displayName="Create Aeronautics: Physical Destroy and Deform"
-authors="OpenAI"
-description='''Experimental foundation for material-based block damage and deformation on Minecraft 1.21.1 / NeoForge. Sable and Aeronautics runtime integration is not yet implemented in this prototype.'''
+version="0.1.3"
+displayName="Create Aeronautics: Physical Destruction and Deforming"
+authors="PDD contributors"
+description='''PDD development prototype. Runtime collision damage is intentionally gated pending verification of Sable callback semantics and safe world/collider update paths.'''
 
 [[dependencies.physical_destroy_deform]]
 modId="neoforge"
