@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       confirm_import:
-        description: "실제로 GitHub 이슈 71개를 등록하려면 체크"
+        description: "PDD 이슈 등록을 확인한다"
         required: true
         type: boolean
         default: false
@@ -17,64 +17,185 @@ jobs:
   import:
     if: ${{ inputs.confirm_import }}
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Import milestones, labels, and issues
+      - name: Import PDD roadmap
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
           python3 - <<'PYCODE'
-          import json, os, subprocess, sys
-          repo = os.environ['GH_REPO']
-          items = json.load(open('issues.json', encoding='utf-8'))
-          def gh(args, check=True):
-              p = subprocess.run(['gh', *args, '--repo', repo], text=True, capture_output=True)
-              if check and p.returncode:
-                  print(p.stderr or p.stdout, file=sys.stderr)
-                  raise SystemExit(p.returncode)
-              return p
-          existing_labels = {x['name'] for x in json.loads(gh(['label','list','--limit','200','--json','name']).stdout)}
-          labels = [
-              ('pdd-roadmap','5319e7','PDD roadmap item'),
-              ('blocked','d93f0b','Blocked by prerequisite verification'),
-              ('completed-before-roadmap','0e8a16','Reported completed before import'),
-          ]
-          for name,color,description in labels:
-              if name not in existing_labels:
-                  gh(['label','create',name,'--color',color,'--description',description])
-          milestones = json.loads(gh(['api',f'repos/{repo}/milestones?state=all&per_page=100']).stdout)
-          existing_milestones = {m['title'] for m in milestones}
-          for x in items:
-              m = x['milestone']
-              title = f"{m['version']} — {m['name']}"
-              if title not in existing_milestones:
-                  gh(['api','--method','POST',f'repos/{repo}/milestones','-f',f'title={title}','-f','state=open'])
-                  existing_milestones.add(title)
-          for x in items:
-              title = f"{x['id']} — {x['title']}"
-              found = gh(['issue','list','--state','all','--limit','1000','--search',f'{x["id"]} in:title','--json','title'], check=False)
-              if found.returncode == 0 and any(i['title'] == title for i in json.loads(found.stdout or '[]')):
-                  print(f"SKIP existing: {title}")
+          import json
+          import os
+          import sys
+          import urllib.error
+          import urllib.parse
+          import urllib.request
+
+          token = os.environ["GH_TOKEN"]
+          repo = os.environ["GH_REPO"]
+          base = f"https://api.github.com/repos/{repo}"
+
+          def api(method, path, data=None):
+              url = base + path
+              headers = {
+                  "Accept": "application/vnd.github+json",
+                  "Authorization": f"Bearer {token}",
+                  "X-GitHub-Api-Version": "2022-11-28",
+              }
+              body = None
+              if data is not None:
+                  headers["Content-Type"] = "application/json"
+                  body = json.dumps(data).encode()
+              req = urllib.request.Request(
+                  url, data=body, headers=headers, method=method
+              )
+              try:
+                  with urllib.request.urlopen(req, timeout=30) as response:
+                      raw = response.read()
+                      return json.loads(raw) if raw else None
+              except urllib.error.HTTPError as e:
+                  detail = e.read().decode(errors="replace")
+                  raise RuntimeError(
+                      f"GitHub API {method} {path}: HTTP {e.code}: {detail}"
+                  )
+
+          def get_all(path):
+              results = []
+              page = 1
+              while True:
+                  sep = "&" if "?" in path else "?"
+                  batch = api("GET", f"{path}{sep}per_page=100&page={page}")
+                  if not batch:
+                      break
+                  results.extend(batch)
+                  if len(batch) < 100:
+                      break
+                  page += 1
+              return results
+
+          with open("issues.json", encoding="utf-8") as f:
+              data = json.load(f)
+
+          if isinstance(data, dict):
+              issues = data.get("issues", [])
+              milestones = data.get("milestones", [])
+          else:
+              issues = data
+              milestones = []
+
+          if not issues:
+              sys.exit("ERROR: issues.json에 이슈 데이터가 없습니다.")
+
+          print(f"Repository: {repo}")
+          print(f"Issues to import: {len(issues)}")
+
+          existing_milestones = {
+              m["title"]: m["number"]
+              for m in get_all("/milestones?state=all")
+          }
+
+          for m in milestones:
+              title = m if isinstance(m, str) else m.get("title")
+              if not title or title in existing_milestones:
                   continue
-              m = x['milestone']
-              milestone = f"{m['version']} — {m['name']}"
-              labels_for_issue = ['pdd-roadmap']
-              if x['status'] == '!': labels_for_issue.append('blocked')
-              if x['status'] == 'x': labels_for_issue.append('completed-before-roadmap')
-              body = (x.get('body','').strip() + '\n\n---\n'
-                      + f"Roadmap ID: `{x['id']}`\nTarget milestone: `{milestone}`\n"
-                      + ('Initial roadmap status: Blocked by prerequisite verification' if x['status'] == '!' else
-                         'Initial roadmap status: Reported completed before roadmap; verify source/build before relying on closure' if x['status'] == 'x' else
-                         'Initial roadmap status: Open'))
-              cmd = ['issue','create','--title',title,'--body',body,'--milestone',milestone]
-              for label in labels_for_issue: cmd += ['--label',label]
-              result = gh(cmd)
-              url = result.stdout.strip()
-              print(f"CREATED: {title} {url}")
-              if x['status'] == 'x' and url:
-                  gh(['issue','close',url,'--comment','Roadmap import: marked completed in the source roadmap. Verify implementation evidence before treating this as confirmed.'])
-          print('PDD roadmap import finished.')
+              created = api("POST", "/milestones", {
+                  "title": title,
+                  "state": "open"
+              })
+              existing_milestones[title] = created["number"]
+              print(f"MILESTONE: {title}")
+
+          for issue in issues:
+              version = issue.get("milestone")
+              if isinstance(version, dict):
+                  milestone_title = version.get("title") or (
+                      f'{version.get("version", "")} — '
+                      f'{version.get("name", "")}'
+                  ).strip(" —")
+              else:
+                  milestone_title = version
+
+              if milestone_title and milestone_title not in existing_milestones:
+                  created = api("POST", "/milestones", {
+                      "title": milestone_title,
+                      "state": "open"
+                  })
+                  existing_milestones[milestone_title] = created["number"]
+                  print(f"MILESTONE: {milestone_title}")
+
+          existing_labels = {
+              x["name"] for x in get_all("/labels")
+          }
+
+          required_labels = [
+              ("pdd-roadmap", "5319e7", "PDD development roadmap"),
+              ("blocked", "d93f0b", "Blocked by prerequisite verification"),
+              ("reported-complete", "0e8a16", "Reported complete; verify evidence"),
+          ]
+
+          for name, color, description in required_labels:
+              if name not in existing_labels:
+                  api("POST", "/labels", {
+                      "name": name,
+                      "color": color,
+                      "description": description
+                  })
+                  existing_labels.add(name)
+
+          existing_issues = get_all("/issues?state=all")
+          existing_titles = {
+              x["title"] for x in existing_issues
+              if "pull_request" not in x
+          }
+
+          for item in issues:
+              issue_id = item.get("id", "")
+              title_text = item.get("title", "Untitled")
+              title = f"{issue_id} — {title_text}" if issue_id else title_text
+
+              if title in existing_titles:
+                  print(f"SKIP: {title}")
+                  continue
+
+              body = item.get("body", item.get("description", ""))
+              labels = ["pdd-roadmap"]
+              status = str(item.get("status", "")).lower()
+
+              if status in ("!", "blocked"):
+                  labels.append("blocked")
+              elif status in ("x", "done", "completed", "reported-complete"):
+                  labels.append("reported-complete")
+
+              body += (
+                  "\n\n---\n"
+                  f"Roadmap issue ID: {issue_id}\n"
+                  "Imported by the PDD roadmap workflow.\n"
+                  "Verify implementation evidence before marking complete."
+              )
+
+              payload = {
+                  "title": title,
+                  "body": body,
+                  "labels": labels
+              }
+
+              if milestone_title := item.get("milestone"):
+                  if isinstance(milestone_title, dict):
+                      milestone_title = milestone_title.get("title") or (
+                          f'{milestone_title.get("version", "")} — '
+                          f'{milestone_title.get("name", "")}'
+                      ).strip(" —")
+                  number = existing_milestones.get(milestone_title)
+                  if number:
+                      payload["milestone"] = number
+
+              created = api("POST", "/issues", payload)
+              existing_titles.add(title)
+              print(f"CREATED: #{created['number']} {title}")
+
+          print("PDD roadmap import finished.")
           PYCODE
