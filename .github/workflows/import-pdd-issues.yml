@@ -1,0 +1,80 @@
+name: Import PDD roadmap issues
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_import:
+        description: "실제로 GitHub 이슈 71개를 등록하려면 체크"
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  import:
+    if: ${{ inputs.confirm_import }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Import milestones, labels, and issues
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          python3 - <<'PYCODE'
+          import json, os, subprocess, sys
+          repo = os.environ['GH_REPO']
+          items = json.load(open('issues.json', encoding='utf-8'))
+          def gh(args, check=True):
+              p = subprocess.run(['gh', *args, '--repo', repo], text=True, capture_output=True)
+              if check and p.returncode:
+                  print(p.stderr or p.stdout, file=sys.stderr)
+                  raise SystemExit(p.returncode)
+              return p
+          existing_labels = {x['name'] for x in json.loads(gh(['label','list','--limit','200','--json','name']).stdout)}
+          labels = [
+              ('pdd-roadmap','5319e7','PDD roadmap item'),
+              ('blocked','d93f0b','Blocked by prerequisite verification'),
+              ('completed-before-roadmap','0e8a16','Reported completed before import'),
+          ]
+          for name,color,description in labels:
+              if name not in existing_labels:
+                  gh(['label','create',name,'--color',color,'--description',description])
+          milestones = json.loads(gh(['api',f'repos/{repo}/milestones?state=all&per_page=100']).stdout)
+          existing_milestones = {m['title'] for m in milestones}
+          for x in items:
+              m = x['milestone']
+              title = f"{m['version']} — {m['name']}"
+              if title not in existing_milestones:
+                  gh(['api','--method','POST',f'repos/{repo}/milestones','-f',f'title={title}','-f','state=open'])
+                  existing_milestones.add(title)
+          for x in items:
+              title = f"{x['id']} — {x['title']}"
+              found = gh(['issue','list','--state','all','--limit','1000','--search',f'{x["id"]} in:title','--json','title'], check=False)
+              if found.returncode == 0 and any(i['title'] == title for i in json.loads(found.stdout or '[]')):
+                  print(f"SKIP existing: {title}")
+                  continue
+              m = x['milestone']
+              milestone = f"{m['version']} — {m['name']}"
+              labels_for_issue = ['pdd-roadmap']
+              if x['status'] == '!': labels_for_issue.append('blocked')
+              if x['status'] == 'x': labels_for_issue.append('completed-before-roadmap')
+              body = (x.get('body','').strip() + '\n\n---\n'
+                      + f"Roadmap ID: `{x['id']}`\nTarget milestone: `{milestone}`\n"
+                      + ('Initial roadmap status: Blocked by prerequisite verification' if x['status'] == '!' else
+                         'Initial roadmap status: Reported completed before roadmap; verify source/build before relying on closure' if x['status'] == 'x' else
+                         'Initial roadmap status: Open'))
+              cmd = ['issue','create','--title',title,'--body',body,'--milestone',milestone]
+              for label in labels_for_issue: cmd += ['--label',label]
+              result = gh(cmd)
+              url = result.stdout.strip()
+              print(f"CREATED: {title} {url}")
+              if x['status'] == 'x' and url:
+                  gh(['issue','close',url,'--comment','Roadmap import: marked completed in the source roadmap. Verify implementation evidence before treating this as confirmed.'])
+          print('PDD roadmap import finished.')
+          PYCODE
