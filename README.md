@@ -1,6 +1,7 @@
 # PDD — Physical Destruction and Deforming
 
-PDD is a planned Minecraft Java addon for Create Aeronautics, using Sable's physics system as the collision source. It is not yet a complete gameplay addon.
+PDD is a planned Minecraft Java addon for Create Aeronautics, using Sable's physics system as the collision source. It is not yet a complete gameplay addon. 
+PDD made by only CHAT GPT
 
 ## Version 0.1.3
 
