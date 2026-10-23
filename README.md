@@ -1,138 +1,72 @@
-PDD — Physical Destruction and Deforming
 
-PDD는 Create Aeronautics의 물리 구조물과 Minecraft 월드 블록에 충돌 기반
-손상, 영구 변형, 균열 및 파괴 시스템을 추가하기 위해 개발 중인
-애드온이다. 충돌 데이터의 원천으로 Sable 물리 시스템을 활용하는 것을
-목표로 한다.
+# PDD — Physical Destruction and Deforming
 
-  개발 상태: PDD 0.1.3은 계산 모델과 개발 기반을 갖춘 프로토타입이다.
-  게임 안에서 충돌을 자동으로 감지해 블록을 파괴하거나 변형하는 완성된
-  플레이 가능 버전은 아니다.
+**PDD** is a Minecraft Java addon project for **Create Aeronautics**, designed to implement physical block damage, deformation, and destruction using the Sable physics system.
 
-프로젝트 상태
+> **Current status:** Development prototype. PDD is not yet a playable destruction and deformation addon.
 
--   현재 개발 기준 버전: 0.1.3
--   설계 기준: PDD 설계 초안 3.3.1
--   다음 단계: 0.2.0 — 물리 API 호출 경로 검증
--   저장소:
-    https://github.com/kkddee0607/Create-Aeronautics-Pysical-Destructive-and-Deforming
+## Version 0.1.3
 
-대상 환경
+**Target environment:** Minecraft Java 1.21.1 · Java 21 · NeoForge 21.1.172 · Create 6.0.10 · Create Aeronautics 1.3.2 · Sable 2.0.6
 
-  구성 요소                대상 버전
-  ------------------------ -----------
-  Minecraft Java Edition   1.21.1
-  Java                     21
-  NeoForge                 21.1.172
-  Create                   6.0.10
-  Create Aeronautics       1.3.2
-  Sable                    2.0.6
+Version 0.1.3 aligns the calculation model with **PDD Design Draft 3.3.1** and documents the unresolved API integration requirements.
 
-외부 모드 API와의 실제 런타임 연동은 아직 검증 중이다. 위 버전 표는 개발
-대상 환경을 나타내며, 완성된 게임 내 호환성이 모두 확인되었다는 뜻은
-아니다.
+## Implemented Features
 
-0.1.3에 포함된 기능
+- Minecraft 1.21.1 and NeoForge development project structure.
+- Compact material properties:
+  - Hardness: `0–255`
+  - Ductility: `0–100%`
+  - Elasticity: `0–100%`
+- Damage, deformation, and crack values constrained to `0–255`.
+- A 24-bit packing helper for compact block-state data.
+- Hardness-based direct damage attenuation with explicit curve parameters.
+- Separation of direct damage and deformation calculations.
+- Elasticity-based stress transfer to neighboring blocks.
+- API-independent `ImpactSample` data model.
+- Explicit impact-energy calibration helper.
+- Unit tests for value boundaries, hardness response, and the independence of direct damage from ductility.
+- API and implementation status documentation.
 
--   Minecraft 1.21.1 / Java 21 / NeoForge 프로젝트 기반
--   물성 모델: 경도 0..255, 연성 및 탄성 0..100%
--   블록별 손상률·변형률·균열 시각값을 각각 0..255 범위로 다루는 모델
--   상태 필드의 24비트 패킹 보조 기능
--   경도 기반 직접 손상 계산 모델
--   연성을 직접 손상 감소 계수로 사용하지 않도록 역할 분리
--   탄성을 이웃 블록으로 전달할 응력 비율에 사용하는 기초 계산
--   Sable API에 종속되지 않는 ImpactSample 입력 모델
--   에너지 보정용 계산 보조 기능
--   경계값, 경도 반응 및 연성이 직접 손상에 영향을 주지 않는 불변 조건을
-    확인하는 단위 테스트
--   API 및 인수 참조 문서와 구현 상태 기록
+## Not Yet Implemented
 
-아직 구현되지 않은 기능
+The following gameplay and runtime integration features remain unimplemented:
 
-현재 버전은 게임플레이 연동 전 단계다. 다음 기능은 아직 완성된 기능으로
-제공되지 않는다.
+- Sable collision callback registration and verified collision-event handling.
+- Collision-to-damage processing pipeline.
+- Global collision observation for ordinary Minecraft blocks.
+- Sparse per-world damage-state storage and persistence.
+- Actual block destruction and deformation.
+- Neighbor stress propagation.
+- Explosion and projectile integration.
+- Crack visualization and damage recovery.
+- Collider refresh after block changes.
+- In-game compatibility and performance validation.
 
--   Sable 충돌 콜백의 실제 등록 및 충돌 데이터 수집
--   일반 월드 블록을 포함하는 전역 충돌 관측
--   충돌 에너지에서 블록 손상으로 이어지는 런타임 처리 파이프라인
--   서버 권위 손상 처리 큐 및 안전한 월드 변경
--   실제 블록 파괴, 드롭 정책 및 영구 변형
--   이웃 블록으로의 응력 전파를 게임 월드에 적용하는 처리
--   월드별 희소 손상 상태 저장, 저장·로드 및 클라이언트 동기화
--   균열 렌더링과 시각 효과 회복
--   폭발·투사체·Create 대포 등의 추가 충격원 연동
--   게임 내 호환성, 회귀 및 성능 검증
+These features depend on resolving the API and runtime integration requirements documented in the project.
 
-설계상 핵심 규칙
+## Design Invariants
 
--   경도: 직접 손상 저항 계산에 관여한다.
--   연성: 영구 변형의 허용량과 반응을 결정한다. 직접 손상을 감소시키는
-    계수로 사용하지 않는다.
--   탄성: PDD가 이웃 블록으로 전달할 응력의 비율을 결정한다. Sable의
-    반발 계수와 같은 의미가 아니다.
--   파괴 임계값: 경도와 별개의 규칙으로 관리한다.
--   충돌 입력: ImpactSample은 PDD 내부의 데이터 모델이며 Sable 이벤트
-    타입이 아니다.
--   충돌 속도: impactVelocity는 그 자체로 에너지가 아니다.
-    단위·부호·측정 시점 및 좌표계가 검증되기 전에는 에너지 계산에 직접
-    사용하지 않는다.
--   월드 변경: 물리 콜백에서 서버 월드를 즉시 변경하지 않는다. 안전한
-    실행 시점과 처리 경로를 확인한 뒤 연결한다.
--   기존 충돌 응답: Sable, Create, Create Aeronautics의 기존 충돌 동작을
-    보존한다. 충돌을 무효화하는 임시 우회 방식으로 연동하지 않는다.
--   범위 구분: 별도의 최적화 애드온이 담당하는 경량화 변환 및 재조립
-    동작은 PDD의 범위에 포함하지 않는다.
+The following rules must be preserved during development:
 
-개발 및 검증 현황
+1. **Hardness** affects direct damage.
+2. **Ductility** controls deformation behavior and must not directly reduce damage.
+3. **Elasticity** controls PDD's stress transfer to neighboring blocks; it is not Sable's collision restitution.
+4. The destruction threshold remains separate from hardness.
+5. `ImpactSample` is a PDD data model, not a native Sable event type.
+6. Raw Sable `impactVelocity` must not be treated as impact energy without verifying its semantics and calibrating the conversion.
+7. Physics callbacks must not modify the world until a safe server-side update path has been established.
+8. Existing Sable, Create, and Create Aeronautics collision responses must be preserved.
+9. `CollisionResult.NONE` must not be used as a shortcut to replace existing collision behavior.
+10. PDD must not implement the separate optimization addon's lightweight conversion and reassembly behavior.
 
-GitHub Actions의 PDD Build and Test 워크플로는 2026-10-23에 실행된 최신
-확인 기록에서 성공했다. 해당 실행에서는 다음 단계가 모두 성공했다.
+## Build and Test
 
--   Java 21 설정
--   Gradle Wrapper 실행 권한 설정
--   ./gradlew test --no-daemon
--   ./gradlew build --no-daemon
+The project uses the Gradle Wrapper.
 
-성공 기록:
-https://github.com/kkddee0607/Create-Aeronautics-Pysical-Destructive-and-Deforming/actions/runs/39919641389
+### Linux / macOS
 
-이 결과는 해당 커밋의 자동 테스트 및 빌드가 성공했다는 의미다. 게임
-실행, Sable 충돌 콜백, 실제 블록 파괴·변형이 검증되었다는 의미는 아니다.
-
-빌드 및 테스트
-
-필요 환경은 JDK 21과 Gradle이 의존성을 내려받을 수 있는 네트워크
-연결이다. 저장소에 포함된 Gradle Wrapper를 사용한다.
-
-Linux / GitHub Codespaces:
-
-    chmod +x gradlew
-    ./gradlew test --no-daemon
-    ./gradlew build --no-daemon
-
-Windows:
-
-    gradlew.bat test --no-daemon
-    gradlew.bat build --no-daemon
-
-다음 개발 단계
-
-다음 단계는 0.2.0 — 물리 API 호출 경로 검증이다. 구현을 진행하기 전에
-다음 항목을 실제 대상 버전에서 확인한다.
-
-1.  Sable 네이티브 충돌 콜백의 발생 조건과 호출 횟수
-2.  impactVelocity의 단위·부호·측정 시점
-3.  충돌 위치와 블록 좌표의 좌표계 변환
-4.  상대 블록 위치가 없는 충돌의 의미와 안전한 처리
-5.  기존 Sable 콜백의 충돌 응답 보존
-6.  물리 콜백 이후 서버 월드를 변경할 안전한 시점
-7.  블록 변경 후 Sable collider가 갱신되는 경로
-
-이 항목을 확인한 뒤 검증된 경로에 한해서 충돌 어댑터와 게임플레이 처리를
-구현한다.
-
-라이선스
-
-라이선스와 재배포 조건은 저장소의 LICENSE 파일을 확인한다. 제3자 모드의
-바이너리나 에셋을 재배포하기 전에는 각 upstream 라이선스와 호환성을
-별도로 확인해야 한다.
+```bash
+chmod +x gradlew
+./gradlew test --no-daemon
+./gradlew build --no-daemon
