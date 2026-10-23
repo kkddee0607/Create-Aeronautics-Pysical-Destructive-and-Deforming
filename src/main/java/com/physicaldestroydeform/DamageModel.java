@@ -1,81 +1,79 @@
 package com.physicaldestroydeform;
 
 /**
- * Pure gameplay calculations for PDD.
+ * Pure calculations for PDD's early prototype.
  *
- * <p>These functions do not assume that a Sable callback value is energy. A verified
- * integration layer must first create an {@link ImpactSample} with calibrated values.</p>
+ * <p>These are gameplay tuning rules, not SI-unit material physics. They are not yet
+ * connected to Sable collision events.</p>
  */
 public final class DamageModel {
+    /**
+     * Maximum reduction applied independently by hardness and ductility.
+     * A cap below 1 prevents either property from making a block completely immune.
+     */
+    public static final double MAX_REDUCTION_PER_PROPERTY = 0.90;
+
     private DamageModel() {}
 
     /**
-     * Applies the PDD hardness curve to already-normalized base damage.
-     * Ductility deliberately does not reduce direct damage; it belongs to the separate
-     * permanent-deformation calculation. The curve parameters are explicit because the
-     * API/design evidence does not yet establish calibrated defaults.
+     * Calculates local damage before accumulation.
      *
-     * @param impactDamage finite normalized base damage
-     * @param material material properties for the struck block
-     * @param minimumHardnessFactor minimum fraction of base damage retained at hardness 255,
-     *                              in the inclusive range [0, 1]
-     * @param gamma positive hardness-curve exponent
-     * @return damage after hardness attenuation
+     * @param impactDamage finite, nonnegative normalized damage input
+     * @param material block-type material properties
+     * @return nonnegative effective damage
      */
-    public static double effectiveLocalDamage(
-            double impactDamage,
-            MaterialProperties material,
-            double minimumHardnessFactor,
-            double gamma) {
+    public static double effectiveLocalDamage(double impactDamage, MaterialProperties material) {
         if (material == null) throw new IllegalArgumentException("material must not be null");
-        if (!Double.isFinite(minimumHardnessFactor)
-                || minimumHardnessFactor < 0.0 || minimumHardnessFactor > 1.0) {
-            throw new IllegalArgumentException("minimumHardnessFactor must be finite and in [0, 1]");
-        }
-        if (!Double.isFinite(gamma) || gamma <= 0.0) {
-            throw new IllegalArgumentException("gamma must be finite and > 0");
-        }
-        if (!Double.isFinite(impactDamage) || impactDamage <= 0.0) return 0.0;
+        if (!Double.isFinite(impactDamage) || impactDamage <= 0) return 0;
 
-        double normalizedHardness = material.hardnessNormalized();
-        double hardnessFactor = minimumHardnessFactor
-                + (1.0 - minimumHardnessFactor) * Math.pow(1.0 - normalizedHardness, gamma);
-        return impactDamage * hardnessFactor;
+        double hardnessReduction = material.hardnessNormalized() * MAX_REDUCTION_PER_PROPERTY;
+        double ductilityReduction = material.ductility() * MAX_REDUCTION_PER_PROPERTY;
+        return impactDamage * (1.0 - hardnessReduction) * (1.0 - ductilityReduction);
     }
 
     /**
-     * Calculates the PDD share of residual stress passed to neighboring blocks.
-     * This is an addon rule, not Sable's physical restitution coefficient.
+     * Calculates the share of residual stress passed to neighboring blocks.
+     * Elasticity is an addon rule and is not Sable's physical restitution coefficient.
      */
     public static double neighborStress(double residualStress, MaterialProperties material) {
         if (material == null) throw new IllegalArgumentException("material must not be null");
-        if (!Double.isFinite(residualStress) || residualStress <= 0.0) return 0.0;
+        if (!Double.isFinite(residualStress) || residualStress <= 0) return 0;
         return residualStress * (1.0 - material.elasticity());
     }
 
-    /**
-     * Converts impact energy into normalized base damage using an explicit calibration.
-     * This does not infer units or convert a raw Sable callback velocity to energy.
-     */
-    public static double baseDamageFromEnergy(ImpactSample impact, double energyPerDamageUnit) {
-        if (impact == null) throw new IllegalArgumentException("impact must not be null");
-        if (!Double.isFinite(energyPerDamageUnit) || energyPerDamageUnit <= 0.0) {
-            throw new IllegalArgumentException("energyPerDamageUnit must be finite and > 0");
-        }
-        if (!impact.hasUsableImpact()) return 0.0;
-        return impact.impactEnergy() / energyPerDamageUnit;
+/**
+ * Converts impact energy into a normalized base-damage input.
+ *
+ * <p>{@code energyPerDamageUnit} is a gameplay calibration parameter, not a physical
+ * constant. This method intentionally does not infer a Sable API or assume a specific
+ * energy unit. A caller must supply energy and calibration in matching units.</p>
+ *
+ * @param impact a validated, API-independent impact sample
+ * @param energyPerDamageUnit positive energy required for one base damage unit
+ * @return normalized base damage, or zero for a zero-energy/non-impact sample
+ */
+public static double baseDamageFromEnergy(ImpactSample impact, double energyPerDamageUnit) {
+    if (impact == null) throw new IllegalArgumentException("impact must not be null");
+    if (!Double.isFinite(energyPerDamageUnit) || energyPerDamageUnit <= 0.0) {
+        throw new IllegalArgumentException("energyPerDamageUnit must be finite and > 0");
     }
+    if (!impact.hasUsableImpact()) return 0.0;
+    return impact.impactEnergy() / energyPerDamageUnit;
+}
 
     /** Quantizes positive damage upward to an unsigned-byte-compatible 0..255 value. */
     public static int quantizeDamage(double damage) {
-        if (!Double.isFinite(damage) || damage <= 0.0) return 0;
+        if (!Double.isFinite(damage) || damage <= 0) return 0;
         return (int) Math.min(255, Math.ceil(damage));
     }
 
-    /** Converts normalized damage into a bounded increment for the stored damage meter. */
+    /**
+     * Converts normalized damage into an increment for the stored 0..255 damage meter.
+     * This mapping is a prototype rule and must be tuned against actual collision data.
+     */
     public static int damageIncrement(double effectiveDamage, double damageScale) {
-        if (!Double.isFinite(effectiveDamage) || effectiveDamage <= 0.0
-                || !Double.isFinite(damageScale) || damageScale <= 0.0) {
+        if (!Double.isFinite(effectiveDamage) || effectiveDamage <= 0
+                || !Double.isFinite(damageScale) || damageScale <= 0) {
             return 0;
         }
         return quantizeDamage(effectiveDamage * damageScale);

@@ -5,14 +5,14 @@ import net.neoforged.fml.common.Mod;
 /**
  * PDD mod entry point.
  *
- * <p>Version 0.1.3 aligns the damage model with design draft 3.3.1. Runtime Sable collision
- * integration remains disabled until the documented API blockers are verified.</p>
+ * <p>Version 0.2.0 records and tests API-verification boundaries. Runtime Sable collision
+ * integration remains disabled until callback semantics and safe processing are verified.</p>
  */
 @Mod(PhysicalDestroyDeform.MOD_ID)
 public final class PhysicalDestroyDeform {
     public static final String MOD_ID = "physical_destroy_deform";
 
     public PhysicalDestroyDeform() {
-        // Runtime hooks are intentionally not registered until the exact Sable API is verified.
+        // Runtime hooks remain disabled until the API gates documented for 0.2.0 are verified.
     }
 }
