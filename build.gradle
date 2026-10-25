@@ -6,18 +6,30 @@ plugins {
 group = 'com.physicaldestroydeform'
 version = '0.2.0-debug'
 
-base { archivesName = 'physical-destroy-deform' }
+base {
+    archivesName = 'physical-destroy-deform'
+}
 
 java.toolchain.languageVersion = JavaLanguageVersion.of(21)
 
 neoForge {
     version = '21.1.172'
+
     runs {
-        client { client() }
-        server { server(); programArgument '--nogui' }
+        client {
+            client()
+        }
+
+        server {
+            server()
+            programArgument '--nogui'
+        }
     }
+
     mods {
-        physical_destroy_deform { sourceSet sourceSets.main }
+        physical_destroy_deform {
+            sourceSet sourceSets.main
+        }
     }
 }
 
@@ -27,6 +39,12 @@ repositories {
 
 dependencies {
     testImplementation 'org.junit.jupiter:junit-jupiter:5.11.4'
+
+    // SLF4J API required by PddDiagnosticsTest.
+    testImplementation 'org.slf4j:slf4j-api:2.0.16'
+
+    // Logging provider for test execution.
+    testRuntimeOnly 'org.slf4j:slf4j-simple:2.0.16'
 }
 
 tasks.named('test', Test).configure {
