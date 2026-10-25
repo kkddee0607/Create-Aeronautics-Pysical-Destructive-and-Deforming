@@ -1,57 +1,41 @@
-# PDD — Physical Destruction and Deforming
+# PDD 0.2.0-debug — Diagnostic Source Package
 
-**PDD 0.2.0** is a development-stage Minecraft Java addon scaffold for Create Aeronautics, intended to use Sable physics to drive physical block damage, deformation and destruction.
+**Target:** Minecraft Java 1.21.1 · Java 21 · NeoForge 21.1.x · Create 6.0.10 · Create Aeronautics 1.3.2 · Sable 2.0.6  
+**Design authority:** PDD development draft 3.3.1  
+**Purpose:** Log observable checks for the core, API-independent PDD models that actually exist in 0.2.0.
 
-> **Current status:** API-verification and diagnostics scaffold, not yet a playable destruction/deformation addon. Runtime damage is intentionally disabled.
+> This is a diagnostic build, not a gameplay release. Startup self-tests use synthetic inputs. They do not prove that a live collision occurred or that blocks are damaged in-game.
 
-## Target environment
+## What this build records
 
-- Minecraft Java 1.21.1
-- Java 21
-- NeoForge 21.1.172
-- Create 6.0.10
-- Create Aeronautics 1.3.2
-- Sable 2.0.6
+`latest.log` receives `[PDD-DIAG]` entries for mod startup and synthetic smoke checks of:
 
-## What is included
+- material property validation (hardness 0–255, ductility/elasticity percent 0–100)
+- local damage and neighbor stress model calculations
+- `ImpactSample` validation and energy-to-base-damage conversion using a synthetic calibration
+- `BlockDamageState` byte-range storage and 24-bit pack/unpack round-trip
+- bounded `ObservationBuffer` behavior and signed collision-velocity preservation
+- a summary status plus explicit runtime integration limitations
 
-- Validated, API-independent impact/material/state calculation models from the 0.1.x prototype.
-- Hardness, ductility and elasticity role separation consistent with design draft 3.3.1.
-- `CollisionObservation`, preserving the coordinate-frame label and signed callback velocity without interpreting it as energy.
-- `ObservationBuffer`, which is bounded and counts dropped diagnostic observations.
-- Unit tests for observation validation and bounded buffering.
-- API verification and runtime experiment plans under `docs/`.
+## What is not implemented or claimed
 
-## Not implemented
+- Sable native collision callback registration and live callback counter
+- block/material property registry or automatic property inference
+- conversion of Sable callback values to calibrated impact energy
+- damage accumulation driven by a real collision
+- world mutation, destruction, deformation, neighbor stress propagation, persistence, crack rendering/sync, or collider refresh
 
-- Sable native collision callback registration/adapter.
-- In-game callback counters and collision diagnostics.
-- Runtime event deduplication.
-- Server-world mutation queue.
-- Sparse persistent damage state, block destruction, deformation, stress propagation, explosions/projectiles, crack visuals/sync, or collider refresh.
+The `RUNTIME_INTEGRATION` log deliberately records these gates as `NOT_IMPLEMENTED` / `DISABLED`; synthetic smoke checks must not be confused with gameplay evidence.
 
-These are intentionally gated while API-01 through API-08 remain unverified in the target game. Sable's block-scoped callback selection is not a global collision feed; the documented impact-position frame can vary; `impactVelocity` is normal velocity, not energy, and its units/sign/timing still need runtime confirmation.
+## Build
 
-## Build and tests
-
-With JDK 21 and network access to Gradle Plugin Portal, Maven Central and NeoForge Maven:
+Requires JDK 21, Gradle 8.10.2, and internet access to Gradle Plugin Portal, Maven Central, and NeoForge Maven:
 
 ```bash
-./gradlew test --no-daemon
-./gradlew build --no-daemon
+gradle test --no-daemon
+gradle build --no-daemon
 ```
 
-The repository's latest inspected CI run for 0.1.3 succeeded, but this 0.2.0 source package must pass CI on its own before it can be described as a verified build.
+The Gradle wrapper scripts and wrapper JAR are not included in this ZIP. If you restore `gradlew`, `gradlew.bat`, `gradle/wrapper/gradle-wrapper.jar`, and `gradle/wrapper/gradle-wrapper.properties` from the repository, use `./gradlew` instead.
 
-## Design invariants
-
-1. Hardness affects direct damage.
-2. Ductility does not reduce direct damage.
-3. PDD elasticity controls stress transfer; it is not Sable restitution.
-4. Destruction threshold is separate from hardness.
-5. Raw Sable `impactVelocity` is never treated as impact energy without verified units and calibration.
-6. Physics callbacks must not mutate the world at an unverified processing phase.
-7. Existing Sable/Create/Aeronautics collision responses must be preserved.
-8. This addon must not implement the separate lightweight conversion/reassembly optimization addon.
-
-See `docs/PDD-0.2.0-API-VERIFICATION-AND-DIAGNOSTICS.md` and `docs/PDD-0.2.0-ROADMAP-REVIEW.md`.
+This ZIP contains the Java project source, model tests, design/API reference, and Gradle project configuration. The binary Gradle wrapper JAR is not included, so use a locally installed Gradle 8.10.2 (or restore `gradle/wrapper/gradle-wrapper.jar` from the repository) to build. Build and in-game execution were not possible in this packaging environment; confirm a successful build in GitHub Actions before use.

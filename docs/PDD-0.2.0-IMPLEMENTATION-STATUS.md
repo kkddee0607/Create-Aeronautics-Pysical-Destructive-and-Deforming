@@ -1,45 +1,23 @@
-# PDD 0.2.0 Implementation Status
+# PDD 0.2.0 — Implementation Status
 
-## Baseline and validation evidence
+## Implemented model-only components
 
-- Base source: PDD 0.1.3 main branch.
-- The latest inspected GitHub Actions run (2026-10-23) succeeded for commit `5cad9efa598c8e7b202a7fd2a73c2ed45dbeb7a6`.
-- Its single job completed `./gradlew test --no-daemon` and `./gradlew build --no-daemon` successfully.
-- This validates that commit's build/tests, not in-game physics behavior.
-
-## Included in this 0.2.0 package
-
-- Version metadata advanced to 0.2.0.
-- API-independent `CollisionObservation` record preserves the coordinate-frame label and signed `impactVelocity`; validates coordinate and velocity finiteness and nullable-other-block consistency.
-- `ObservationBuffer` provides bounded diagnostic buffering with explicit overflow counts.
-- Unit tests cover input invariants, signed velocity preservation, bounded buffering, immutable snapshots and drain semantics.
-- API call-path and runtime experiment gates are documented.
+- `MaterialProperties`: validated hardness 0–255 and ductility/elasticity integer percentages.
+- `ImpactSample`: validated, API-independent impact values; it is not a Sable event.
+- `DamageModel`: pure prototype damage/stress math, not SI-unit material physics and not connected to Sable collision events.
+- `BlockDamageState`: unsigned-byte-compatible damage/deformation/crack values and a 24-bit packing helper.
+- `CollisionObservation`, `ObservationKey`, `ObservationBuffer`: API-independent diagnostic primitives, not registered to a live callback.
+- `PddDiagnostics`: debug-only synthetic startup self-test with `[PDD-DIAG]` log lines.
 
 ## Explicitly not implemented
 
-- Sable collision adapter or native callback registration.
-- Runtime callback counters/diagnostics wired into Sable.
-- Native callback cadence and deduplication policy.
-- Server world-mutation queue integration.
-- Material registry/property inference, persistent sparse damage storage, block destruction, deformation, neighbor stress propagation, explosions/projectiles, rendering/synchronization, collider refresh integration.
+Sable callback adapter/registration, live collision counters, material registry/property inference, event deduplication, calibrated collision energy, server mutation queue, persistent damage storage, destruction, deformation, stress propagation, explosions/projectiles, crack rendering/sync and collider refresh.
 
-These omissions are intentional: runtime integration would be speculative while PDD-030–036 remain unresolved.
-
-## Design invariants retained
+## Design invariants
 
 1. Hardness affects direct damage.
-2. Ductility does not directly attenuate direct damage.
-3. PDD elasticity controls PDD stress transfer; it is not Sable restitution.
-4. Destruction threshold remains separate from hardness.
-5. `ImpactSample` is a PDD type, not a native Sable event.
-6. Raw `impactVelocity` is not impact energy without unit/calibration evidence.
-7. World state is not mutated from an unverified callback phase.
-8. Existing Sable/Create/Aeronautics collision responses are preserved.
-9. `CollisionResult.NONE` is not used to override existing behavior.
-10. This addon does not implement the separate lightweight conversion/reassembly optimization addon.
-
-## Build status
-
-A prior commit has a successful CI run: https://github.com/kkddee0607/Create-Aeronautics-Pysical-Destructive-and-Deforming/actions/runs/39922897915
-
-The new 0.2.0 package still needs `./gradlew test --no-daemon` and `./gradlew build --no-daemon` executed against its own exact source before being called a verified build artifact.
+2. Ductility does not directly attenuate direct damage in the design; current prototype equation must be reviewed against design draft 3.3.1 before gameplay activation.
+3. PDD elasticity controls PDD stress transfer, not Sable restitution.
+4. Raw Sable `impactVelocity` is not impact energy without unit/calibration evidence.
+5. Never mutate the world from an unverified physics callback phase.
+6. Never override Sable/Create/Aeronautics collision responses as an observation shortcut.

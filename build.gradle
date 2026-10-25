@@ -4,7 +4,7 @@ plugins {
 }
 
 group = 'com.physicaldestroydeform'
-version = '0.2.0'
+version = '0.2.0-debug'
 
 base { archivesName = 'physical-destroy-deform' }
 
@@ -37,7 +37,7 @@ jar {
     manifest {
         attributes([
             'Specification-Title': 'Physical Destruction and Deforming',
-            'Specification-Version': '0.2.0',
+            'Specification-Version': '0.2.0-debug',
             'Implementation-Title': project.name,
             'Implementation-Version': project.version
         ])

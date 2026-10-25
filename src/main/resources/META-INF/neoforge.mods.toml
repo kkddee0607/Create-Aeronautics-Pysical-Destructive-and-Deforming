@@ -4,10 +4,10 @@ license="MIT"
 
 [[mods]]
 modId="physical_destroy_deform"
-version="0.2.0"
+version="0.2.0-debug"
 displayName="Create Aeronautics: Physical Destruction and Deforming"
 authors="PDD contributors"
-description='''PDD 0.2.0 API verification and diagnostics scaffold. Runtime collision damage remains disabled pending target-version physics callback, coordinate, thread-safety, and collider-refresh verification.'''
+description='''PDD 0.2.0 diagnostic build. Runs synthetic API-independent model checks at startup. Runtime Sable collision integration and gameplay destruction/deformation remain disabled.'''
 
 [[dependencies.physical_destroy_deform]]
 modId="neoforge"
