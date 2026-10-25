@@ -33,7 +33,7 @@ jobs:
       - name: Upload JAR artifact
         uses: actions/upload-artifact@v4
         with:
-          name: PDD-0.2.0-JAR
+          name: PDD-0.2.0-debug
           path: build/libs/*.jar
           if-no-files-found: error
           retention-days: 14
