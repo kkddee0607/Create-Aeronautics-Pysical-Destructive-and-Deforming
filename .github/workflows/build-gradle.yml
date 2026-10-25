@@ -1,10 +1,6 @@
-name: PDD Build and Test
+name: PDD Manual Build
 
 on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -12,6 +8,7 @@ permissions:
 
 jobs:
   build:
+    name: Test and Build PDD JAR
     runs-on: ubuntu-latest
 
     steps:
@@ -30,5 +27,13 @@ jobs:
       - name: Run JUnit tests
         run: ./gradlew test --no-daemon
 
-      - name: Build PDD
+      - name: Build JAR
         run: ./gradlew build --no-daemon
+
+      - name: Upload JAR artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PDD-0.2.0-JAR
+          path: build/libs/*.jar
+          if-no-files-found: error
+          retention-days: 14
