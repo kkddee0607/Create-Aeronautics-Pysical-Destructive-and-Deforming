@@ -1,151 +1,151 @@
 name: Apply PDD ZIP
+ 
+on: push: paths: - 'incoming/\*.zip'
+ 
+permissions: contents: write
+ 
+jobs: sync-project: runs-on: ubuntu-latest
+ 
+```
+steps:
+  - name: Checkout repository
+    uses: actions/checkout@v4
 
-on:
-  push:
-    paths:
-      - 'incoming/*.zip'
+  - name: Validate and sync project ZIP
+    id: sync
+    shell: bash
+    run: |
+      python3 - <<'PY'
+      from pathlib import Path, PurePosixPath
+      import os
+      import shutil
+      import tempfile
+      import zipfile
 
-permissions:
-  contents: write
+      incoming = Path("incoming")
+      archives = list(incoming.glob("*.zip"))
 
-jobs:
-  sync-project:
-    runs-on: ubuntu-latest
+      if len(archives) == 0:
+          print("No ZIP file found. Nothing to synchronize.")
+          raise SystemExit(0)
 
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      if len(archives) != 1:
+          raise SystemExit(
+              f"ERROR: incoming/ must contain exactly one ZIP; found {len(archives)}"
+          )
 
-      - name: Validate and sync project ZIP
-        id: sync
-        shell: bash
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path, PurePosixPath
-          import os
-          import shutil
-          import tempfile
-          import zipfile
+      archive = archives[0]
+      archive_name = archive.name
 
-          incoming = Path("incoming")
-          archives = list(incoming.glob("*.zip"))
+      with tempfile.TemporaryDirectory() as temp:
+          extracted = Path(temp) / "extracted"
+          extracted.mkdir()
 
-          if len(archives) != 1:
+          with zipfile.ZipFile(archive) as zf:
+              for item in zf.infolist():
+                  name = item.filename.replace("\\", "/")
+                  path = PurePosixPath(name)
+
+                  if path.is_absolute() or ".." in path.parts:
+                      raise SystemExit(
+                          f"ERROR: unsafe ZIP path: {item.filename}"
+                      )
+
+                  if not path.parts:
+                      continue
+
+                  destination = extracted.joinpath(*path.parts)
+
+                  if item.is_dir():
+                      destination.mkdir(parents=True, exist_ok=True)
+                  else:
+                      destination.parent.mkdir(
+                          parents=True, exist_ok=True
+                      )
+                      with zf.open(item) as source:
+                          with destination.open("wb") as target:
+                              shutil.copyfileobj(source, target)
+
+          candidates = [
+              p for p in [extracted, *extracted.rglob("*")]
+              if p.is_dir()
+              and (p / "build.gradle").is_file()
+              and (p / "settings.gradle").is_file()
+              and (p / "src/main/java").is_dir()
+          ]
+
+          if len(candidates) != 1:
               raise SystemExit(
-                  f"ERROR: incoming/ must contain exactly one ZIP; found {len(archives)}"
+                  "ERROR: ZIP must contain exactly one recognizable "
+                  "Gradle Java project root with build.gradle, "
+                  "settings.gradle, and src/main/java/"
               )
 
-          archive = archives[0]
-          archive_name = archive.name
+          source_root = candidates[0]
+          repository = Path.cwd()
 
-          with tempfile.TemporaryDirectory() as temp:
-              extracted = Path(temp) / "extracted"
-              extracted.mkdir()
+          protected = {
+              ".git",
+              ".github",
+              "incoming",
+              "gradlew",
+              "gradlew.bat",
+              "gradle",
+          }
 
-              with zipfile.ZipFile(archive) as zf:
-                  for item in zf.infolist():
-                      name = item.filename.replace("\\", "/")
-                      path = PurePosixPath(name)
+          def remove_path(path):
+              if path.is_dir() and not path.is_symlink():
+                  shutil.rmtree(path)
+              else:
+                  path.unlink()
 
-                      if path.is_absolute() or ".." in path.parts:
-                          raise SystemExit(
-                              f"ERROR: unsafe ZIP path: {item.filename}"
-                          )
+          def sync_directory(source, target, is_root=False):
+              source_names = {p.name for p in source.iterdir()}
 
-                      if not path.parts:
-                          continue
+              for existing in list(target.iterdir()):
+                  if is_root and existing.name in protected:
+                      continue
+                  if existing.name not in source_names:
+                      remove_path(existing)
 
-                      destination = extracted.joinpath(*path.parts)
+              for item in source.iterdir():
+                  if is_root and item.name in protected:
+                      continue
 
-                      if item.is_dir():
-                          destination.mkdir(parents=True, exist_ok=True)
-                      else:
-                          destination.parent.mkdir(
-                              parents=True, exist_ok=True
-                          )
-                          with zf.open(item) as source:
-                              with destination.open("wb") as target:
-                                  shutil.copyfileobj(source, target)
+                  destination = target / item.name
 
-              candidates = [
-                  p for p in [extracted, *extracted.rglob("*")]
-                  if p.is_dir()
-                  and (p / "build.gradle").is_file()
-                  and (p / "settings.gradle").is_file()
-                  and (p / "src/main/java").is_dir()
-              ]
-
-              if len(candidates) != 1:
-                  raise SystemExit(
-                      "ERROR: ZIP must contain exactly one recognizable "
-                      "Gradle Java project root with build.gradle, "
-                      "settings.gradle, and src/main/java/"
-                  )
-
-              source_root = candidates[0]
-              repository = Path.cwd()
-
-              protected = {
-                  ".git",
-                  ".github",
-                  "incoming",
-                  "gradlew",
-                  "gradlew.bat",
-                  "gradle",
-              }
-
-              def remove_path(path):
-                  if path.is_dir() and not path.is_symlink():
-                      shutil.rmtree(path)
+                  if item.is_dir():
+                      if destination.exists() and not destination.is_dir():
+                          remove_path(destination)
+                      destination.mkdir(exist_ok=True)
+                      sync_directory(item, destination)
                   else:
-                      path.unlink()
+                      if destination.exists() and destination.is_dir():
+                          remove_path(destination)
+                      shutil.copy2(item, destination)
 
-              def sync_directory(source, target, is_root=False):
-                  source_names = {p.name for p in source.iterdir()}
+          sync_directory(source_root, repository, is_root=True)
 
-                  for existing in list(target.iterdir()):
-                      if is_root and existing.name in protected:
-                          continue
-                      if existing.name not in source_names:
-                          remove_path(existing)
+      archive.unlink()
 
-                  for item in source.iterdir():
-                      if is_root and item.name in protected:
-                          continue
+      with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+          output.write(f"zip_name={archive_name}\n")
 
-                      destination = target / item.name
+      print(f"Successfully synchronized project from {archive_name}")
+      PY
 
-                      if item.is_dir():
-                          if destination.exists() and not destination.is_dir():
-                              remove_path(destination)
-                          destination.mkdir(exist_ok=True)
-                          sync_directory(item, destination)
-                      else:
-                          if destination.exists() and destination.is_dir():
-                              remove_path(destination)
-                          shutil.copy2(item, destination)
+  - name: Commit synchronized project
+    shell: bash
+    run: |
+      git config user.name "github-actions[bot]"
+      git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-              sync_directory(source_root, repository, is_root=True)
+      git add -A
 
-          archive.unlink()
-
-          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
-              output.write(f"zip_name={archive_name}\n")
-
-          print(f"Successfully synchronized project from {archive_name}")
-          PY
-
-      - name: Commit synchronized project
-        shell: bash
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          git add -A
-
-          if git diff --cached --quiet; then
-            echo "No changes to commit."
-          else
-            git commit -m "Apply PDD ZIP update"
-            git push
-          fi
+      if git diff --cached --quiet; then
+        echo "No changes to commit."
+      else
+        git commit -m "Apply PDD ZIP update"
+        git push
+      fi
+```
