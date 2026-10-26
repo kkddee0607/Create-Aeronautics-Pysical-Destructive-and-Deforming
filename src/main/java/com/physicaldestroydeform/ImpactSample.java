@@ -1,6 +1,6 @@
 package com.physicaldestroydeform;
 
-/** Immutable, API-independent impact input; this is not a Sable event type. */
+/** API-independent prototype input; not a calibrated Sable observation. */
 public record ImpactSample(double impactEnergy, double normalRelativeSpeed, double effectiveMass) {
     public ImpactSample {
         requireFiniteNonNegative("impactEnergy", impactEnergy);

@@ -5,7 +5,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
 
-/** Bounded diagnostic buffer. It does not access the world or alter collision responses. */
+/** Bounded, single-threaded synthetic diagnostic model retained from 0.2.0. */
 public final class ObservationBuffer {
     private final int capacity;
     private final List<CollisionObservation> observations;

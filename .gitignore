@@ -1,20 +1,13 @@
-# Gradle
 .gradle/
 build/
-
-# Java
 *.class
 hs_err_pid*
 replay_pid*
-
-# IDEs
 .idea/
 *.iml
 .vscode/
 .project
 .classpath
 .settings/
-
-# OS
 .DS_Store
 Thumbs.db

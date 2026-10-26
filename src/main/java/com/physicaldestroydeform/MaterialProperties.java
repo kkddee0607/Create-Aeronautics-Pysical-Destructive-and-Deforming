@@ -1,6 +1,6 @@
 package com.physicaldestroydeform;
 
-/** Immutable material properties. Hardness is PDD's 0..255 rating; ductility/elasticity are 0..100 percent. */
+/** Immutable block-type material; percentages are encoded as integers 0..100. */
 public record MaterialProperties(int hardness, int ductilityPercent, int elasticityPercent) {
     public MaterialProperties {
         requireRange("hardness", hardness, 0, 255);

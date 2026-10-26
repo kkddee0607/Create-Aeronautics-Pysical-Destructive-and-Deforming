@@ -2,7 +2,7 @@ package com.physicaldestroydeform.diagnostics;
 
 import java.util.Objects;
 
-/** API-independent collision observation model. Not wired to Sable's native callback. */
+/** API-independent model retained from PDD 0.2.0; synthetic-only test fixture. */
 public record CollisionObservation(
         long serverTick, int physicsSubstep, String callbackKind, String coordinateFrame,
         BlockCoordinate hitBlock, BlockCoordinate otherHitBlock,

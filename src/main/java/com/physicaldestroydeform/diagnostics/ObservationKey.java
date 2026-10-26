@@ -2,7 +2,7 @@ package com.physicaldestroydeform.diagnostics;
 
 import java.util.Objects;
 
-/** Stable grouping key; equality does not prove two callbacks are one physical contact. */
+/** Logical grouping key, not evidence of identical physical contact. */
 public record ObservationKey(long serverTick, int physicsSubstep, String levelKey,
                              CollisionObservation.BlockCoordinate hitBlock,
                              CollisionObservation.BlockCoordinate otherHitBlock) {

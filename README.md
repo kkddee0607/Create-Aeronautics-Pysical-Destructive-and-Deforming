@@ -1,41 +1,28 @@
-# PDD 0.2.0-debug — Diagnostic Source Package
+# PDD 0.2.1-debug — Apply Action source ZIP
 
-**Target:** Minecraft Java 1.21.1 · Java 21 · NeoForge 21.1.x · Create 6.0.10 · Create Aeronautics 1.3.2 · Sable 2.0.6  
-**Design authority:** PDD development draft 3.3.1  
-**Purpose:** Log observable checks for the core, API-independent PDD models that actually exist in 0.2.0.
+Physical Destruction and Deforming for Minecraft Java 1.21.1, NeoForge >=21.1.228,
+Create 6.0.10, Create Aeronautics bundled 1.3.2 and Sable 2.0.6.
 
-> This is a diagnostic build, not a gameplay release. Startup self-tests use synthetic inputs. They do not prove that a live collision occurred or that blocks are damaged in-game.
+**Source package only. Not a built `.jar`, a validated gameplay release, or proof of live collisions.**
 
-## What this build records
+## Changes
 
-`latest.log` receives `[PDD-DIAG]` entries for mod startup and synthetic smoke checks of:
+- Optional Sable callback-return instrumentation: `-Dpdd.debugCollisions=true` enables raw bounded `[PDD-COLLISION]` logs. Only the verified concrete Sable callback implementations can be seen. No callback response is overwritten.
+- Server startup and recipe reload build a registered block ID → 3-byte-compatible material table; look for `[PDD-MATERIAL]` logs.
+- Optional `config/pdd-materials.json` overrides with precedence above deterministic recipe heuristics. See `pdd-materials.example.json`.
+- Hardness conversion with boundary and monotonicity unit tests.
+- Corrected the prototype damage model to stop treating ductility as direct damage attenuation, as required by design draft 3.3.1.
+- No world mutation, physical destruction, mass/energy conversion, collider refresh or verified ordinary-block collision sampling.
 
-- material property validation (hardness 0–255, ductility/elasticity percent 0–100)
-- local damage and neighbor stress model calculations
-- `ImpactSample` validation and energy-to-base-damage conversion using a synthetic calibration
-- `BlockDamageState` byte-range storage and 24-bit pack/unpack round-trip
-- bounded `ObservationBuffer` behavior and signed collision-velocity preservation
-- a summary status plus explicit runtime integration limitations
+## Apply workflow
 
-## What is not implemented or claimed
+The repository's `Apply PDD ZIP` action expects exactly one ZIP at `incoming/*.zip`.
+This archive has one project root containing `build.gradle`, `settings.gradle`, and `src/main/java/`.
+It intentionally **does not** include `.github/`, `incoming/`, or Gradle wrapper binaries because the Apply workflow protects those repository paths.
 
-- Sable native collision callback registration and live callback counter
-- block/material property registry or automatic property inference
-- conversion of Sable callback values to calibrated impact energy
-- damage accumulation driven by a real collision
-- world mutation, destruction, deformation, neighbor stress propagation, persistence, crack rendering/sync, or collider refresh
+After the Apply action, trigger the separate Gradle Build workflow. The artifact produced by
+Gradle (`build/libs/physical-destroy-deform-0.2.1-debug.jar`) is the file to install,
+not this ZIP. The supplied source has not been fully compiled or executed in Minecraft here.
 
-The `RUNTIME_INTEGRATION` log deliberately records these gates as `NOT_IMPLEMENTED` / `DISABLED`; synthetic smoke checks must not be confused with gameplay evidence.
-
-## Build
-
-Requires JDK 21, Gradle 8.10.2, and internet access to Gradle Plugin Portal, Maven Central, and NeoForge Maven:
-
-```bash
-gradle test --no-daemon
-gradle build --no-daemon
-```
-
-The Gradle wrapper scripts and wrapper JAR are not included in this ZIP. If you restore `gradlew`, `gradlew.bat`, `gradle/wrapper/gradle-wrapper.jar`, and `gradle/wrapper/gradle-wrapper.properties` from the repository, use `./gradlew` instead.
-
-This ZIP contains the Java project source, model tests, design/API reference, and Gradle project configuration. The binary Gradle wrapper JAR is not included, so use a locally installed Gradle 8.10.2 (or restore `gradle/wrapper/gradle-wrapper.jar` from the repository) to build. Build and in-game execution were not possible in this packaging environment; confirm a successful build in GitHub Actions before use.
+See `docs/PDD-0.2.1-IMPLEMENTATION-STATUS.md` for issue-by-issue evidence and limitations
+and `docs/PDD-0.2.1-TEST-PLAN.md` for test procedures.

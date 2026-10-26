@@ -1,9 +1,13 @@
-[PDD-DIAG] INIT modId=physical_destroy_deform version=0.2.0-debug status=LOADED
-[PDD-DIAG] SELFTEST material_properties status=PASS hardness=128 ductilityPercent=25 elasticityPercent=40
-[PDD-DIAG] SELFTEST damage_model status=PASS inputDamage=10.0 effectiveLocalDamage=4.248823529411765 neighborStress=6.0 scaledDamageIncrement=13
-[PDD-DIAG] SELFTEST impact_sample status=PASS energy=20.0 normalRelativeSpeed=2.0 effectiveMass=5.0 calibration=10.0 baseDamage=2.0
-[PDD-DIAG] SELFTEST block_damage_state status=PASS damage=7 deformation=3 crackVisual=9 packed24=0x090307 roundTrip=PASS
-[PDD-DIAG] SELFTEST observation_buffer status=PASS capacity=1 retained=1 dropped=1 signedVelocityPreserved=true
-[PDD-DIAG] SELFTEST_SUMMARY status=PASS checks=5 scope=API_INDEPENDENT_SYNTHETIC_ONLY liveCollisionObserved=false
-[PDD-DIAG] RUNTIME_INTEGRATION sableCallback=NOT_IMPLEMENTED materialRegistry=NOT_IMPLEMENTED worldMutation=DISABLED destruction=DISABLED deformation=DISABLED visuals=DISABLED
-[PDD-DIAG] INIT_DIAGNOSTIC status=PASS
+# Templates only, NOT an actual runtime log. Order and values may vary.
+[PDD-DIAG] INIT modId=physical_destroy_deform version=0.2.1-debug status=LOADED debugCollisions=false
+[PDD-DIAG] SELFTEST material_properties status=PASS ...
+[PDD-DIAG] SELFTEST damage_model status=PASS ...
+[PDD-DIAG] SELFTEST impact_sample status=PASS ...
+[PDD-DIAG] SELFTEST block_damage_state status=PASS ...
+[PDD-DIAG] SELFTEST observation_buffer status=PASS ...
+[PDD-DIAG] SELFTEST hardness_scale status=PASS ...
+[PDD-DIAG] SELFTEST_SUMMARY status=PASS checks=6 scope=API_INDEPENDENT_SYNTHETIC_ONLY liveCollisionObserved=false
+[PDD-MATERIAL] rebuild generation=... blockTypes=... recipesInferred=... overrides=... miningFallback=... storage=BLOCK_ID_ATOMIC
+[PDD-DIAG] SABLE_BRIDGE target=Sable.FragileBlockCallback+BeltBlockCallback.sable$onCollision phase=RETURN state=RUNTIME_TEST_REQUIRED
+# When -Dpdd.debugCollisions=true and an existing Sable callback actually fires:
+[PDD-COLLISION] scope=CALLBACK_ONLY frame=UNVERIFIED ... state=OBSERVED_UNCALIBRATED

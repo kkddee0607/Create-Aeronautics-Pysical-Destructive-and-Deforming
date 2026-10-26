@@ -1,0 +1,6 @@
+{
+  "blocks": {
+    "minecraft:stone": {"hardness": 160, "ductilityPercent": 5, "elasticityPercent": 20},
+    "minecraft:oak_planks": {"ductilityPercent": 40}
+  }
+}
