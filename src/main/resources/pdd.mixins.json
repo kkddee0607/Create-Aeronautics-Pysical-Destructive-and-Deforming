@@ -1,8 +1,8 @@
 {
-  "required": false,
+  "required": true,
   "minVersion": "0.8",
   "package": "com.physicaldestroydeform.mixin",
   "compatibilityLevel": "JAVA_21",
   "mixins": ["SableCollisionBridgeMixin"],
-  "injectors": {"defaultRequire": 0}
+  "injectors": {"defaultRequire": 1}
 }
