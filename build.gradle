@@ -4,7 +4,7 @@ plugins {
 }
 
 group = 'com.physicaldestroydeform'
-version = '0.2.1-debug'
+version = '0.2.11-debug'
 base { archivesName = 'physical-destroy-deform' }
 java.toolchain.languageVersion = JavaLanguageVersion.of(21)
 neoForge {
@@ -28,7 +28,7 @@ jar {
     manifest {
         attributes([
             'Specification-Title': 'Physical Destruction and Deforming',
-            'Specification-Version': '0.2.1-debug',
+            'Specification-Version': '0.2.11-debug',
             'Implementation-Title': project.name,
             'Implementation-Version': project.version
         ])

@@ -1,4 +1,4 @@
-# PDD 0.2.1-debug — source release notes
+# PDD 0.2.11-debug — source release notes
 
 Implements bounded optional native bridge observations for pre-existing Sable callbacks,
 registered block type material cache, recipe inference, override precedence and hardness conversion.

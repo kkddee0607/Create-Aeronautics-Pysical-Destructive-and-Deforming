@@ -4,10 +4,10 @@ license="MIT"
 
 [[mods]]
 modId="physical_destroy_deform"
-version="0.2.1-debug"
+version="0.2.11-debug"
 displayName="Create Aeronautics: Physical Destruction and Deforming"
 authors="PDD contributors"
-description='''PDD 0.2.1 diagnostic build: bounded Sable callback telemetry and deterministic block material registry. Does not perform physical destruction.'''
+description='''PDD 0.2.11: Sable native contact telemetry for ordinary collision cases and existing Sable block callback logs. No world mutation.'''
 
 [[mixins]]
 config="pdd.mixins.json"

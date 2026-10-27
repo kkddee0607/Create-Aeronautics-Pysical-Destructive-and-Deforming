@@ -9,7 +9,7 @@ import java.util.concurrent.atomic.AtomicLong;
 /** Bounded multi-thread producer queue with immutable value-only observations. */
 public final class SableContactQueue {
     public static final int CAPACITY = 2048;
-    public static final boolean ENABLED = Boolean.getBoolean(System.getProperty("pdd.debugCollisions", "true"));
+    public static final boolean ENABLED = Boolean.parseBoolean(System.getProperty("pdd.debugCollisions", "true"));
     private static final ConcurrentLinkedQueue<Contact> QUEUE = new ConcurrentLinkedQueue<>();
     private static final AtomicInteger SIZE = new AtomicInteger();
     private static final AtomicLong DROPPED = new AtomicLong();

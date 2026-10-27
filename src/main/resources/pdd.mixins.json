@@ -3,6 +3,11 @@
   "minVersion": "0.8",
   "package": "com.physicaldestroydeform.mixin",
   "compatibilityLevel": "JAVA_21",
-  "mixins": ["SableCollisionBridgeMixin"],
-  "injectors": {"defaultRequire": 1}
+  "mixins": [
+    "RapierCollisionTelemetryMixin",
+    "SableCollisionBridgeMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
 }
