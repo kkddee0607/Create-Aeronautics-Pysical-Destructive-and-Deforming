@@ -1,30 +1,29 @@
-# Create Aeronautics: Physical Destruction and Deforming (PDD) 0.2.12
+# PDD 0.2.12-fix — Create Aeronautics Physical Destruction and Deforming
 
-**State:** source candidate; in-game / NeoForge / Gradle build not yet verified. Based on the existing GitHub 0.2.11 collision telemetry and the integrated 1.0.0 specification §14.2.
+**Target:** Minecraft Java 1.21.1 · NeoForge 21.1.228 · Create 6.0.10 · Create Aeronautics bundled 1.3.2 · Sable 2.0.6.
 
-This version instruments universal Sable block callback registration and returns unchanged Sable responses while collecting bounded `RawObservation` records. The previous native effects telemetry is preserved for diagnostics; prototype material calculations remain disconnected from gameplay. **This build does not damage any world blocks.**
+**Specification:** `docs/PDD-1.0.1-Integrated-Design-Specification.md`, §3.2 / §14.2 / `G-COL-01`.
 
-The documented test procedure is at `docs/verification/0.2.12.md`. Release limitations and reference revision are in `PDD-0.2.12-RELEASE-NOTES.md`.
+0.2.12-fix is a minimal stability patch on top of the latest **CI-passing** GitHub 0.2.12 commit `3ab7c2685c62021797ed3b56cdf125474d96ab33`. All collision-capture Java source and existing JUnit assertions are preserved. This version observes Sable callback results; it **does not implement block damage, deformation or world mutation**.
 
-## Build
+## GitHub import (current repository only)
 
-From a merged, complete GitHub checkout (which already contains Gradle wrapper): `./gradlew test build --no-daemon`. This ZIP omits wrapper files because the existing GitHub wrapper is protected from the ZIP-sync action; a standalone build requires a compatible Gradle wrapper or installed Gradle.
+Upload this **full source ZIP** under `incoming/` while the GitHub repository remains at the reviewed base SHA. The existing `.github/workflows/apply-pdd-zip.yml` will import source files; it preserves `.github`, `gradle/`, `gradlew`, `gradlew.bat`, `incoming/`, and `.git`. This ZIP contains every other existing tracked project file as of the reviewed base SHA (plus the 1.0.1 spec and fix notes), so the import should not delete historical files.
 
-## Safe update of your existing repository
+If the repository has advanced beyond the reviewed SHA, **do not** use the destructive ZIP-sync workflow; instead manually apply the changed files in a Git checkout and compare `git diff` first.
 
-**Do not put this ZIP in `incoming/`:** the repository's current ZIP-sync workflow *deletes* old docs and root files not in a submitted archive. Open the GitHub repository in Codespaces and upload/extract this ZIP into a temporary directory, then run:
+## Build in the GitHub checkout
 
 ```bash
-bash PDD-0.2.12/scripts/merge-into-repo.sh .
-git diff --stat
-git add -A && git commit -m 'Implement PDD 0.2.12 universal Sable raw callback intake' && git push
+chmod +x gradlew
+./gradlew clean test build --no-daemon
 ```
 
-The example assumes the shell is in the GitHub repository directory and the extracted folder `PDD-0.2.12` is under that directory. The script only updates the source/build files it owns, removes the obsolete active old callback mixin and adds its reports. Historical docs and `.github/` are untouched. Then start GitHub Actions → `PDD Manual Build` and download the `physical-destroy-deform-0.2.12.jar` inside the artifact (the artifact's label may be stale).
+The ZIP itself does not embed the Gradle Wrapper, because that is protected and already present in the connected GitHub checkout. A standalone extracted ZIP needs the original GitHub `gradlew`, `gradle/wrapper/*`, and a network-enabled dependency resolver.
 
-## Debug data
+**Previous baseline succeeded in GitHub Actions:** https://github.com/kkddee0607/Create-Aeronautics-Pysical-Destructive-and-Deforming/actions/runs/40856866629
+**0.2.12-fix binary remains unverified until a new CI run.**
 
-- `[PDD-DIAG]`: startup and bridge hook configuration
-- `[PDD-RAW]`: raw Sable callback data (only `phase=LIVE_DATA` means callback executed)
-- `[PDD-COLLISION]`: old native effects-feed samples, **not** automatically unique physical impacts
-- `-Dpdd.debugCollisions=false`: optional *logging* suppression; callback capture remains enabled
+## G-COL-01 in-game verification
+
+See `docs/verification/0.2.12-fix.md` and `docs/verification/0.2.12.md`. No build test can prove an actual ordinary-block JNI callback was invoked or guarantee original Sable physical response parity.

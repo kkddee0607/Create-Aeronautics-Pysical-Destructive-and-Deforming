@@ -17,7 +17,7 @@ import org.slf4j.LoggerFactory;
 @Mod(PhysicalDestroyDeform.MOD_ID)
 public final class PhysicalDestroyDeform {
     public static final String MOD_ID = "physical_destroy_deform";
-    public static final String BUILD_VERSION = "0.2.12";
+    public static final String BUILD_VERSION = "0.2.12-fix";
     private static final Logger LOGGER = LoggerFactory.getLogger(PhysicalDestroyDeform.class);
     private final boolean debugCollisions = NativeCollisionTelemetry.ENABLED;
     private long lastTotal, lastDropped, lastPolls, lastMalformed;
