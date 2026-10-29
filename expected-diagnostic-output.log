@@ -1,7 +1,0 @@
-# EXPECTED LOG SHAPES ONLY — not from actual gameplay
-[PDD-DIAG] INIT modId=physical_destroy_deform version=0.2.11-debug status=LOADED debugCollisions=true
-[PDD-DIAG] SABLE_BRIDGE target=RapierPhysicsPipeline.processCollisionEffects/clearCollisions phase=RETURN_ARRAY status=CONFIGURED_NOT_YET_PROVEN
-[PDD-COLLISION] summary ticks=100 source=SABLE_RAPIER_NATIVE nativeCalls=... nativeContacts=... samplesDropped=... malformedArrays=... queued=... status=... frame=UNVERIFIED damage=DISABLED
-[PDD-SABLE-CALLBACK] summary ticks=100 existingCallbacks=... dropped=... queue=... status=...
-# True runtime collisions yield [PDD-COLLISION] source=SABLE_RAPIER_NATIVE phase=LIVE_DATA
-# True concrete callback invocations yield [PDD-SABLE-CALLBACK] source=SABLE_BLOCK_CALLBACK

@@ -5,12 +5,7 @@ import com.physicaldestroydeform.diagnostics.NativeCollisionTelemetry;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 
-/**
- * Sable 2.0.6: observe the exact native contact array consumed by
- * RapierPhysicsPipeline.processCollisionEffects(), including collider pairs
- * whose block does NOT implement BlockSubLevelCollisionCallback.
- * Returning the same array preserves the original Sable collision handling.
- */
+/** Observe, never replace, native effects data. Secondary evidence only. */
 @Mixin(targets = "dev.ryanhcode.sable.physics.impl.rapier.RapierPhysicsPipeline", remap = false)
 public abstract class RapierCollisionTelemetryMixin {
     @ModifyExpressionValue(

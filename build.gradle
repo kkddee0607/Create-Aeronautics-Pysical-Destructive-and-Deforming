@@ -4,7 +4,7 @@ plugins {
 }
 
 group = 'com.physicaldestroydeform'
-version = '0.2.11-debug'
+version = '0.2.12'
 base { archivesName = 'physical-destroy-deform' }
 java.toolchain.languageVersion = JavaLanguageVersion.of(21)
 neoForge {
@@ -17,8 +17,17 @@ neoForge {
         physical_destroy_deform { sourceSet sourceSets.main }
     }
 }
-repositories { mavenCentral() }
+repositories {
+    mavenCentral()
+    exclusiveContent {
+        forRepository { maven { url = 'https://maven.ryanhcode.dev/releases' } }
+        filter { includeGroup 'dev.ryanhcode.sable' }
+    }
+}
 dependencies {
+    // Official Sable developer Maven: API only; do not bundle Sable into PDD.
+    compileOnly 'dev.ryanhcode.sable:sable-common-1.21.1:2.0.6'
+    testImplementation 'dev.ryanhcode.sable:sable-common-1.21.1:2.0.6'
     testImplementation 'org.junit.jupiter:junit-jupiter:5.11.4'
     testImplementation 'org.slf4j:slf4j-api:2.0.16'
     testRuntimeOnly 'org.slf4j:slf4j-simple:2.0.16'
@@ -28,7 +37,7 @@ jar {
     manifest {
         attributes([
             'Specification-Title': 'Physical Destruction and Deforming',
-            'Specification-Version': '0.2.11-debug',
+            'Specification-Version': '0.2.12',
             'Implementation-Title': project.name,
             'Implementation-Version': project.version
         ])

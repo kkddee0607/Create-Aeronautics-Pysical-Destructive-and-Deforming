@@ -1,13 +1,10 @@
 package com.physicaldestroydeform.material;
 
-/**
- * Deterministic heuristic for Minecraft mining/explosion resistance -> PDD byte hardness.
- * This is a tuning score, not physical hardness and not a destruction threshold.
- */
+/** Deterministic heuristic: mining/explosion resistance to byte hardness. */
 public final class HardnessScale {
     private HardnessScale() {}
     public static int fromMinecraft(double destroySpeed, double explosionResistance) {
-        if (destroySpeed < 0.0) return 255; // unbreakable by mining
+        if (destroySpeed < 0.0) return 255;
         double mining = fraction(destroySpeed, 50.0);
         double blast = fraction(explosionResistance, 1200.0);
         return (int) Math.round(255.0 * (0.65 * mining + 0.35 * blast));

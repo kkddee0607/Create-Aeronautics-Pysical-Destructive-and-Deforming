@@ -2,9 +2,10 @@ package com.physicaldestroydeform.diagnostics;
 import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
 class ObservationKeyTest {
-    @Test void keyEquality() {
-        var pos = new CollisionObservation.BlockCoordinate(1, 2, 3);
-        assertEquals(new ObservationKey(1, 2, "minecraft:overworld", pos, null),
-                new ObservationKey(1, 2, "minecraft:overworld", pos, null));
+    @Test void basicValueKey() {
+        var coordinate = new CollisionObservation.BlockCoordinate(0, 1, 0);
+        var a = new ObservationKey(1, 2, "minecraft:overworld", coordinate, null);
+        var b = new ObservationKey(1, 2, "minecraft:overworld", coordinate, null);
+        assertEquals(a, b);
     }
 }

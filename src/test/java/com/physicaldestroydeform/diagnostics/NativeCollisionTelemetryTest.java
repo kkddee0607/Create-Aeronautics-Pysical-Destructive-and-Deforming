@@ -1,8 +1,6 @@
 package com.physicaldestroydeform.diagnostics;
-
 import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
-
 public class NativeCollisionTelemetryTest {
     @Test void nativeLayoutIsPreserved() {
         NativeCollisionTelemetry.drain();

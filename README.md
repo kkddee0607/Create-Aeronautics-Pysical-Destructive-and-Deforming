@@ -1,7 +1,30 @@
-# PDD 0.2.11-debug — Sable collision telemetry
+# Create Aeronautics: Physical Destruction and Deforming (PDD) 0.2.12
 
-Source ZIP for GitHub **Apply PDD ZIP** (not a Minecraft mod JAR). The Java side hooks into **Sable 2.0.6's actual native collision effects array** and, independently, two existing Sable block-specific callbacks. The hook only observes; it does not change Sable physics, collision return values, world state or destruction. **Built but NOT runtime-confirmed** is not a release claim; this is a source candidate requiring GitHub build and actual gameplay validation.
+**State:** source candidate; in-game / NeoForge / Gradle build not yet verified. Based on the existing GitHub 0.2.11 collision telemetry and the integrated 1.0.0 specification §14.2.
 
-**All collision telemetry ON by default.** No JVM option required. Use `-Dpdd.debugCollisions=false` only if explicitly desired. Record `[PDD-COLLISION]` (native) and `[PDD-SABLE-CALLBACK]` (specific callbacks) in `logs/latest.log`; every 100 server ticks the counters explain absent samples.
+This version instruments universal Sable block callback registration and returns unchanged Sable responses while collecting bounded `RawObservation` records. The previous native effects telemetry is preserved for diagnostics; prototype material calculations remain disconnected from gameplay. **This build does not damage any world blocks.**
 
-See `docs/PDD-0.2.11-RUNTIME-COLLISION-TEST.md` for mobile installation and test matrix. The GitHub `Apply PDD ZIP` workflow preserves its own `.github/` and Gradle wrapper; `PDD Manual Build` artifact may still be labelled **PDD-0.2.1-debug** because the protected workflow was not modified. Verify JAR filename version instead.
+The documented test procedure is at `docs/verification/0.2.12.md`. Release limitations and reference revision are in `PDD-0.2.12-RELEASE-NOTES.md`.
+
+## Build
+
+From a merged, complete GitHub checkout (which already contains Gradle wrapper): `./gradlew test build --no-daemon`. This ZIP omits wrapper files because the existing GitHub wrapper is protected from the ZIP-sync action; a standalone build requires a compatible Gradle wrapper or installed Gradle.
+
+## Safe update of your existing repository
+
+**Do not put this ZIP in `incoming/`:** the repository's current ZIP-sync workflow *deletes* old docs and root files not in a submitted archive. Open the GitHub repository in Codespaces and upload/extract this ZIP into a temporary directory, then run:
+
+```bash
+bash PDD-0.2.12/scripts/merge-into-repo.sh .
+git diff --stat
+git add -A && git commit -m 'Implement PDD 0.2.12 universal Sable raw callback intake' && git push
+```
+
+The example assumes the shell is in the GitHub repository directory and the extracted folder `PDD-0.2.12` is under that directory. The script only updates the source/build files it owns, removes the obsolete active old callback mixin and adds its reports. Historical docs and `.github/` are untouched. Then start GitHub Actions → `PDD Manual Build` and download the `physical-destroy-deform-0.2.12.jar` inside the artifact (the artifact's label may be stale).
+
+## Debug data
+
+- `[PDD-DIAG]`: startup and bridge hook configuration
+- `[PDD-RAW]`: raw Sable callback data (only `phase=LIVE_DATA` means callback executed)
+- `[PDD-COLLISION]`: old native effects-feed samples, **not** automatically unique physical impacts
+- `-Dpdd.debugCollisions=false`: optional *logging* suppression; callback capture remains enabled

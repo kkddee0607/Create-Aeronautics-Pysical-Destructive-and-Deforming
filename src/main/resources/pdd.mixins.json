@@ -5,7 +5,7 @@
   "compatibilityLevel": "JAVA_21",
   "mixins": [
     "RapierCollisionTelemetryMixin",
-    "SableCollisionBridgeMixin"
+    "SableUniversalCallbackMixin"
   ],
   "injectors": {
     "defaultRequire": 1

@@ -6,12 +6,7 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
-/**
- * Actual Rapier native collision array records from Sable 2.0.6.
- * The 15-double record layout was verified from RapierPhysicsPipeline bytecode.
- * The raw impact scalar is deliberately NOT called velocity, energy or impulse.
- * One sample per native record, no fabricated game collisions.
- */
+/** Auxiliary native effect samples: 15 raw doubles; NEVER an authoritative contact source. */
 public final class NativeCollisionTelemetry {
     public static final boolean ENABLED = Boolean.parseBoolean(System.getProperty("pdd.debugCollisions", "true"));
     public static final int FIELDS = 15;
@@ -24,7 +19,6 @@ public final class NativeCollisionTelemetry {
     private static final AtomicLong MALFORMED = new AtomicLong();
 
     private NativeCollisionTelemetry() { }
-
     public static void capture(double[] nativeData) {
         POLLS.incrementAndGet();
         if (nativeData == null || nativeData.length % FIELDS != 0) {
@@ -50,7 +44,6 @@ public final class NativeCollisionTelemetry {
                     nativeData[offset+12], nativeData[offset+13], nativeData[offset+14]));
         }
     }
-
     public static List<Contact> drain() {
         List<Contact> values = new ArrayList<>();
         Contact c;
@@ -62,7 +55,6 @@ public final class NativeCollisionTelemetry {
     public static long dropped() { return DROPPED.get(); }
     public static long malformed() { return MALFORMED.get(); }
     public static int size() { return SIZE.get(); }
-
     public record Contact(int idA, int idB, double rawImpactScalar,
             double ax, double ay, double az, double bx, double by, double bz,
             double contactAX, double contactAY, double contactAZ,

@@ -1,6 +1,6 @@
 package com.physicaldestroydeform;
 
-/** Prototype calculations only: never used for world damage in 0.2.1-debug. */
+/** Prototype calculations only: never used for world damage in 0.2.12. */
 public final class DamageModel {
     public static final double MAX_REDUCTION_PER_PROPERTY = 0.90;
     private DamageModel() {}
@@ -8,7 +8,6 @@ public final class DamageModel {
         if (material == null) throw new IllegalArgumentException("material must not be null");
         if (!Double.isFinite(impactDamage) || impactDamage <= 0) return 0;
         double hardnessReduction = material.hardnessNormalized() * MAX_REDUCTION_PER_PROPERTY;
-        // Draft 3.3.1: ductility governs deformation tolerance, never direct damage attenuation.
         return impactDamage * (1.0 - hardnessReduction);
     }
     public static double neighborStress(double residualStress, MaterialProperties material) {

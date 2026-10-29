@@ -1,8 +1,6 @@
 package com.physicaldestroydeform.material;
-
 import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
-
 class HardnessScaleTest {
     @Test void zeroAndExtremeInputsAreBounded() {
         assertEquals(0, HardnessScale.fromMinecraft(0, 0));

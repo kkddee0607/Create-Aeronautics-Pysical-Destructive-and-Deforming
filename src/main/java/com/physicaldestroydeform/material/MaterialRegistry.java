@@ -52,7 +52,6 @@ public final class MaterialRegistry {
             try {
                 destroySpeed = state.getDestroySpeed(EmptyBlockGetter.INSTANCE, BlockPos.ZERO);
             } catch (RuntimeException exception) {
-                // A mod may require an actual world here; explosion resistance still gives a baseline.
                 destroySpeed = 0;
                 inaccessibleMiningSpeeds++;
             }
@@ -63,7 +62,6 @@ public final class MaterialRegistry {
         Map<ResourceLocation, MaterialProperties> result = new HashMap<>(defaults);
         int inferred = inferFromRecipes(server, defaults, result);
         int overridden = applyOverrides(result, logger);
-        // Single volatile assignment: readers never see a half-initialized registry.
         properties = Map.copyOf(result);
         generation++;
         logger.info("[PDD-MATERIAL] rebuild generation={} blockTypes={} recipesInferred={} overrides={} miningFallback={} storage=BLOCK_ID_ATOMIC",
@@ -76,11 +74,8 @@ public final class MaterialRegistry {
         List<RecipeHolder<?>> recipes = new ArrayList<>(server.getRecipeManager().getRecipes());
         recipes.sort(Comparator.comparing(holder -> holder.id().toString()));
         int inferred = 0;
-        // Stable recipe ordering: the first eligible recipe for an output wins.
         java.util.HashSet<ResourceLocation> claimed = new java.util.HashSet<>();
         for (RecipeHolder<?> holder : recipes) {
-            // Custom mod recipe implementations may throw on result/ingredient inspection.
-            // These are hints only; never let one unsupported recipe crash registry loading.
             try {
                 ItemStack output = holder.value().getResultItem(server.registryAccess());
                 if (!(output.getItem() instanceof BlockItem outputBlock)) continue;
@@ -105,7 +100,7 @@ public final class MaterialRegistry {
                 claimed.add(outputId);
                 inferred++;
             } catch (RuntimeException unsupportedRecipe) {
-                // Keep intrinsic properties for unsupported custom recipe types.
+                // Unsupported custom recipes cannot prevent material registration.
             }
         }
         return inferred;
@@ -130,7 +125,6 @@ public final class MaterialRegistry {
                 (int) Math.round(ductility / count), (int) Math.round(elasticity / count));
     }
 
-    /** 25% recipe evidence; 75% intrinsic data. Heuristic, NOT real material physics. */
     private static int blend(double intrinsic, double ingredient) {
         return (int) Math.round(0.75 * intrinsic + 0.25 * ingredient);
     }
