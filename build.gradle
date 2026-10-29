@@ -31,6 +31,9 @@ dependencies {
     // Official Sable developer Maven: API only; do not bundle Sable into PDD.
     compileOnly('dev.ryanhcode.sable:sable-common-1.21.1:2.0.6') { transitive = false }
     testImplementation('dev.ryanhcode.sable:sable-common-1.21.1:2.0.6') { transitive = false }
+    // CollisionResult.NONE initializes JOMLConversion.ZERO from Sable Companion.
+    // Compile-only Sable API does not place this required class on the JUnit runtime path.
+    testRuntimeOnly('dev.ryanhcode.sable-companion:sable-companion-common-1.21.1:1.6.0') { transitive = false }
     testImplementation 'org.junit.jupiter:junit-jupiter:5.11.4'
     testImplementation 'org.slf4j:slf4j-api:2.0.16'
     testRuntimeOnly 'org.slf4j:slf4j-simple:2.0.16'
@@ -39,6 +42,9 @@ dependencies {
 // The callback unit tests also reference those API types directly.
 sourceSets.test.compileClasspath += sourceSets.main.compileClasspath
 sourceSets.test.runtimeClasspath += sourceSets.main.runtimeClasspath
+// ModDevGradle makes the patched Minecraft/JOML artifacts available on main compileClasspath.
+// Plain JUnit also needs them at runtime to instantiate BlockPos and Vector3d.
+sourceSets.test.runtimeClasspath += sourceSets.main.compileClasspath
 
 tasks.named('test', Test).configure { useJUnitPlatform() }
 jar {
