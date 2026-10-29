@@ -9,7 +9,7 @@ import net.minecraft.world.level.block.state.BlockState;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 
-/** Wrap only the factory result, not the original callback call or its semantics. */
+/** The original factory callback is wrapped, never replaced or invoked during baking. */
 @Mixin(targets = "dev.ryanhcode.sable.physics.impl.rapier.collider.RapierVoxelColliderBakery", remap = false)
 public abstract class SableUniversalCallbackMixin {
     @ModifyExpressionValue(
@@ -17,10 +17,8 @@ public abstract class SableUniversalCallbackMixin {
             at = @At(value = "INVOKE", target = "Ldev/ryanhcode/sable/api/block/BlockWithSubLevelCollisionCallback;sable$getCallback(Lnet/minecraft/world/level/block/state/BlockState;)Ldev/ryanhcode/sable/api/physics/callback/BlockSubLevelCollisionCallback;"),
             remap = false, require = 1)
     private BlockSubLevelCollisionCallback pdd$wrapFactoryResult(BlockSubLevelCollisionCallback original, BlockState state) {
-        // Air has no collision surface. Do not introduce a native callback for it.
         if (state.isAir()) return original;
         SableContactQueue.registered(original != null);
-        return new ObservingCollisionCallback(original,
-                BuiltInRegistries.BLOCK.getKey(state.getBlock()).toString());
+        return new ObservingCollisionCallback(original, BuiltInRegistries.BLOCK.getKey(state.getBlock()).toString());
     }
 }

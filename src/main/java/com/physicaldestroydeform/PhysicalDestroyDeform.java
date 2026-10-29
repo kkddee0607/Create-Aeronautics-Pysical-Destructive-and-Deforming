@@ -1,6 +1,8 @@
 package com.physicaldestroydeform;
 
 import com.physicaldestroydeform.diagnostics.PddDiagnostics;
+import com.physicaldestroydeform.diagnostics.AcceptanceReport;
+import com.physicaldestroydeform.diagnostics.RawObservationDispatcher;
 import com.physicaldestroydeform.diagnostics.NativeCollisionTelemetry;
 import com.physicaldestroydeform.diagnostics.SableContactQueue;
 import com.physicaldestroydeform.material.MaterialRegistry;
@@ -17,8 +19,9 @@ import org.slf4j.LoggerFactory;
 @Mod(PhysicalDestroyDeform.MOD_ID)
 public final class PhysicalDestroyDeform {
     public static final String MOD_ID = "physical_destroy_deform";
-    public static final String BUILD_VERSION = "0.2.12-fix";
+    public static final String BUILD_VERSION = "0.2.12-final";
     private static final Logger LOGGER = LoggerFactory.getLogger(PhysicalDestroyDeform.class);
+    private final AcceptanceReport acceptanceReport = new AcceptanceReport();
     private final boolean debugCollisions = NativeCollisionTelemetry.ENABLED;
     private long lastTotal, lastDropped, lastPolls, lastMalformed;
     private long lastCallbackTotal, lastCallbackDropped, lastCaptureErrors;
@@ -46,11 +49,14 @@ public final class PhysicalDestroyDeform {
         MaterialRegistry.clear();
         NativeCollisionTelemetry.drain();
         SableContactQueue.drain();
+        acceptanceReport.close();
     }
     private void onServerTick(ServerTickEvent.Post event) {
         // Drain even when verbose logs are disabled: the capture feature is never gated by logging.
         var callbacks = SableContactQueue.drain();
+        RawObservationDispatcher.dispatch(callbacks);
         var nativeFeed = NativeCollisionTelemetry.drain();
+        if (++ticks % 100 == 0) acceptanceReport.log(LOGGER);
         if (!debugCollisions) return;
         int printed = 0;
         for (var contact : callbacks) {
@@ -77,7 +83,7 @@ public final class PhysicalDestroyDeform {
                     collision.contactAX(), collision.contactAY(), collision.contactAZ(),
                     collision.contactBX(), collision.contactBY(), collision.contactBZ());
         }
-        if (++ticks % 100 == 0) {
+        if (ticks % 100 == 0) {
             long total = NativeCollisionTelemetry.total();
             long dropped = NativeCollisionTelemetry.dropped();
             long polls = NativeCollisionTelemetry.polls();
