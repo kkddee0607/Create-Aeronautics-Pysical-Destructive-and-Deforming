@@ -1,0 +1,51 @@
+
+name: PDD Callback Contract Test
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'build.gradle'
+      - 'settings.gradle'
+      - '.github/workflows/pdd-callback-test.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  callback-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.14.3'
+
+      - name: Run callback contract tests
+        run: |
+          gradle test \
+            --tests "com.physicaldestroydeform.diagnostics.ObservingCollisionCallbackTest" \
+            --stacktrace
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pdd-callback-test-report
+          path: |
+            build/reports/tests/test/
+            build/test-results/test/
+          if-no-files-found: warn
