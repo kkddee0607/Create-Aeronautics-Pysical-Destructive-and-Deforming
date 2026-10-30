@@ -23,9 +23,9 @@ class CollisionFrameTest {
         assertEquals(a,first.hit().stablePlotId());
         assertEquals(Space.STATIC_WORLD,first.other().space());
         assertEquals(12,first.contactWorldHypothesis().x(),1e-9);
-        // Identifying an owner must never make an unrelated, far-away contact valid.
-        assertEquals(Quality.INVALID,first.quality());
-        assertEquals("CONTACT_OUTSIDE_OWNER_BOUNDS",first.reason());
+        // Wrong-frame geometry cannot erase the independently identified owner.
+        assertEquals(Quality.DIAGNOSTIC_ONLY,first.quality());
+        assertEquals("FRAME_UNRESOLVED_CONTACT_OUTSIDE_OWNER",first.reason());
         assertFalse(first.canMutateWorld());
         Evidence second=frame.observe(1,70,1,true,40,70,40,2,3,4,0);
         assertEquals(b,second.other().stablePlotId());
@@ -51,8 +51,8 @@ class CollisionFrameTest {
         assertEquals(78.975,plotSide.contactWorldHypothesis().x(),1e-6);
         assertEquals(plotX-0.025,worldSide.otherContactLocalHypothesis().x(),1e-6);
         assertEquals(78.975,plotSide.otherContactLocalHypothesis().x(),1e-6);
-        assertEquals("OWNER_FRAME_GEOMETRY_PLAUSIBLE",worldSide.reason());
-        assertEquals("OWNER_FRAME_GEOMETRY_PLAUSIBLE",plotSide.reason());
+        assertEquals("HIT_FRAME_HYPOTHESIS_PLAUSIBLE",worldSide.reason());
+        assertEquals("HIT_FRAME_HYPOTHESIS_PLAUSIBLE",plotSide.reason());
         assertTrue(reciprocal(worldSide,plotSide));
         assertEquals(0,contactSeparation(worldSide,plotSide),1e-6);
         assertEquals(Quality.DIAGNOSTIC_ONLY,worldSide.quality());
@@ -110,8 +110,8 @@ class CollisionFrameTest {
                 2.048103306249678E7,128.81249883770943,2.048103206249875E7,0);
         assertTrue(reciprocal(world,plot));
         assertTrue(contactSeparation(world,plot)<1e-4);
-        assertEquals("OWNER_FRAME_GEOMETRY_PLAUSIBLE",world.reason());
-        assertEquals("OWNER_FRAME_GEOMETRY_PLAUSIBLE",plot.reason());
+        assertEquals("HIT_FRAME_HYPOTHESIS_PLAUSIBLE",world.reason());
+        assertEquals("HIT_FRAME_HYPOTHESIS_PLAUSIBLE",plot.reason());
         assertEquals(Quality.DIAGNOSTIC_ONLY,plot.quality());
     }
     @Test void utFrame02OverlapsInvalidBodyAndBadScalarsReject() {
@@ -124,6 +124,20 @@ class CollisionFrameTest {
         Snapshot missing=new Snapshot(1,1,"x",Phase.PRE_SOLVER,List.of(),false);
         assertEquals(Quality.INVALID,missing.observe(100,1,100,false,0,0,0,1,1,1,1).quality());
     }
+    @Test void stationaryPlotStillKeepsItsOwnerWhenPhysicsHandleIsUnavailable() {
+        UUID id=UUID.randomUUID();
+        Body inactive=new Body(id,32,47,32,47,ID,
+                null,null,null,false);
+        Snapshot step=new Snapshot(1,1,"minecraft:overworld",Phase.PRE_SOLVER,List.of(inactive),true);
+        Evidence e=step.observe(40,70,40,true,10,70,10,
+                Double.NaN,0,0,0);
+        assertEquals(Space.SABLE_PLOT,e.hit().space());
+        assertEquals(id,e.hit().stablePlotId());
+        assertTrue(e.hit().valid());
+        assertEquals(Quality.INVALID,e.quality()); // geometry only
+        assertFalse(e.canMutateWorld());
+    }
+
     @Test void utFrame02CrossPhysicsEpochAndPostSolverNeverAuthorizesDamage() {
         Snapshot pre=new Snapshot(11,10,"x",Phase.PRE_SOLVER,List.of(),true);
         Snapshot other=new Snapshot(12,10,"x",Phase.PRE_SOLVER,List.of(),true);

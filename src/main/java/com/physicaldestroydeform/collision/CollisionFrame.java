@@ -18,8 +18,12 @@ public final class CollisionFrame {
                        Pose pose, Vec linearRaw, Vec angularRaw, Vec centerRaw,
                        boolean handleValid) {
         public boolean contains(int x, int z) { return minX<=x && x<=maxX && minZ<=z && z<=maxZ; }
+        /** Rigid handle/pose health does not determine who owns a stored block. */
+        public boolean ownerCandidateValid() {
+            return plotId!=null && minX<=maxX && minZ<=maxZ;
+        }
         public boolean valid() {
-            return plotId!=null && minX<=maxX && minZ<=maxZ && pose!=null && pose.valid()
+            return ownerCandidateValid() && pose!=null && pose.valid()
                     && handleValid && linearRaw!=null && linearRaw.finite()
                     && angularRaw!=null && angularRaw.finite()
                     && centerRaw!=null && centerRaw.finite();
@@ -36,15 +40,6 @@ public final class CollisionFrame {
         public static Evidence invalid(String message) {
             return new Evidence(-1,-1,"UNKNOWN",Phase.UNSCOPED,null,null,null,null,null,null,null,
                     Quality.INVALID,message);
-        }
-        /** Evidence is promoted only after an independent opposite-side contact has been matched. */
-        Evidence validated() {
-            if (phase != Phase.PRE_SOLVER || quality != Quality.DIAGNOSTIC_ONLY
-                    || !"OWNER_FRAME_GEOMETRY_PLAUSIBLE".equals(reason))
-                throw new IllegalStateException("cannot validate unpaired or invalid contact");
-            return new Evidence(epoch, serverTick, dimension, phase, hit, other, contactRaw,
-                    contactWorldHypothesis, otherContactLocalHypothesis, hitBody, otherBody,
-                    Quality.PRE_SOLVER_VALIDATED, "RECIPROCAL_SAME_EPOCH_WORLD_CONTACT");
         }
         /** Only a confirmed independent pair supplies a validated world position. */
         public Vec confirmedWorldContact() {
@@ -67,11 +62,11 @@ public final class CollisionFrame {
                 found=body;
             }
             if(found==null) return new BlockTarget(Space.STATIC_WORLD,dimension,null,x,y,z,true,
-                    "WORLD_SPACE_COORDINATE_HYPOTHESIS");
-            if(!found.valid())return new BlockTarget(Space.UNKNOWN,dimension,found.plotId(),x,y,z,
-                    false,"MISSING_VALID_POSE_OR_HANDLE");
+                    "WORLD_RANGE_CANDIDATE_NEEDS_BLOCK_AUDIT");
+            if(!found.ownerCandidateValid())return new BlockTarget(Space.UNKNOWN,dimension,found.plotId(),x,y,z,
+                    false,"MALFORMED_PLOT_OWNER");
             return new BlockTarget(Space.SABLE_PLOT,dimension,found.plotId(),x,y,z,true,
-                    "PLOT_SPACE_COORDINATE_HYPOTHESIS");
+                    "PLOT_RANGE_CANDIDATE_NEEDS_BLOCK_AUDIT");
         }
 
         /** Keep coordinates and velocity scalar raw; both target positions are independent. */
@@ -83,35 +78,34 @@ public final class CollisionFrame {
             if (phase!=Phase.PRE_SOLVER)
                 return new Evidence(epoch,serverTick,dimension,phase,a,b,raw,null,null,null,null,
                         Quality.INVALID,"NOT_PRE_SOLVER");
-            if (!a.valid || (b!=null && !b.valid) || !raw.finite()
-                    || !Double.isFinite(rawSignedVelocity))
+            if (!a.valid || (b!=null && !b.valid))
                 return new Evidence(epoch,serverTick,dimension,phase,a,b,raw,null,null,null,null,
-                        Quality.INVALID,"BAD_OWNER_OR_NONFINITE_RAW_ARGUMENT");
+                        Quality.INVALID,"OWNER_UNRESOLVED");
+            if (!raw.finite() || !Double.isFinite(rawSignedVelocity))
+                return new Evidence(epoch,serverTick,dimension,phase,a,b,raw,null,null,null,null,
+                        Quality.INVALID,"NONFINITE_GEOMETRY_OR_VELOCITY");
             Body hitBody=findBody(a), otherBody=b==null?null:findBody(b);
             if ((a.plot() && (hitBody==null || !hitBody.valid())) ||
                     (b!=null && b.plot() && (otherBody==null || !otherBody.valid())))
                 return new Evidence(epoch,serverTick,dimension,phase,a,b,raw,null,null,
-                        hitBody,otherBody,Quality.INVALID,"PLOT_NOT_IN_SNAPSHOT");
-            // Sable passes the impact in the HIT block's coordinate frame.
-            // Never interpret that same raw point directly in the OTHER body's frame.
+                        hitBody,otherBody,Quality.INVALID,"PLOT_POSE_OR_HANDLE_UNAVAILABLE");
+            // Hit-space is an OBSERVED HYPOTHESIS, not a Sable callback ABI guarantee.
+            // Never use a transformed point to decide which storage owns either BlockPos.
             Vec world=hitBody==null?raw:hitBody.pose().toWorldPoint(raw);
             Vec otherLocal=b==null?null:otherBody==null?world:otherBody.pose().toLocalPoint(world);
             if (!world.finite() || (otherLocal!=null && !otherLocal.finite()))
                 return new Evidence(epoch,serverTick,dimension,phase,a,b,raw,null,null,
                         hitBody,otherBody,Quality.INVALID,"NONFINITE_TRANSFORM");
-            // A raw callback position in the wrong frame must never become a usable
-            // target. A 2-block margin allows shapes crossing block boundaries.
-            // In particular, untransformed static-world positions masquerading as
-            // plot-local coordinates would otherwise jump millions of blocks.
+            // Geometry quality is independent of target identity. Sable callbacks may
+            // report placeholder/manifold positions; do not discard legitimate owners.
             boolean nearHit=nearBlock(raw,a,2.0);
             boolean nearOther=b==null || nearBlock(otherLocal,b,2.0);
-            if (!nearHit || !nearOther)
-                return new Evidence(epoch,serverTick,dimension,phase,a,b,raw,world,otherLocal,
-                        hitBody,otherBody,Quality.INVALID,"CONTACT_OUTSIDE_OWNER_BOUNDS");
             return new Evidence(epoch,serverTick,dimension,phase,a,b,raw,world,otherLocal,
-                    hitBody,otherBody,Quality.DIAGNOSTIC_ONLY,"OWNER_FRAME_GEOMETRY_PLAUSIBLE");
+                    hitBody,otherBody,Quality.DIAGNOSTIC_ONLY,
+                    nearHit && nearOther ? "HIT_FRAME_HYPOTHESIS_PLAUSIBLE"
+                            : "FRAME_UNRESOLVED_CONTACT_OUTSIDE_OWNER");
         }
-        /** Euclidean distance to the nearest point on the block's unit AABB. */
+        /** Diagnostic proximity ONLY. AABB margin never proves/invalidates ownership. */
         private static boolean nearBlock(Vec p,BlockTarget b,double margin) {
             if(p==null || b==null || !p.finite())return false;
             double dx=Math.max(Math.max(b.x()-p.x(),p.x()-(b.x()+1.0)),0.0);
@@ -135,9 +129,8 @@ public final class CollisionFrame {
         return a!=null && b!=null && a.epoch()==b.epoch()
                 && a.serverTick()==b.serverTick() && Objects.equals(a.dimension(),b.dimension())
                 && a.phase()==Phase.PRE_SOLVER && b.phase()==Phase.PRE_SOLVER
-                && a.quality()!=Quality.INVALID && b.quality()!=Quality.INVALID
                 && a.hit()!=null && a.other()!=null && b.hit()!=null && b.other()!=null
-                && a.contactWorldHypothesis()!=null && b.contactWorldHypothesis()!=null
+                && a.hit().valid() && a.other().valid() && b.hit().valid() && b.other().valid()
                 && !a.hit().equals(a.other())
                 && a.hit().equals(b.other()) && a.other().equals(b.hit());
     }

@@ -32,9 +32,9 @@ class ContactPairMatcherTest {
         assertEquals(0,result.unpaired());
         assertEquals(0,result.invalid());
         assertTrue(result.matches().get(0).separation()<1e-4);
-        Evidence checked=result.matches().get(0).verifiedFirst();
-        assertEquals(Quality.PRE_SOLVER_VALIDATED,checked.quality());
-        assertNotNull(checked.confirmedWorldContact());
+        Evidence checked=result.matches().get(0).firstEvidence();
+        assertEquals(Quality.DIAGNOSTIC_ONLY,checked.quality());
+        assertNull(checked.confirmedWorldContact());
         assertFalse(checked.canMutateWorld());
     }
 
@@ -50,13 +50,13 @@ class ContactPairMatcherTest {
                 74,63,-49,0);
         Evidence second=s.observe(PLOT_X,129,PLOT_Z,true,20481033,128,20481032,
                 20481033.138340294,128.812499,20481032.361827508,0);
-        assertEquals(Quality.INVALID,first.quality());
-        assertEquals(Quality.INVALID,second.quality());
-        assertEquals("CONTACT_OUTSIDE_OWNER_BOUNDS",first.reason());
+        assertEquals(Quality.DIAGNOSTIC_ONLY,first.quality());
+        assertEquals("FRAME_UNRESOLVED_CONTACT_OUTSIDE_OWNER",first.reason());
         var result=ContactPairMatcher.match(List.of(first,second));
-        assertEquals(0,result.matches().size());
-        assertEquals(2,result.invalid());
-        assertThrows(IllegalStateException.class,first::validated);
+        assertEquals(1,result.matches().size()); // Target pairing is independent of geometry.
+        assertTrue(result.matches().getFirst().separation()>100);
+        assertEquals(0,result.invalid());
+        assertNull(first.confirmedWorldContact());
     }
 
     @Test void rotatedIndependentPlotsMatchEvenWhenCallbacksAreInterleaved() {
@@ -78,7 +78,7 @@ class ContactPairMatcherTest {
         var result=ContactPairMatcher.match(List.of(aContact,noise,bContact));
         assertEquals(1,result.matches().size());
         assertEquals(0,result.unpaired());
-        assertEquals(0,result.invalid());
+        assertEquals(1,result.invalid()); // Missing other-side target cannot form a pair.
         assertEquals(0,result.matches().get(0).separation(),1e-9);
         assertEquals(2,result.matches().get(0).second());
     }
@@ -92,8 +92,22 @@ class ContactPairMatcherTest {
         assertEquals(Quality.DIAGNOSTIC_ONLY,a.quality());
         assertEquals(Quality.DIAGNOSTIC_ONLY,b.quality());
         var result=ContactPairMatcher.match(List.of(a,b));
+        assertEquals(1,result.matches().size());
+        assertTrue(result.matches().getFirst().separation() > 0.25);
+        assertEquals(0,result.unpaired());
+    }
+
+    @Test void multipleContactsWithSameOwnerPairAreExplicitlyAmbiguous() {
+        UUID id=UUID.randomUUID();
+        Pose pose=new Pose(new Vec(50,70,50),new Vec(5,128,5),new Vec(1,1,1),0,0,0,1);
+        Snapshot s=new Snapshot(1,1,"overworld",Phase.PRE_SOLVER,List.of(plot(id,5,5,pose)),true);
+        Evidence a=s.observe(5,128,5,true,50,70,50,5,128,5,1);
+        Evidence b=s.observe(5,128,5,true,50,70,50,5.5,128,5,1);
+        Evidence c=s.observe(50,70,50,true,5,128,5,50,70,50,1);
+        var result=ContactPairMatcher.match(List.of(a,b,c));
         assertEquals(0,result.matches().size());
-        assertEquals(2,result.unpaired());
+        assertEquals(3,result.ambiguous());
+        assertEquals(0,result.unpaired());
     }
 
     @Test void malformedPostSolverAndWrongEpochNeverProduceVerifiedPairs() {

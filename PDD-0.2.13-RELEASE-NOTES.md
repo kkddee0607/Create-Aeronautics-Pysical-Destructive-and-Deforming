@@ -42,3 +42,13 @@ Implemented together:
 - Logs preserve raw signed velocity units, unaltered Sable callback results and zero world mutation. The native effects feed remains separate and `UNVERIFIED` by design. Actual damage/energy accounting belong to later design versions.
 - `ContactPairMatcherTest` adds five direct regression scenarios, including **the exact type of plot→plot false coordinate observed in the game log**, rotating independent plots, interleaved callbacks, different epochs, and valid world↔plot pairs. Previous callback-contract tests remain intact.
 - Official `./gradlew clean test` and `./gradlew build`, GitHub Actions on this new ZIP, and in-game G-COL-02 are **NOT_RUN** here. Java 21 auxiliary source-stub and frame tests are *not* Gradle/JUnit substitutes.
+
+---
+
+## IDS 1.0.2 ownership-normalization revision (2026-10-30)
+
+- Source baseline: GitHub `main` `18ca022e6e4deb0b1280361b7a29c457a62d3982`.
+- Owner-local targets are now audited against Sable's actual plot mapping and live block storage on the server tick. TargetKey identifies `(dimension, STATIC_WORLD|SABLE_PLOT, stablePlotId, owner-local BlockPos, blockstate fingerprint)` for future world/plot damage adapters; no mutation or damage occurs in 0.2.13.
+- Bad native contact coordinates no longer invalidate an otherwise valid owner target. 0.25-block reciprocal proximity never promotes owner or contact geometry quality. Multiple same-owner contacts without manifold IDs are `PAIR_AMBIGUOUS` instead of arbitrarily paired.
+- Original callback invocation, exact return object, native feed and safe no-damage behavior unchanged. All 1.0.1 design features outside the 0.2.13 scope remain future milestones unchanged.
+- **Build status: NOT VERIFIED.** This execution environment lacks GitHub-protected `gradlew`/wrapper and local Gradle; `clean test`, `build`, GitHub Actions and in-game G-COL-02 were NOT completed. See `docs/verification/0.2.13-ids-1.0.2-owner-target.md` for complete evidence and ≤2 in-game test sessions.

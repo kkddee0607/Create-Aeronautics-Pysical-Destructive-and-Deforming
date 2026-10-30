@@ -23,9 +23,8 @@ public record RawObservation(
     }
     /** Preserve the raw arguments; only replace the separately checked frame evidence. */
     public RawObservation withEvidence(CollisionFrame.Evidence checked) {
-        String label = checked.quality() == CollisionFrame.Quality.PRE_SOLVER_VALIDATED
-                ? checked.hit().plot() ? "HIT_PLOT_LOCAL_VALIDATED" : "HIT_STATIC_WORLD_VALIDATED"
-                : coordinateFrame;
+        // Reciprocal callbacks never prove ownership or contact manifold identity.
+        String label = coordinateFrame;
         return new RawObservation(capturedNanos, source, ownerSpace, label,
                 blockId, callbackType, hadOriginal, hitX, hitY, hitZ, hasOther,
                 otherX, otherY, otherZ, impactX, impactY, impactZ, signedVelocity,

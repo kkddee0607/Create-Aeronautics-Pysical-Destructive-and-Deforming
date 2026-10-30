@@ -3,6 +3,7 @@ package com.physicaldestroydeform;
 import com.physicaldestroydeform.collision.SableFrameCapture;
 import com.physicaldestroydeform.collision.CollisionFrame;
 import com.physicaldestroydeform.collision.ContactPairMatcher;
+import com.physicaldestroydeform.collision.OwnerResolver;
 import java.util.ArrayList;
 import com.physicaldestroydeform.diagnostics.PddDiagnostics;
 import com.physicaldestroydeform.diagnostics.AcceptanceReport;
@@ -32,9 +33,11 @@ public final class PhysicalDestroyDeform {
     private long lastCallbackTotal, lastCallbackDropped, lastCaptureErrors;
     private int ticks;
     private long verifiedPairs, worldPlotPairs, plotPlotPairs, worldWorldPairs;
-    private long unpairedContacts, invalidContacts;
-    // Prefer independently confirmed samples; preserve one invalid example for diagnosis.
-    private RawObservation sampleFirst, sampleSecond, sampleInvalid, sampleFallback;
+    private long unpairedContacts, invalidContacts, ambiguousContacts;
+    private long targetsVerifiedBoth, targetsUnresolved, geometryUnresolved, geometryDiagnostic;
+    private long verifiedWorldPlot, verifiedPlotPlot;
+    private record Sample(RawObservation observation, OwnerResolver.Pair ownership) {}
+    private Sample sampleFirst, sampleSecond, sampleInvalid, sampleFallback;
     private NativeCollisionTelemetry.Contact sampleNative;
 
     public PhysicalDestroyDeform() {
@@ -45,8 +48,8 @@ public final class PhysicalDestroyDeform {
         LOGGER.info("[PDD-DIAG] INIT modId={} version={} status=LOADED capture=ALWAYS_ON logging={}", MOD_ID, BUILD_VERSION, debugCollisions);
         PddDiagnostics.runModelSelfTest(LOGGER);
         LOGGER.info("[PDD-DIAG] RUNTIME_INTEGRATION observation=UNIVERSAL_BAKERY_DECORATOR_PLUS_NATIVE_EFFECT_FEED " +
-                "worldMutation=DISABLED energyCalibration=DISABLED callbackFrame=HIT_OWNER_FRAME " +
-                "validation=INDEPENDENT_RECIPROCAL_PRE_SOLVER_PAIR");
+                "worldMutation=DISABLED energyCalibration=DISABLED callbackFrame=UNVERIFIED " +
+                "validation=LIVE_OWNER_BLOCK_AUDIT_GEOMETRY_INDEPENDENT");
     }
     private void onServerStarted(ServerStartedEvent event) {
         MaterialRegistry.rebuild(event.getServer(), LOGGER);
@@ -68,51 +71,66 @@ public final class PhysicalDestroyDeform {
         var callbacks = SableContactQueue.drain();
         var nativeFeed = NativeCollisionTelemetry.drain();
 
-        // Classify every callback BEFORE dispatch: downstream consumers must see the
-        // actually validated frame, not a permanently diagnostic-only placeholder.
+        // Physics-thread snapshots propose owners; ONLY the server-tick Sable
+        // container/block lookup may verify their actual storage identity.
         var evidence = callbacks.stream().map(RawObservation::frameEvidence).toList();
         var pairs = ContactPairMatcher.match(evidence);
         var normalized = new ArrayList<>(callbacks);
         for (var match : pairs.matches()) {
-            int first = match.first(), second = match.second();
-            var a = match.verifiedFirst();
-            var b = match.verifiedSecond();
-            normalized.set(first, callbacks.get(first).withEvidence(a));
-            normalized.set(second, callbacks.get(second).withEvidence(b));
             verifiedPairs++;
+            var a = match.firstEvidence();
+            var b = match.secondEvidence();
             if (a.hit().space() == CollisionFrame.Space.STATIC_WORLD
                     && b.hit().space() == CollisionFrame.Space.STATIC_WORLD) worldWorldPairs++;
             else if (a.hit().space() == CollisionFrame.Space.SABLE_PLOT
                     && b.hit().space() == CollisionFrame.Space.SABLE_PLOT) plotPlotPairs++;
             else worldPlotPairs++;
-            if (debugCollisions && sampleFirst == null) {
-                sampleFirst = normalized.get(first);
-                sampleSecond = normalized.get(second);
-            }
         }
         unpairedContacts += pairs.unpaired();
         invalidContacts += pairs.invalid();
-        if (debugCollisions && sampleInvalid == null) {
-            for (RawObservation c : normalized) {
-                if (c.frameEvidence().quality() == CollisionFrame.Quality.INVALID) {
-                    sampleInvalid = c;
-                    break;
-                }
+        ambiguousContacts += pairs.ambiguous();
+
+        var ownerCache = new java.util.HashMap<OwnerResolver.CacheKey, OwnerResolver.Check>();
+        for (RawObservation c: normalized) {
+            var e = c.frameEvidence();
+            OwnerResolver.Pair audited = OwnerResolver.audit(event.getServer(),e,c.blockId(),ownerCache);
+            if(audited.bothVerified()) {
+                targetsVerifiedBoth++;
+                if(e.hit().space()==CollisionFrame.Space.SABLE_PLOT
+                        && e.other().space()==CollisionFrame.Space.SABLE_PLOT) verifiedPlotPlot++;
+                else if(e.hit().space()!=e.other().space()) verifiedWorldPlot++;
+            } else targetsUnresolved++;
+            if (e.quality()==CollisionFrame.Quality.INVALID
+                    || !"HIT_FRAME_HYPOTHESIS_PLAUSIBLE".equals(e.reason())) geometryUnresolved++;
+            else geometryDiagnostic++;
+            if (debugCollisions) {
+                Sample sample=new Sample(c,audited);
+                if(sampleFallback==null) sampleFallback=sample;
+                if(sampleFirst==null && audited.bothVerified()) sampleFirst=sample;
+                if(sampleInvalid==null && (!audited.bothVerified()
+                        || e.quality()==CollisionFrame.Quality.INVALID
+                        || !"HIT_FRAME_HYPOTHESIS_PLAUSIBLE".equals(e.reason()))) sampleInvalid=sample;
+                if(sampleSecond==null && audited.bothVerified()
+                        && e.hit().space()==CollisionFrame.Space.SABLE_PLOT
+                        && e.other().space()==CollisionFrame.Space.SABLE_PLOT) sampleSecond=sample;
             }
         }
+        // No BlockTarget or geometry result reaches a mutation adapter in 0.2.13.
         RawObservationDispatcher.dispatch(normalized);
-        if (debugCollisions && sampleFallback == null && !normalized.isEmpty())
-            sampleFallback = normalized.get(0);
         if (debugCollisions && sampleNative == null && !nativeFeed.isEmpty())
             sampleNative = nativeFeed.get(0);
         if (++ticks % 100 != 0) return;
 
         acceptanceReport.log(LOGGER);
-        LOGGER.info("[PDD-G-COL-02] phase=SUMMARY {} validatedPairs={} " +
+        LOGGER.info("[PDD-G-COL-02] phase=SUMMARY {} reciprocalOwnerPairs={} " +
                         "worldPlotPairs={} plotPlotPairs={} worldWorldPairs={} " +
-                        "unpairedContacts={} invalidContacts={} toleranceBlocks={} mutation=DISABLED",
+                        "unpairedContacts={} invalidPairCandidates={} pairAmbiguous={} " +
+                        "targetVerifiedBoth={} targetUnresolved={} verifiedWorldPlot={} verifiedPlotPlot={} " +
+                        "geometryDiagnostic={} geometryUnresolved={} tolerance=DIAGNOSTIC_ONLY mutation=DISABLED",
                 SableFrameCapture.summary(),verifiedPairs,worldPlotPairs,plotPlotPairs,
-                worldWorldPairs,unpairedContacts,invalidContacts,ContactPairMatcher.TOLERANCE_BLOCKS);
+                worldWorldPairs,unpairedContacts,invalidContacts,ambiguousContacts,
+                targetsVerifiedBoth,targetsUnresolved,verifiedWorldPlot,verifiedPlotPlot,
+                geometryDiagnostic,geometryUnresolved);
         long total = NativeCollisionTelemetry.total();
         long dropped = NativeCollisionTelemetry.dropped();
         long polls = NativeCollisionTelemetry.polls();
@@ -132,15 +150,16 @@ public final class PhysicalDestroyDeform {
         lastCallbackTotal=callbackTotal; lastCallbackDropped=callbackDropped; lastCaptureErrors=captureErrors;
         if (debugCollisions) {
             logSample(sampleFirst != null ? sampleFirst : sampleFallback);
-            logSample(sampleSecond);
+            if (sampleSecond!=sampleFirst) logSample(sampleSecond);
             if (sampleInvalid != sampleFirst && sampleInvalid != sampleFallback) logSample(sampleInvalid);
             if (sampleNative!=null) logNative(sampleNative);
         }
         sampleFirst=null; sampleSecond=null; sampleInvalid=null; sampleFallback=null; sampleNative=null;
     }
 
-    private static void logSample(RawObservation c) {
-        if(c==null)return;
+    private static void logSample(Sample sample) {
+        if(sample==null)return;
+        var c=sample.observation();
         var e=c.frameEvidence();
         LOGGER.info("[PDD-RAW] phase=LIVE_DATA source={} block={} original={} callbackType={} " +
                         "hit=({},{},{}) otherPresent={} other=({},{},{}) " +
@@ -151,12 +170,16 @@ public final class PhysicalDestroyDeform {
                 c.signedVelocity(),c.removeCollision());
         LOGGER.info("[PDD-G-COL-02] dimension={} epoch={} tick={} phase={} " +
                         "hitOwner={} otherOwner={} rawImpact={} worldFromHit={} otherLocalFromWorld={} " +
-                        "inputQuality={} reason={} frameValidation={} mutation=OFF",
+                        "geometryQuality={} geometryReason={} " +
+                        "hitTargetQuality={} hitTargetKey={} hitTargetReason={} " +
+                        "otherTargetQuality={} otherTargetKey={} otherTargetReason={} " +
+                        "originalCallbackInvoked={} originalResultPreserved=true mutation=OFF",
                 e.dimension(),e.epoch(),e.serverTick(),e.phase(),e.hit(),e.other(),
                 e.contactRaw(),e.contactWorldHypothesis(),e.otherContactLocalHypothesis(),
                 e.quality(),e.reason(),
-                e.quality()==CollisionFrame.Quality.PRE_SOLVER_VALIDATED ?
-                        "RECIPROCAL_MATCH" : "UNVERIFIED_OR_REJECTED");
+                sample.ownership().hit().status(),sample.ownership().hit().key(),sample.ownership().hit().detail(),
+                sample.ownership().other().status(),sample.ownership().other().key(),sample.ownership().other().detail(),
+                c.hadOriginal());
     }
 
     private static void logNative(NativeCollisionTelemetry.Contact c) {

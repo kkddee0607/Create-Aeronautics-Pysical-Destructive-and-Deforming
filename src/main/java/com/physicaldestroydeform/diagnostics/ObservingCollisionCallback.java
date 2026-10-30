@@ -53,7 +53,7 @@ public final class ObservingCollisionCallback implements BlockSubLevelCollisionC
                     impactX, impactY, impactZ, signedVelocity);
             var hit = frame.hit();
             String owner = hit==null ? RawObservation.OWNER_UNKNOWN : hit.space().name();
-            // The callback's impact point belongs to the hit-side owner frame.
+            // Callback frame is an unverified hypothesis. Block owner is audited later.
             String coordinateFrame = hit==null || !hit.valid()
                     ? RawObservation.FRAME_UNVERIFIED
                     : hit.plot() ? "HIT_PLOT_LOCAL_CANDIDATE" : "HIT_STATIC_WORLD_CANDIDATE";
