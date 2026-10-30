@@ -16,7 +16,11 @@ public final class CollisionFrame {
 
     public record Body(UUID plotId, int minX, int maxX, int minZ, int maxZ,
                        Pose pose, Vec linearRaw, Vec angularRaw, Vec centerRaw,
-                       boolean handleValid) {
+                       boolean handleValid, ImpactMath.Body impactBody) {
+        public Body(UUID plotId, int minX, int maxX, int minZ, int maxZ,
+                    Pose pose, Vec linearRaw, Vec angularRaw, Vec centerRaw, boolean handleValid) {
+            this(plotId,minX,maxX,minZ,maxZ,pose,linearRaw,angularRaw,centerRaw,handleValid,null);
+        }
         public boolean contains(int x, int z) { return minX<=x && x<=maxX && minZ<=z && z<=maxZ; }
         /** Rigid handle/pose health does not determine who owns a stored block. */
         public boolean ownerCandidateValid() {

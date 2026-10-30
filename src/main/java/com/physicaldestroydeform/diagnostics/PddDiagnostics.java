@@ -3,6 +3,8 @@ package com.physicaldestroydeform.diagnostics;
 import com.physicaldestroydeform.BlockDamageState;
 import com.physicaldestroydeform.DamageModel;
 import com.physicaldestroydeform.ImpactSample;
+import com.physicaldestroydeform.collision.ImpactMath;
+import com.physicaldestroydeform.collision.FrameMath.Vec;
 import com.physicaldestroydeform.MaterialProperties;
 import com.physicaldestroydeform.material.HardnessScale;
 import org.slf4j.Logger;
@@ -45,6 +47,27 @@ public final class PddDiagnostics {
                     || HardnessScale.fromMinecraft(50, 1200) != 255)
                 throw new IllegalStateException("hardness conversion boundaries mismatch");
             logger.info("[PDD-DIAG] SELFTEST hardness_scale status=PASS empty=0 unbreakable=255 saturated=255");
+            checks++;
+            Vec zero=new Vec(0,0,0), normal=new Vec(1,0,0);
+            var rigid=new ImpactMath.Body(false,2,0.5,ImpactMath.Tensor.zero(),zero,
+                    new Vec(-4,0,0),zero);
+            var exact=ImpactMath.exact(new ImpactMath.ExactInput(rigid,
+                    ImpactMath.Body.staticWorld(),zero,normal,true,true,true));
+            near(16,exact.budget());
+            if(exact.kind()!=ImpactMath.Kind.EXACT_CONTACT || !exact.approved())
+                throw new IllegalStateException("exact math model rejected synthetic case");
+            var proxy=ImpactMath.proxy(new ImpactMath.ProxyInput(rigid,
+                    ImpactMath.Body.staticWorld(),normal,true,true,true,false),
+                    new ImpactMath.ProxyPolicy(true,.5,10));
+            near(8,proxy.budget());
+            if(proxy.kind()!=ImpactMath.Kind.CONSERVATIVE_PROXY || !proxy.approved())
+                throw new IllegalStateException("proxy math model rejected synthetic case");
+            if(ImpactMath.proxy(new ImpactMath.ProxyInput(rigid,
+                    ImpactMath.Body.staticWorld(),normal,true,true,false,false),
+                    new ImpactMath.ProxyPolicy(true,.5,10)).approved())
+                throw new IllegalStateException("unverified normal approved");
+            logger.info("[PDD-G-MATH-01] SELFTEST status=PASS exactSynthetic={} proxySynthetic={} " +
+                    "directionRejected=true scope=API_INDEPENDENT_SYNTHETIC_ONLY",exact.budget(),proxy.budget());
             checks++;
             logger.info("[PDD-DIAG] SELFTEST_SUMMARY status=PASS checks={} scope=API_INDEPENDENT_SYNTHETIC_ONLY liveCollisionObserved=false", checks);
             return true;

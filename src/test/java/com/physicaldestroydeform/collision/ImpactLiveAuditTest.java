@@ -1,0 +1,50 @@
+package com.physicaldestroydeform.collision;
+
+import org.junit.jupiter.api.Test;
+import java.util.UUID;
+import static org.junit.jupiter.api.Assertions.*;
+import static com.physicaldestroydeform.collision.CollisionFrame.*;
+import static com.physicaldestroydeform.collision.FrameMath.*;
+import static com.physicaldestroydeform.collision.ImpactMath.*;
+
+class ImpactLiveAuditTest {
+    private final UUID id=UUID.fromString("12345678-0000-0000-0000-000000000001");
+    private final CollisionFrame.Body body;
+    private final BlockTarget plot,world;
+    ImpactLiveAuditTest() {
+        Pose pose=new Pose(new Vec(10,20,30),new Vec(0,0,0),new Vec(1,1,1),0,0,0,1);
+        var mass=new ImpactMath.Body(false,2,.5,Tensor.zero(),
+                new Vec(10,20,30),new Vec(-3,0,0),new Vec(0,0,0));
+        body=new CollisionFrame.Body(id,0,15,0,15,pose,new Vec(-3,0,0),new Vec(0,0,0),
+                new Vec(0,0,0),true,mass);
+        plot=new BlockTarget(Space.SABLE_PLOT,"overworld",id,2,3,2,true,"TEST");
+        world=new BlockTarget(Space.STATIC_WORLD,"overworld",null,30,3,30,true,"TEST");
+    }
+    private Evidence observation(Vec raw) {
+        return new Evidence(10,100,"overworld",Phase.PRE_SOLVER,plot,world,raw,
+                new Vec(99999999,0,0),null,body,null,Quality.DIAGNOSTIC_ONLY,"FRAME_UNRESOLVED");
+    }
+    @Test void ownerStillVerifiedButBadGeometryCannotApproveImpact() {
+        var e=observation(new Vec(0,0,0));
+        Result r=ImpactLiveAudit.evaluate(e,true,ProxyPolicy.disabled());
+        assertEquals(Kind.UNRESOLVED,r.kind());assertEquals(0,r.budget());
+        assertEquals(Reason.POLICY_DISABLED,r.reason());
+        r=ImpactLiveAudit.evaluate(e,true,new ProxyPolicy(true,.5,100));
+        assertEquals(Reason.DIRECTION_UNVERIFIED,r.reason());
+        assertEquals(0,r.budget());
+    }
+    @Test void cannotPromoteMissingTargetOrPreSolver() {
+        var e=observation(new Vec(0,0,0));
+        assertEquals(Reason.OWNER_UNVERIFIED,ImpactLiveAudit.evaluate(e,false,ProxyPolicy.disabled()).reason());
+        var after=new Evidence(e.epoch(),e.serverTick(),e.dimension(),Phase.POST_SOLVER,
+                e.hit(),e.other(),e.contactRaw(),null,null,e.hitBody(),e.otherBody(),Quality.INVALID,"POST");
+        assertEquals(Reason.STALE_SNAPSHOT,ImpactLiveAudit.evaluate(after,true,ProxyPolicy.disabled()).reason());
+    }
+    @Test void noMassTrackerMeansRejectEvenIfOwnerValid() {
+        var old=new CollisionFrame.Body(id,0,15,0,15,body.pose(),body.linearRaw(),body.angularRaw(),
+                body.centerRaw(),true);
+        var e=new Evidence(10,100,"overworld",Phase.PRE_SOLVER,plot,world,null,null,null,old,null,
+                Quality.DIAGNOSTIC_ONLY,"NONE");
+        assertEquals(Reason.MASS_INVALID,ImpactLiveAudit.evaluate(e,true,ProxyPolicy.disabled()).reason());
+    }
+}

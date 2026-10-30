@@ -54,9 +54,7 @@ public final class ObservingCollisionCallback implements BlockSubLevelCollisionC
             var hit = frame.hit();
             String owner = hit==null ? RawObservation.OWNER_UNKNOWN : hit.space().name();
             // Callback frame is an unverified hypothesis. Block owner is audited later.
-            String coordinateFrame = hit==null || !hit.valid()
-                    ? RawObservation.FRAME_UNVERIFIED
-                    : hit.plot() ? "HIT_PLOT_LOCAL_CANDIDATE" : "HIT_STATIC_WORLD_CANDIDATE";
+            String coordinateFrame = RawObservation.FRAME_UNVERIFIED;
             SableContactQueue.offer(new RawObservation(System.nanoTime(), source,
                     owner, coordinateFrame, blockId, callbackType, original != null,
                     x, y, z, hasOther, otherX, otherY, otherZ, impactX, impactY, impactZ,

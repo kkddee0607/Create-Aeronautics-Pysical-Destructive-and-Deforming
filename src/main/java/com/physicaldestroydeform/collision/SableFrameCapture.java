@@ -51,7 +51,8 @@ public final class SableFrameCapture {
                 Vec center=mass==null?null:copy(mass.getCenterOfMass());
                 bodies.add(new Body(sub.getUniqueId(),Math.multiplyExact(min.x,16),
                         Math.addExact(Math.multiplyExact(max.x,16),15),Math.multiplyExact(min.z,16),
-                        Math.addExact(Math.multiplyExact(max.z,16),15),copiedPose,lin,ang,center,valid));
+                        Math.addExact(Math.multiplyExact(max.z,16),15),copiedPose,lin,ang,center,valid,
+                        valid && mass!=null ? SableMassAdapter.snapshot(mass,copiedPose,lin,ang) : null));
             }catch(RuntimeException broken) {
                 BODY_ERRORS.increment();
                 // Malformed bodies are not silently mapped to a world block. See per-step validity gate.

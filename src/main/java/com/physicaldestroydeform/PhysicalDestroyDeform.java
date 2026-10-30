@@ -5,6 +5,9 @@ import com.physicaldestroydeform.collision.CollisionFrame;
 import com.physicaldestroydeform.collision.ContactPairMatcher;
 import com.physicaldestroydeform.collision.OwnerResolver;
 import com.physicaldestroydeform.collision.TargetGate;
+import com.physicaldestroydeform.collision.ImpactMath;
+import com.physicaldestroydeform.collision.ImpactLiveAudit;
+import com.physicaldestroydeform.collision.ImpactEpisodeLedger;
 import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.Map;
@@ -28,7 +31,7 @@ import org.slf4j.LoggerFactory;
 @Mod(PhysicalDestroyDeform.MOD_ID)
 public final class PhysicalDestroyDeform {
     public static final String MOD_ID = "physical_destroy_deform";
-    public static final String BUILD_VERSION = "0.2.13";
+    public static final String BUILD_VERSION = "0.3.0";
     private static final Logger LOGGER = LoggerFactory.getLogger(PhysicalDestroyDeform.class);
     private final AcceptanceReport acceptanceReport = new AcceptanceReport();
     private final boolean debugCollisions = NativeCollisionTelemetry.ENABLED;
@@ -43,10 +46,15 @@ public final class PhysicalDestroyDeform {
     private final Map<OwnerResolver.Status, Long> hitFailures = new EnumMap<>(OwnerResolver.Status.class);
     private final Map<OwnerResolver.Status, Long> otherFailures = new EnumMap<>(OwnerResolver.Status.class);
     private final Map<String, Long> geometryReasons = new HashMap<>();
+    private final Map<ImpactMath.Reason, Long> impactReasons = new EnumMap<>(ImpactMath.Reason.class);
+    private long evaluatedEpisodes, uniqueEpisodeTargets, noOtherCallbacks, approvedEpisodes;
+    // P-16 requires explicit opt-in plus both numeric parameters; nothing is silently calibrated.
+    private final ImpactMath.ProxyPolicy proxyPolicy = ImpactMath.ProxyPolicy.fromSystemProperties();
+    private ImpactMath.Result sampleImpactResult;
     private record Sample(RawObservation observation, OwnerResolver.Pair ownership,
                           TargetGate.Outcome outcome) {}
     private Sample sampleWorldPlot, sampleStone, samplePlotPlot, sampleOriginal;
-    private Sample sampleBelt, sampleFragile, sampleUnresolvedTarget, sampleUnresolvedGeometry, sampleRotated;
+    private Sample sampleBelt, sampleFragile, sampleUnresolvedTarget, sampleUnresolvedGeometry, sampleRotated, sampleImpactInput;
     private NativeCollisionTelemetry.Contact sampleNative;
 
     public PhysicalDestroyDeform() {
@@ -54,11 +62,14 @@ public final class PhysicalDestroyDeform {
         NeoForge.EVENT_BUS.addListener(this::onDatapackSync);
         NeoForge.EVENT_BUS.addListener(this::onServerStopped);
         NeoForge.EVENT_BUS.addListener(this::onServerTick);
-        LOGGER.info("[PDD-DIAG] INIT modId={} version={} revision=IDS-1.0.3-FIX status=LOADED capture=ALWAYS_ON logging={}", MOD_ID, BUILD_VERSION, debugCollisions);
+        LOGGER.info("[PDD-DIAG] INIT modId={} version={} revision=IDS-1.0.3-G-MATH-01 status=LOADED capture=ALWAYS_ON logging={}", MOD_ID, BUILD_VERSION, debugCollisions);
         PddDiagnostics.runModelSelfTest(LOGGER);
         LOGGER.info("[PDD-DIAG] RUNTIME_INTEGRATION observation=UNIVERSAL_BAKERY_DECORATOR_PLUS_NATIVE_EFFECT_FEED " +
-                "worldMutation=DISABLED energyCalibration=DISABLED callbackFrame=UNVERIFIED " +
+                "worldMutation=DISABLED impactMath=EXACT_AND_PROXY_GATED callbackFrame=UNVERIFIED " +
                 "validation=LIVE_OWNER_BLOCK_AUDIT_GEOMETRY_INDEPENDENT pairMatcher=DIAGNOSTIC_ONLY targetGate=LIVE_BLOCK_ONLY");
+        LOGGER.info("[PDD-G-MATH-01] POLICY proxyEnabled={} factor={} stepCap={} " +
+                        "note=NO_HIDDEN_COEFFICIENTS mutation=DISABLED",
+                proxyPolicy.enabled(),proxyPolicy.factor(),proxyPolicy.availableStepCap());
     }
     private void onServerStarted(ServerStartedEvent event) {
         MaterialRegistry.rebuild(event.getServer(), LOGGER);
@@ -100,6 +111,7 @@ public final class PhysicalDestroyDeform {
         ambiguousContacts += pairs.ambiguous();
 
         var ownerCache = new HashMap<OwnerResolver.CacheKey, OwnerResolver.Check>();
+        var budgetEpisodes = new ImpactEpisodeLedger();
         for (RawObservation c: normalized) {
             var e = c.frameEvidence();
             OwnerResolver.Pair audited = OwnerResolver.audit(event.getServer(),e,c.blockId(),ownerCache);
@@ -116,7 +128,20 @@ public final class PhysicalDestroyDeform {
                 if(e.hit().space()==CollisionFrame.Space.SABLE_PLOT
                         && e.other().space()==CollisionFrame.Space.SABLE_PLOT) verifiedPlotPlot++;
                 else if(e.hit().space()!=e.other().space()) verifiedWorldPlot++;
-            } else targetsUnresolved++;
+            } else if(outcome==TargetGate.Outcome.NO_OTHER)noOtherCallbacks++;
+            else targetsUnresolved++;
+            if(outcome==TargetGate.Outcome.BOTH_VERIFIED) {
+                try {
+                    var key=ImpactEpisodeLedger.Key.of(e.dimension(),e.epoch(),
+                            ownerId(e.hit()),ownerId(e.other()));
+                    var episode=budgetEpisodes.observe(key,audited.hit().key().toString(),
+                            audited.other().key().toString());
+                    var candidate=ImpactLiveAudit.evaluate(e,true,proxyPolicy);
+                    episode.approveOnce(candidate);
+                } catch (IllegalArgumentException invalidGrouping) {
+                    impactReasons.merge(ImpactMath.Reason.OWNER_UNVERIFIED,1L,Long::sum);
+                }
+            }
             boolean unresolvedGeometry = e.quality()==CollisionFrame.Quality.INVALID
                     || !"HIT_FRAME_HYPOTHESIS_PLAUSIBLE".equals(e.reason());
             geometryReasons.merge(e.reason(), 1L, Long::sum);
@@ -137,9 +162,26 @@ public final class PhysicalDestroyDeform {
                 if(sampleUnresolvedTarget==null && !both) sampleUnresolvedTarget=sample;
                 if(sampleUnresolvedGeometry==null && unresolvedGeometry) sampleUnresolvedGeometry=sample;
                 if(sampleRotated==null && both && isRotated(e)) sampleRotated=sample;
+                if(sampleImpactInput==null && both && (
+                        (e.hitBody()!=null && e.hitBody().impactBody()!=null) ||
+                        (e.otherBody()!=null && e.otherBody().impactBody()!=null)))
+                    sampleImpactInput=sample;
             }
         }
-        // No BlockTarget or geometry result reaches a mutation adapter in 0.2.13.
+        // Do not turn callbacks into budgets. One episode per pair/physics step,
+        // independent of how many callback blocks or directions reported it.
+        for(var episode:budgetEpisodes.entries().values()) {
+            evaluatedEpisodes++;
+            uniqueEpisodeTargets+=episode.uniqueTargets();
+            var decision=episode.decision();
+            if(decision!=null) {
+                impactReasons.merge(decision.reason(),1L,Long::sum);
+                if(decision.approved())approvedEpisodes++;
+                if(sampleImpactResult==null || (sampleImpactResult.reason()==ImpactMath.Reason.MASS_INVALID
+                        && decision.reason()!=ImpactMath.Reason.MASS_INVALID))sampleImpactResult=decision;
+            }
+        }
+        // 0.3.0 builds an impact budget model; world mutation belongs to later milestones.
         RawObservationDispatcher.dispatch(normalized);
         if (debugCollisions && sampleNative == null && !nativeFeed.isEmpty())
             sampleNative = nativeFeed.get(0);
@@ -150,16 +192,27 @@ public final class PhysicalDestroyDeform {
                         "worldPlotPairs={} plotPlotPairs={} worldWorldPairs={} " +
                         "unpairedContacts={} invalidPairCandidates={} pairAmbiguous={} " +
                         "targetVerifiedBoth={} targetUnresolved={} verifiedWorldPlot={} verifiedPlotPlot={} " +
-                        "geometryDiagnostic={} geometryUnresolved={} targetGate=LIVE_BLOCK_ONLY " +
+                        "geometryDiagnostic={} geometryUnresolved={} noOtherCallbacks={} targetGate=LIVE_BLOCK_ONLY " +
                         "pairMatcher=DIAGNOSTIC_ONLY geometryGate=NON_BLOCKING_DIAGNOSTIC " +
                         "gateStatus=EVIDENCE_ONLY tolerance=DIAGNOSTIC_ONLY mutation=DISABLED",
                 SableFrameCapture.summary(),verifiedPairs,worldPlotPairs,plotPlotPairs,
                 worldWorldPairs,unpairedContacts,invalidContacts,ambiguousContacts,
                 targetsVerifiedBoth,targetsUnresolved,verifiedWorldPlot,verifiedPlotPlot,
-                geometryDiagnostic,geometryUnresolved);
+                geometryDiagnostic,geometryUnresolved,noOtherCallbacks);
         LOGGER.info("[PDD-G-COL-02] phase=QUALITY targetOutcomes={} hitFailures={} " +
                 "otherFailures={} geometryReasons={} mutation=DISABLED",
                 targetOutcomes,hitFailures,otherFailures,geometryReasons);
+        LOGGER.info("[PDD-G-MATH-01] phase=SUMMARY episodes={} uniqueTargetIncidences={} approvedEpisodes={} " +
+                        "reasons={} exactOrProxyWorldMutation=DISABLED nativeEffectAuthority=DIAGNOSTIC_ONLY " +
+                        "budgetApproval=EVIDENCE_GATED",
+                evaluatedEpisodes,uniqueEpisodeTargets,approvedEpisodes,impactReasons);
+        if(sampleImpactResult!=null)LOGGER.info(
+                "[PDD-G-MATH-01] phase=SAMPLE inputQuality={} budgetKind={} " +
+                        "reason={} approvedBudget={} closingSpeed={} effectiveMass={} source={} mutation=OFF",
+                "DIAGNOSTIC_ONLY",sampleImpactResult.kind(),sampleImpactResult.reason(),
+                sampleImpactResult.budget(),sampleImpactResult.closingSpeed(),
+                sampleImpactResult.effectiveMass(),sampleImpactResult.source());
+        sampleImpactResult=null;
         long total = NativeCollisionTelemetry.total();
         long dropped = NativeCollisionTelemetry.dropped();
         long polls = NativeCollisionTelemetry.polls();
@@ -187,11 +240,19 @@ public final class PhysicalDestroyDeform {
             logSample("UNRESOLVED_TARGET", sampleUnresolvedTarget);
             logSample("UNRESOLVED_GEOMETRY", sampleUnresolvedGeometry);
             logSample("ROTATED_PLOT", sampleRotated);
+            if(sampleImpactInput!=null)logImpactInput(sampleImpactInput);
             if (sampleNative!=null) logNative(sampleNative);
         }
         sampleWorldPlot=null; sampleStone=null; samplePlotPlot=null; sampleOriginal=null;
         sampleBelt=null; sampleFragile=null; sampleUnresolvedTarget=null;
-        sampleUnresolvedGeometry=null; sampleRotated=null; sampleNative=null;
+        sampleUnresolvedGeometry=null; sampleRotated=null; sampleImpactInput=null; sampleNative=null;
+    }
+
+    private static String ownerId(CollisionFrame.BlockTarget target) {
+        if(target.space()==CollisionFrame.Space.STATIC_WORLD)return "WORLD";
+        if(target.space()==CollisionFrame.Space.SABLE_PLOT && target.stablePlotId()!=null)
+            return "PLOT:"+target.stablePlotId();
+        throw new IllegalArgumentException("unresolved owner identity");
     }
 
     private static boolean isStone(RawObservation observation, OwnerResolver.Pair owners) {
@@ -224,7 +285,7 @@ public final class PhysicalDestroyDeform {
                 c.impactX(),c.impactY(),c.impactZ(),c.coordinateFrame(),c.ownerSpace(),
                 c.signedVelocity(),c.removeCollision());
         LOGGER.info("[PDD-G-COL-02] phase=SAMPLE scenario={} dimension={} epoch={} tick={} sourcePhase={} targetOutcome={} " +
-                        "hitOwner={} otherOwner={} rawImpact={} worldFromHit={} otherLocalFromWorld={} " +
+                        "hitOwner={} otherOwner={} rawImpact={} worldFromHitHypothesis={} otherLocalHypothesis={} " +
                         "geometryQuality={} geometryReason={} " +
                         "hitTargetQuality={} hitTargetKey={} hitTargetReason={} " +
                         "otherTargetQuality={} otherTargetKey={} otherTargetReason={} " +
@@ -235,6 +296,24 @@ public final class PhysicalDestroyDeform {
                 sample.ownership().hit().status(),sample.ownership().hit().key(),sample.ownership().hit().detail(),
                 sample.ownership().other().status(),sample.ownership().other().key(),sample.ownership().other().detail(),
                 c.hadOriginal());
+    }
+
+    private static void logImpactInput(Sample sample) {
+        var e=sample.observation().frameEvidence();
+        var a=ImpactLiveAudit.body(e.hit(),e.hitBody());
+        var b=ImpactLiveAudit.body(e.other(),e.otherBody());
+        LOGGER.info("[PDD-G-MATH-01] phase=INPUT epoch={} serverTick={} source=PRE_SOLVER " +
+                        "hitOwner={} otherOwner={} hitMass={} hitInverseMass={} " +
+                        "hitLinear={} hitAngular={} hitCenter={} otherMass={} otherInverseMass={} " +
+                        "otherLinear={} otherAngular={} otherCenter={} contactFrame=UNVERIFIED " +
+                        "normalEvidence=NONE quality=DIAGNOSTIC_ONLY mutation=OFF",
+                e.epoch(),e.serverTick(),e.hit(),e.other(),
+                a==null?"UNAVAILABLE":a.mass(),a==null?"UNAVAILABLE":a.inverseMass(),
+                a==null?"UNAVAILABLE":a.linearWorld(),a==null?"UNAVAILABLE":a.angularWorld(),
+                a==null?"UNAVAILABLE":a.centerWorld(),
+                b==null?"UNAVAILABLE":b.mass(),b==null?"UNAVAILABLE":b.inverseMass(),
+                b==null?"UNAVAILABLE":b.linearWorld(),b==null?"UNAVAILABLE":b.angularWorld(),
+                b==null?"UNAVAILABLE":b.centerWorld());
     }
 
     private static void logNative(NativeCollisionTelemetry.Contact c) {
