@@ -67,4 +67,73 @@ class ObservingCollisionCallbackTest {
         assertFalse(records.getFirst().hadOriginal());
         assertFalse(records.getFirst().removeCollision());
     }
+
+    @Test void originalNativeExceptionMustPropagateWithoutRetry() {
+        SableContactQueue.drain();
+        AtomicInteger calls = new AtomicInteger();
+        IllegalStateException expected = new IllegalStateException("original native failure");
+        BlockSubLevelCollisionCallback original = new BlockSubLevelCollisionCallback() {
+            @Override public double[] onCollision(int x, int y, int z, int ox, int oy, int oz,
+                                                  double ix, double iy, double iz, double v, boolean other) {
+                calls.incrementAndGet();
+                throw expected;
+            }
+        };
+        var decorator = new ObservingCollisionCallback(original, "minecraft:stone");
+        assertSame(expected, assertThrows(IllegalStateException.class,
+                () -> decorator.onCollision(1, 2, 3, 4, 5, 6, 7, 8, 9, -10, true)));
+        assertEquals(1, calls.get());
+        assertTrue(SableContactQueue.drain().isEmpty());
+    }
+
+    @Test void originalDirectExceptionMustPropagateWithoutRetry() {
+        SableContactQueue.drain();
+        AtomicInteger calls = new AtomicInteger();
+        IllegalArgumentException expected = new IllegalArgumentException("original direct failure");
+        BlockSubLevelCollisionCallback original = new BlockSubLevelCollisionCallback() {
+            @Override public CollisionResult sable$onCollision(BlockPos hit, BlockPos other,
+                                                                 Vector3d pos, double velocity) {
+                calls.incrementAndGet();
+                throw expected;
+            }
+        };
+        var decorator = new ObservingCollisionCallback(original, "minecraft:tnt");
+        assertSame(expected, assertThrows(IllegalArgumentException.class,
+                () -> decorator.sable$onCollision(new BlockPos(1, 2, 3), null,
+                        new Vector3d(1, 2, 3), -2)));
+        assertEquals(1, calls.get());
+        assertTrue(SableContactQueue.drain().isEmpty());
+    }
+
+    @Test void fullObservationQueueMustNotChangeOriginalResponse() {
+        SableContactQueue.drain();
+        AtomicInteger calls = new AtomicInteger();
+        double[] originalArray = {0.25, 0.5, 0.75, 1.0};
+        BlockSubLevelCollisionCallback original = new BlockSubLevelCollisionCallback() {
+            @Override public double[] onCollision(int x, int y, int z, int ox, int oy, int oz,
+                                                  double ix, double iy, double iz, double v, boolean other) {
+                calls.incrementAndGet();
+                return originalArray;
+            }
+        };
+        try {
+            for (int i = 0; i < SableContactQueue.CAPACITY; i++) {
+                SableContactQueue.offer(new RawObservation(System.nanoTime(),
+                        RawObservation.SOURCE_NATIVE_CALLBACK, RawObservation.OWNER_UNKNOWN,
+                        RawObservation.FRAME_UNVERIFIED, "minecraft:stone", "TEST", false,
+                        i, 64, 0, false, 0, 0, 0, 0, 0, 0, 0, false));
+            }
+            assertEquals(SableContactQueue.CAPACITY, SableContactQueue.size());
+            long droppedBefore = SableContactQueue.dropped();
+            var decorator = new ObservingCollisionCallback(original, "minecraft:stone");
+            assertSame(originalArray,
+                    decorator.onCollision(1, 2, 3, 4, 5, 6, 7, 8, 9, -10, true));
+            assertEquals(1, calls.get());
+            assertEquals(droppedBefore + 1, SableContactQueue.dropped());
+            assertEquals(SableContactQueue.CAPACITY, SableContactQueue.size());
+        } finally {
+            SableContactQueue.drain();
+        }
+    }
+
 }
