@@ -78,6 +78,11 @@ class ObservingCollisionCallbackTest {
                 calls.incrementAndGet();
                 throw expected;
             }
+            @Override public CollisionResult sable$onCollision(BlockPos hit, BlockPos other,
+                                                                 Vector3d pos, double velocity) {
+                fail("Native exception test must not invoke the direct callback");
+                return CollisionResult.NONE;
+            }
         };
         var decorator = new ObservingCollisionCallback(original, "minecraft:stone");
         assertSame(expected, assertThrows(IllegalStateException.class,
@@ -114,6 +119,11 @@ class ObservingCollisionCallbackTest {
                                                   double ix, double iy, double iz, double v, boolean other) {
                 calls.incrementAndGet();
                 return originalArray;
+            }
+            @Override public CollisionResult sable$onCollision(BlockPos hit, BlockPos other,
+                                                                 Vector3d pos, double velocity) {
+                fail("Queue saturation test must not invoke the direct callback");
+                return CollisionResult.NONE;
             }
         };
         try {
