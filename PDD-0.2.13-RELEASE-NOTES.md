@@ -59,3 +59,23 @@ Implemented together:
 - Fixed `ContactPairMatcher.Match(first,second)` reversing based on `HashMap` iteration / Plot UUID hash. Reciprocal pairs now expose stable ascending **callback input indices** and correspondingly ordered evidence; separate pairs are sorted by their first input index.
 - Preserved the original failing `ContactPairMatcherTest` expectations and all Sable callback/ownership/geometry/epoch contracts. Added two regression tests including 512 deterministic UUID cases and two independently interleaved owner pairs.
 - Auxiliary Java probe: original implementation reversed 273/512; corrected implementation reversed 0/512. Auxiliary pure Java test-method runner: 20/20 PASS. **Official full Gradle/JUnit and new GitHub Actions build are NOT_RUN**. See `docs/verification/0.2.13-contact-pair-order-hotfix.md`.
+
+
+## PDD 0.2.13 FIX — IDS 1.0.3 target-first acceptance (2026-10-30)
+
+- Baseline: GitHub `main` SHA `135c74bb13edf604a9900a0e48fd912546298248`.
+- Added pure-Java `collision/TargetGate`: one side or two sides can only be marked
+  verified after their individual `OwnerResolver` live block audits. Contact
+  geometry, 0.25-block distance and 1:1 reciprocal matching are **not inputs**.
+- `PhysicalDestroyDeform` now emits separate `phase=QUALITY` target outcomes,
+  per-side audit failure statuses and geometry reasons, plus sampled scenarios
+  `WORLD_PLOT`, `STONE_WALL`, `PLOT_PLOT`, `ORIGINAL_CALLBACK`,
+  `BELT_CALLBACK`, `FRAGILE_CALLBACK`, `UNRESOLVED_TARGET`, `UNRESOLVED_GEOMETRY`, `ROTATED_PLOT`.
+- Removed redundant ArrayList copy in server tick processing.
+- Added `TargetGateTest`, `CollisionFrameTest` invalid geometry/valid owners
+  regression, and `ContactPairMatcherTest` ambiguous-but-usable-target regression.
+- No new external API, Gradle dependencies or mixins. Existing Sable wrapper,
+  callback return values, original invocation and world-mutation disabled.
+- **Build validation NOT COMPLETE**: official Gradle/JUnit cannot run without
+  GitHub-protected wrapper and online dependencies in this environment. See
+  `docs/verification/0.2.13-ids-1.0.3-fix.md`. Do not claim passing CI before Apply.

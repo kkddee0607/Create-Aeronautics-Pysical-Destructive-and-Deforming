@@ -138,6 +138,21 @@ class CollisionFrameTest {
         assertFalse(e.canMutateWorld());
     }
 
+    @Test void ids103GeometryFailurePreservesIndependentWorldAndPlotBlockTargets() {
+        UUID plotId = UUID.randomUUID();
+        Body inactive = new Body(plotId, 32, 47, 32, 47, ID, null, null, null, false);
+        Snapshot step = new Snapshot(1, 1, "minecraft:overworld", Phase.PRE_SOLVER,
+                List.of(inactive), true);
+        Evidence e = step.observe(34, 70, 35, true, 90, 70, 90,
+                Double.NaN, 63, 0, Double.NaN);
+        assertEquals(Space.SABLE_PLOT, e.hit().space());
+        assertEquals(plotId, e.hit().stablePlotId());
+        assertEquals(Space.STATIC_WORLD, e.other().space());
+        assertEquals(Quality.INVALID, e.quality());
+        assertEquals("NONFINITE_GEOMETRY_OR_VELOCITY", e.reason());
+        assertFalse(e.canMutateWorld());
+    }
+
     @Test void utFrame02CrossPhysicsEpochAndPostSolverNeverAuthorizesDamage() {
         Snapshot pre=new Snapshot(11,10,"x",Phase.PRE_SOLVER,List.of(),true);
         Snapshot other=new Snapshot(12,10,"x",Phase.PRE_SOLVER,List.of(),true);

@@ -4,7 +4,10 @@ import com.physicaldestroydeform.collision.SableFrameCapture;
 import com.physicaldestroydeform.collision.CollisionFrame;
 import com.physicaldestroydeform.collision.ContactPairMatcher;
 import com.physicaldestroydeform.collision.OwnerResolver;
-import java.util.ArrayList;
+import com.physicaldestroydeform.collision.TargetGate;
+import java.util.EnumMap;
+import java.util.HashMap;
+import java.util.Map;
 import com.physicaldestroydeform.diagnostics.PddDiagnostics;
 import com.physicaldestroydeform.diagnostics.AcceptanceReport;
 import com.physicaldestroydeform.diagnostics.RawObservationDispatcher;
@@ -36,8 +39,14 @@ public final class PhysicalDestroyDeform {
     private long unpairedContacts, invalidContacts, ambiguousContacts;
     private long targetsVerifiedBoth, targetsUnresolved, geometryUnresolved, geometryDiagnostic;
     private long verifiedWorldPlot, verifiedPlotPlot;
-    private record Sample(RawObservation observation, OwnerResolver.Pair ownership) {}
-    private Sample sampleFirst, sampleSecond, sampleInvalid, sampleFallback;
+    private final Map<TargetGate.Outcome, Long> targetOutcomes = new EnumMap<>(TargetGate.Outcome.class);
+    private final Map<OwnerResolver.Status, Long> hitFailures = new EnumMap<>(OwnerResolver.Status.class);
+    private final Map<OwnerResolver.Status, Long> otherFailures = new EnumMap<>(OwnerResolver.Status.class);
+    private final Map<String, Long> geometryReasons = new HashMap<>();
+    private record Sample(RawObservation observation, OwnerResolver.Pair ownership,
+                          TargetGate.Outcome outcome) {}
+    private Sample sampleWorldPlot, sampleStone, samplePlotPlot, sampleOriginal;
+    private Sample sampleBelt, sampleFragile, sampleUnresolvedTarget, sampleUnresolvedGeometry, sampleRotated;
     private NativeCollisionTelemetry.Contact sampleNative;
 
     public PhysicalDestroyDeform() {
@@ -45,11 +54,11 @@ public final class PhysicalDestroyDeform {
         NeoForge.EVENT_BUS.addListener(this::onDatapackSync);
         NeoForge.EVENT_BUS.addListener(this::onServerStopped);
         NeoForge.EVENT_BUS.addListener(this::onServerTick);
-        LOGGER.info("[PDD-DIAG] INIT modId={} version={} status=LOADED capture=ALWAYS_ON logging={}", MOD_ID, BUILD_VERSION, debugCollisions);
+        LOGGER.info("[PDD-DIAG] INIT modId={} version={} revision=IDS-1.0.3-FIX status=LOADED capture=ALWAYS_ON logging={}", MOD_ID, BUILD_VERSION, debugCollisions);
         PddDiagnostics.runModelSelfTest(LOGGER);
         LOGGER.info("[PDD-DIAG] RUNTIME_INTEGRATION observation=UNIVERSAL_BAKERY_DECORATOR_PLUS_NATIVE_EFFECT_FEED " +
                 "worldMutation=DISABLED energyCalibration=DISABLED callbackFrame=UNVERIFIED " +
-                "validation=LIVE_OWNER_BLOCK_AUDIT_GEOMETRY_INDEPENDENT");
+                "validation=LIVE_OWNER_BLOCK_AUDIT_GEOMETRY_INDEPENDENT pairMatcher=DIAGNOSTIC_ONLY targetGate=LIVE_BLOCK_ONLY");
     }
     private void onServerStarted(ServerStartedEvent event) {
         MaterialRegistry.rebuild(event.getServer(), LOGGER);
@@ -75,7 +84,7 @@ public final class PhysicalDestroyDeform {
         // container/block lookup may verify their actual storage identity.
         var evidence = callbacks.stream().map(RawObservation::frameEvidence).toList();
         var pairs = ContactPairMatcher.match(evidence);
-        var normalized = new ArrayList<>(callbacks);
+        var normalized = callbacks;
         for (var match : pairs.matches()) {
             verifiedPairs++;
             var a = match.firstEvidence();
@@ -90,29 +99,44 @@ public final class PhysicalDestroyDeform {
         invalidContacts += pairs.invalid();
         ambiguousContacts += pairs.ambiguous();
 
-        var ownerCache = new java.util.HashMap<OwnerResolver.CacheKey, OwnerResolver.Check>();
+        var ownerCache = new HashMap<OwnerResolver.CacheKey, OwnerResolver.Check>();
         for (RawObservation c: normalized) {
             var e = c.frameEvidence();
             OwnerResolver.Pair audited = OwnerResolver.audit(event.getServer(),e,c.blockId(),ownerCache);
-            if(audited.bothVerified()) {
+            // Target quality is a function of LIVE owners/blocks only, not geometry
+            // or a forced one-to-one match between callback contact points.
+            TargetGate.Outcome outcome = TargetGate.evaluate(c.hasOther(),
+                    audited.hit().verified(), audited.other().verified());
+            targetOutcomes.merge(outcome, 1L, Long::sum);
+            if (!audited.hit().verified()) hitFailures.merge(audited.hit().status(), 1L, Long::sum);
+            if (c.hasOther() && !audited.other().verified())
+                otherFailures.merge(audited.other().status(), 1L, Long::sum);
+            if (outcome == TargetGate.Outcome.BOTH_VERIFIED) {
                 targetsVerifiedBoth++;
                 if(e.hit().space()==CollisionFrame.Space.SABLE_PLOT
                         && e.other().space()==CollisionFrame.Space.SABLE_PLOT) verifiedPlotPlot++;
                 else if(e.hit().space()!=e.other().space()) verifiedWorldPlot++;
             } else targetsUnresolved++;
-            if (e.quality()==CollisionFrame.Quality.INVALID
-                    || !"HIT_FRAME_HYPOTHESIS_PLAUSIBLE".equals(e.reason())) geometryUnresolved++;
+            boolean unresolvedGeometry = e.quality()==CollisionFrame.Quality.INVALID
+                    || !"HIT_FRAME_HYPOTHESIS_PLAUSIBLE".equals(e.reason());
+            geometryReasons.merge(e.reason(), 1L, Long::sum);
+            if (unresolvedGeometry) geometryUnresolved++;
             else geometryDiagnostic++;
             if (debugCollisions) {
-                Sample sample=new Sample(c,audited);
-                if(sampleFallback==null) sampleFallback=sample;
-                if(sampleFirst==null && audited.bothVerified()) sampleFirst=sample;
-                if(sampleInvalid==null && (!audited.bothVerified()
-                        || e.quality()==CollisionFrame.Quality.INVALID
-                        || !"HIT_FRAME_HYPOTHESIS_PLAUSIBLE".equals(e.reason()))) sampleInvalid=sample;
-                if(sampleSecond==null && audited.bothVerified()
-                        && e.hit().space()==CollisionFrame.Space.SABLE_PLOT
-                        && e.other().space()==CollisionFrame.Space.SABLE_PLOT) sampleSecond=sample;
+                Sample sample=new Sample(c,audited,outcome);
+                boolean both = outcome == TargetGate.Outcome.BOTH_VERIFIED;
+                boolean plotPlot = both && e.hit().space()==CollisionFrame.Space.SABLE_PLOT
+                        && e.other().space()==CollisionFrame.Space.SABLE_PLOT;
+                boolean worldPlot = both && e.hit().space()!=e.other().space();
+                if(sampleWorldPlot==null && worldPlot) sampleWorldPlot=sample;
+                if(sampleStone==null && worldPlot && isStone(c, audited)) sampleStone=sample;
+                if(samplePlotPlot==null && plotPlot) samplePlotPlot=sample;
+                if(sampleOriginal==null && c.hadOriginal()) sampleOriginal=sample;
+                if(sampleBelt==null && c.callbackType().contains("Belt")) sampleBelt=sample;
+                if(sampleFragile==null && c.callbackType().contains("Fragile")) sampleFragile=sample;
+                if(sampleUnresolvedTarget==null && !both) sampleUnresolvedTarget=sample;
+                if(sampleUnresolvedGeometry==null && unresolvedGeometry) sampleUnresolvedGeometry=sample;
+                if(sampleRotated==null && both && isRotated(e)) sampleRotated=sample;
             }
         }
         // No BlockTarget or geometry result reaches a mutation adapter in 0.2.13.
@@ -126,11 +150,16 @@ public final class PhysicalDestroyDeform {
                         "worldPlotPairs={} plotPlotPairs={} worldWorldPairs={} " +
                         "unpairedContacts={} invalidPairCandidates={} pairAmbiguous={} " +
                         "targetVerifiedBoth={} targetUnresolved={} verifiedWorldPlot={} verifiedPlotPlot={} " +
-                        "geometryDiagnostic={} geometryUnresolved={} tolerance=DIAGNOSTIC_ONLY mutation=DISABLED",
+                        "geometryDiagnostic={} geometryUnresolved={} targetGate=LIVE_BLOCK_ONLY " +
+                        "pairMatcher=DIAGNOSTIC_ONLY geometryGate=NON_BLOCKING_DIAGNOSTIC " +
+                        "gateStatus=EVIDENCE_ONLY tolerance=DIAGNOSTIC_ONLY mutation=DISABLED",
                 SableFrameCapture.summary(),verifiedPairs,worldPlotPairs,plotPlotPairs,
                 worldWorldPairs,unpairedContacts,invalidContacts,ambiguousContacts,
                 targetsVerifiedBoth,targetsUnresolved,verifiedWorldPlot,verifiedPlotPlot,
                 geometryDiagnostic,geometryUnresolved);
+        LOGGER.info("[PDD-G-COL-02] phase=QUALITY targetOutcomes={} hitFailures={} " +
+                "otherFailures={} geometryReasons={} mutation=DISABLED",
+                targetOutcomes,hitFailures,otherFailures,geometryReasons);
         long total = NativeCollisionTelemetry.total();
         long dropped = NativeCollisionTelemetry.dropped();
         long polls = NativeCollisionTelemetry.polls();
@@ -149,32 +178,58 @@ public final class PhysicalDestroyDeform {
         lastTotal=total; lastDropped=dropped; lastPolls=polls; lastMalformed=malformed;
         lastCallbackTotal=callbackTotal; lastCallbackDropped=callbackDropped; lastCaptureErrors=captureErrors;
         if (debugCollisions) {
-            logSample(sampleFirst != null ? sampleFirst : sampleFallback);
-            if (sampleSecond!=sampleFirst) logSample(sampleSecond);
-            if (sampleInvalid != sampleFirst && sampleInvalid != sampleFallback) logSample(sampleInvalid);
+            logSample("WORLD_PLOT", sampleWorldPlot);
+            logSample("STONE_WALL", sampleStone);
+            logSample("PLOT_PLOT", samplePlotPlot);
+            logSample("ORIGINAL_CALLBACK", sampleOriginal);
+            logSample("BELT_CALLBACK", sampleBelt);
+            logSample("FRAGILE_CALLBACK", sampleFragile);
+            logSample("UNRESOLVED_TARGET", sampleUnresolvedTarget);
+            logSample("UNRESOLVED_GEOMETRY", sampleUnresolvedGeometry);
+            logSample("ROTATED_PLOT", sampleRotated);
             if (sampleNative!=null) logNative(sampleNative);
         }
-        sampleFirst=null; sampleSecond=null; sampleInvalid=null; sampleFallback=null; sampleNative=null;
+        sampleWorldPlot=null; sampleStone=null; samplePlotPlot=null; sampleOriginal=null;
+        sampleBelt=null; sampleFragile=null; sampleUnresolvedTarget=null;
+        sampleUnresolvedGeometry=null; sampleRotated=null; sampleNative=null;
     }
 
-    private static void logSample(Sample sample) {
+    private static boolean isStone(RawObservation observation, OwnerResolver.Pair owners) {
+        return observation.blockId().equals("minecraft:stone")
+                || (owners.other().key()!=null
+                    && owners.other().key().fingerprint().startsWith("minecraft:stone|"));
+    }
+
+    private static boolean isRotated(CollisionFrame.Evidence evidence) {
+        return rotated(evidence.hitBody()) || rotated(evidence.otherBody());
+    }
+
+    private static boolean rotated(CollisionFrame.Body body) {
+        if (body==null || body.pose()==null) return false;
+        var pose=body.pose();
+        // Quaternion is diagnostic, not a geometry/owner validation shortcut.
+        return Math.abs(pose.qx())+Math.abs(pose.qy())+Math.abs(pose.qz())>1e-4
+                || Math.abs(Math.abs(pose.qw())-1)>1e-4;
+    }
+
+    private static void logSample(String scenario, Sample sample) {
         if(sample==null)return;
         var c=sample.observation();
         var e=c.frameEvidence();
-        LOGGER.info("[PDD-RAW] phase=LIVE_DATA source={} block={} original={} callbackType={} " +
+        LOGGER.info("[PDD-RAW] phase=LIVE_DATA scenario={} source={} block={} original={} callbackType={} " +
                         "hit=({},{},{}) otherPresent={} other=({},{},{}) " +
                         "impact=({},{},{}) impactFrame={} ownerSpace={} signedVelocityRaw={} removed={} mutation=OFF",
-                c.source(),c.blockId(),c.hadOriginal(),c.callbackType(),
+                scenario,c.source(),c.blockId(),c.hadOriginal(),c.callbackType(),
                 c.hitX(),c.hitY(),c.hitZ(),c.hasOther(),c.otherX(),c.otherY(),c.otherZ(),
                 c.impactX(),c.impactY(),c.impactZ(),c.coordinateFrame(),c.ownerSpace(),
                 c.signedVelocity(),c.removeCollision());
-        LOGGER.info("[PDD-G-COL-02] dimension={} epoch={} tick={} phase={} " +
+        LOGGER.info("[PDD-G-COL-02] phase=SAMPLE scenario={} dimension={} epoch={} tick={} sourcePhase={} targetOutcome={} " +
                         "hitOwner={} otherOwner={} rawImpact={} worldFromHit={} otherLocalFromWorld={} " +
                         "geometryQuality={} geometryReason={} " +
                         "hitTargetQuality={} hitTargetKey={} hitTargetReason={} " +
                         "otherTargetQuality={} otherTargetKey={} otherTargetReason={} " +
                         "originalCallbackInvoked={} originalResultPreserved=true mutation=OFF",
-                e.dimension(),e.epoch(),e.serverTick(),e.phase(),e.hit(),e.other(),
+                scenario,e.dimension(),e.epoch(),e.serverTick(),e.phase(),sample.outcome(),e.hit(),e.other(),
                 e.contactRaw(),e.contactWorldHypothesis(),e.otherContactLocalHypothesis(),
                 e.quality(),e.reason(),
                 sample.ownership().hit().status(),sample.ownership().hit().key(),sample.ownership().hit().detail(),

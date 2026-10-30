@@ -50,3 +50,16 @@ This version does **not** implement 0.3.0 impact energy, 0.4.x damage, deformati
 ### 0.2.13 G-COL-02 coordinate correction
 
 The hit callback point belongs to the hit block coordinate frame. `worldFromHit` is transformed once; `otherLocalFromWorld` is the same world point expressed in the other owner's native frame. Live diagnostics report independent reciprocal same-epoch pair agreement and emit a maximum of two callback and one native detail sample per 100 server ticks. World mutation remains disabled; see `docs/verification/0.2.13-g-col-02-hotfix.md`.
+
+## IDS 1.0.3 — PDD 0.2.13 FIX (read-only collision audit)
+
+- `TargetGate` confirms each side solely from `OwnerResolver` live owner/block audit.
+  Callback contact-point hypotheses and `ContactPairMatcher` never gate valid target identity.
+- Interval `PDD-G-COL-02 phase=QUALITY` reports target outcomes, separate failure reasons,
+  and geometry reasons. `phase=SAMPLE scenario=STONE_WALL|WORLD_PLOT|PLOT_PLOT|...`
+  provides representative input evidence rather than repeatedly logging first grass contact.
+- `gateStatus=EVIDENCE_ONLY` is deliberate. The gate needs actual in-game target/Plot
+  verification; synthetic tests or summary counts cannot establish exact block correctness.
+- Damage, energy calibration, physics mutation and block destruction stay **disabled**.
+  Build and JUnit are independent from actual in-game acceptance.
+- Official design: `docs/PDD-1.0.3-Integrated-Design-Specification.md`.

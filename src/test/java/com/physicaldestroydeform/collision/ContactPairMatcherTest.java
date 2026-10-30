@@ -166,6 +166,23 @@ class ContactPairMatcherTest {
         assertEquals(0,result.unpaired());
     }
 
+    @Test void ids103MultipleContactsRemainDiagnosticEvenWithValidTargetCandidates() {
+        UUID id = UUID.randomUUID();
+        Pose pose = new Pose(new Vec(50,70,50),new Vec(5,128,5),
+                new Vec(1,1,1),0,0,0,1);
+        Snapshot step = new Snapshot(1,1,"overworld",Phase.PRE_SOLVER,
+                List.of(plot(id,5,5,pose)),true);
+        Evidence a = step.observe(5,128,5,true,50,70,50,5,128,5,1);
+        Evidence b = step.observe(5,128,5,true,50,70,50,5.5,128,5,1);
+        Evidence c = step.observe(50,70,50,true,5,128,5,50,70,50,1);
+        var diagnostic = ContactPairMatcher.match(List.of(a,b,c));
+        assertEquals(3,diagnostic.ambiguous());
+        assertTrue(a.hit().valid() && a.other().valid());
+        // The audit must still check live block state. If both independent
+        // checks pass, pairAmbiguous cannot overrule that target decision.
+        assertEquals(TargetGate.Outcome.BOTH_VERIFIED, TargetGate.evaluate(true,true,true));
+    }
+
     @Test void malformedPostSolverAndWrongEpochNeverProduceVerifiedPairs() {
         UUID id=UUID.randomUUID();
         Pose pose=new Pose(new Vec(50,70,50),new Vec(5,128,5),new Vec(1,1,1),0,0,0,1);
