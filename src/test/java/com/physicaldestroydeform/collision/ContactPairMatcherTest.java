@@ -83,6 +83,62 @@ class ContactPairMatcherTest {
         assertEquals(2,result.matches().get(0).second());
     }
 
+    /** Regression: Map iteration previously reversed the reciprocal pair for some Plot UUIDs.
+     * Neither callback interleaving nor UUID hashing may reverse Match index/evidence order. */
+    @Test void reciprocalMatchIndexesRemainStableAcrossPlotUuidHashing() {
+        double h=Math.sqrt(.5);
+        Pose pa=new Pose(new Vec(50,70,50),new Vec(5,128,5),
+                new Vec(1,1,1),0,h,0,h);
+        Pose pb=new Pose(new Vec(50,70,50),new Vec(40,128,40),
+                new Vec(1,1,1),0,0,0,1);
+        Vec point=new Vec(50.2,70.1,49.8);
+        Vec fromA=pa.toLocalPoint(point),fromB=pb.toLocalPoint(point);
+        for (int n=0;n<512;n++) {
+            UUID a=new UUID(0x1234567812345678L,n);
+            UUID b=new UUID(0x000000009ABCDEF0L,~(long)n);
+            Snapshot snapshot=new Snapshot(6,40,"overworld",Phase.PRE_SOLVER,
+                    List.of(plot(a,5,5,pa),plot(b,40,40,pb)),true);
+            Evidence first=snapshot.observe(5,128,5,true,40,128,40,
+                    fromA.x(),fromA.y(),fromA.z(),1);
+            Evidence second=snapshot.observe(40,128,40,true,5,128,5,
+                    fromB.x(),fromB.y(),fromB.z(),1);
+            Evidence noise=snapshot.observe(99,70,99,false,0,0,0,99.5,70.5,99.5,1);
+            var result=ContactPairMatcher.match(List.of(first,noise,second));
+            assertEquals(1,result.matches().size(),"UUID case="+n);
+            var match=result.matches().getFirst();
+            assertEquals(0,match.first(),"UUID case="+n);
+            assertEquals(2,match.second(),"UUID case="+n);
+            assertSame(first,match.firstEvidence());
+            assertSame(second,match.secondEvidence());
+            assertEquals(0,match.separation(),1e-9);
+            assertEquals(1,result.invalid());
+        }
+    }
+
+    @Test void multipleIndependentPairsAreReturnedInCallbackOrder() {
+        Pose pa=new Pose(new Vec(80,70,80),new Vec(5,128,5),new Vec(1,1,1),0,0,0,1);
+        Pose pb=new Pose(new Vec(90,70,90),new Vec(40,128,40),new Vec(1,1,1),0,0,0,1);
+        Snapshot snapshot=new Snapshot(12,40,"overworld",Phase.PRE_SOLVER,List.of(
+                plot(new UUID(0,1),5,5,pa),plot(new UUID(0,2),40,40,pb)),true);
+        Evidence a=snapshot.observe(5,128,5,true,80,70,80,5,128,5,1);
+        Evidence b=snapshot.observe(40,128,40,true,90,70,90,40,128,40,1);
+        Evidence bReverse=snapshot.observe(90,70,90,true,40,128,40,90,70,90,1);
+        Evidence aReverse=snapshot.observe(80,70,80,true,5,128,5,80,70,80,1);
+        var result=ContactPairMatcher.match(List.of(a,b,bReverse,aReverse));
+        assertEquals(2,result.matches().size());
+        assertEquals(0,result.unpaired());
+        assertEquals(0,result.invalid());
+        assertEquals(0,result.ambiguous());
+        assertEquals(0,result.matches().get(0).first());
+        assertEquals(3,result.matches().get(0).second());
+        assertSame(a,result.matches().get(0).firstEvidence());
+        assertSame(aReverse,result.matches().get(0).secondEvidence());
+        assertEquals(1,result.matches().get(1).first());
+        assertEquals(2,result.matches().get(1).second());
+        assertSame(b,result.matches().get(1).firstEvidence());
+        assertSame(bReverse,result.matches().get(1).secondEvidence());
+    }
+
     @Test void opposingCallbacksFarApartMustNotValidateEachOther() {
         UUID id=UUID.randomUUID();
         Pose pose=new Pose(new Vec(50,70,50),new Vec(5,128,5),new Vec(1,1,1),0,0,0,1);

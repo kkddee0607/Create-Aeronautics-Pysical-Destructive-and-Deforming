@@ -52,3 +52,10 @@ Implemented together:
 - Bad native contact coordinates no longer invalidate an otherwise valid owner target. 0.25-block reciprocal proximity never promotes owner or contact geometry quality. Multiple same-owner contacts without manifold IDs are `PAIR_AMBIGUOUS` instead of arbitrarily paired.
 - Original callback invocation, exact return object, native feed and safe no-damage behavior unchanged. All 1.0.1 design features outside the 0.2.13 scope remain future milestones unchanged.
 - **Build status: NOT VERIFIED.** This execution environment lacks GitHub-protected `gradlew`/wrapper and local Gradle; `clean test`, `build`, GitHub Actions and in-game G-COL-02 were NOT completed. See `docs/verification/0.2.13-ids-1.0.2-owner-target.md` for complete evidence and ≤2 in-game test sessions.
+
+## IDS 1.0.2 — reciprocal pair ordering test-fix (2026-10-30)
+
+- Baseline: GitHub `main` `cb6890450bcac1f4b120821bd846335ebc5d30ac`.
+- Fixed `ContactPairMatcher.Match(first,second)` reversing based on `HashMap` iteration / Plot UUID hash. Reciprocal pairs now expose stable ascending **callback input indices** and correspondingly ordered evidence; separate pairs are sorted by their first input index.
+- Preserved the original failing `ContactPairMatcherTest` expectations and all Sable callback/ownership/geometry/epoch contracts. Added two regression tests including 512 deterministic UUID cases and two independently interleaved owner pairs.
+- Auxiliary Java probe: original implementation reversed 273/512; corrected implementation reversed 0/512. Auxiliary pure Java test-method runner: 20/20 PASS. **Official full Gradle/JUnit and new GitHub Actions build are NOT_RUN**. See `docs/verification/0.2.13-contact-pair-order-hotfix.md`.

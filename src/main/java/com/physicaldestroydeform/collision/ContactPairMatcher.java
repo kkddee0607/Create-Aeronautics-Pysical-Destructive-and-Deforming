@@ -1,6 +1,7 @@
 package com.physicaldestroydeform.collision;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -51,7 +52,11 @@ public final class ContactPairMatcher {
                 ambiguous+=first.size()+second.size();
                 continue;
             }
-            int a=first.get(0), b=second.get(0);
+            // HashMap traversal can visit either directional key first. Expose
+            // callback indices in input order so callers get stable evidence
+            // orientation independent of Plot UUID/hash or callback interleaving.
+            int a=Math.min(first.get(0),second.get(0));
+            int b=Math.max(first.get(0),second.get(0));
             Evidence ea=observations.get(a),eb=observations.get(b);
             double separation=Double.NaN;
             if(ea.contactWorldHypothesis()!=null && eb.contactWorldHypothesis()!=null
@@ -59,6 +64,8 @@ public final class ContactPairMatcher {
                 separation=CollisionFrame.contactSeparation(ea,eb);
             matches.add(new Match(a,b,separation,ea,eb));
         }
+        // Hash iteration also gives nondeterministic order across separate pairs.
+        matches.sort(Comparator.comparingInt(Match::first));
         return new Result(matches,unpaired,invalid,ambiguous);
     }
 }
