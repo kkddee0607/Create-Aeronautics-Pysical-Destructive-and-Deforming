@@ -1,11 +1,13 @@
 package com.physicaldestroydeform;
 
 import com.physicaldestroydeform.collision.SableFrameCapture;
+import com.physicaldestroydeform.collision.CollisionFrame;
 import com.physicaldestroydeform.diagnostics.PddDiagnostics;
 import com.physicaldestroydeform.diagnostics.AcceptanceReport;
 import com.physicaldestroydeform.diagnostics.RawObservationDispatcher;
 import com.physicaldestroydeform.diagnostics.NativeCollisionTelemetry;
 import com.physicaldestroydeform.diagnostics.SableContactQueue;
+import com.physicaldestroydeform.diagnostics.RawObservation;
 import com.physicaldestroydeform.material.MaterialRegistry;
 import net.neoforged.fml.common.Mod;
 import net.neoforged.neoforge.common.NeoForge;
@@ -27,6 +29,10 @@ public final class PhysicalDestroyDeform {
     private long lastTotal, lastDropped, lastPolls, lastMalformed;
     private long lastCallbackTotal, lastCallbackDropped, lastCaptureErrors;
     private int ticks;
+    private long reciprocalPairs, matchingPairs, mismatchedPairs;
+    // Only two examples per 100-tick window; full counters continue uninterrupted.
+    private RawObservation sampleFirst, sampleSecond;
+    private NativeCollisionTelemetry.Contact sampleNative;
 
     public PhysicalDestroyDeform() {
         NeoForge.EVENT_BUS.addListener(this::onServerStarted);
@@ -54,70 +60,85 @@ public final class PhysicalDestroyDeform {
         acceptanceReport.close();
     }
     private void onServerTick(ServerTickEvent.Post event) {
-        // Drain even when verbose logs are disabled: the capture feature is never gated by logging.
+        // Always drain: diagnostics and native callbacks must never be governed by verbosity.
         var callbacks = SableContactQueue.drain();
         RawObservationDispatcher.dispatch(callbacks);
         var nativeFeed = NativeCollisionTelemetry.drain();
-        if (++ticks % 100 == 0) {
-            acceptanceReport.log(LOGGER);
-            LOGGER.info("[PDD-G-COL-02] phase=SUMMARY {} mutation=DISABLED", SableFrameCapture.summary());
+
+        // Sable invokes both sides separately. Compare only reciprocal, adjacent samples
+        // from the same solver epoch; no inverse/forward round trip is used as evidence.
+        for (int i=1;i<callbacks.size();i++) {
+            var a=callbacks.get(i-1).frameEvidence();
+            var b=callbacks.get(i).frameEvidence();
+            if (CollisionFrame.reciprocal(a,b)) {
+                reciprocalPairs++;
+                if (CollisionFrame.contactSeparation(a,b) <= 0.25) matchingPairs++;
+                else mismatchedPairs++;
+            }
         }
-        if (!debugCollisions) return;
-        int printed = 0;
-        for (var contact : callbacks) {
-            if (printed++ >= 8) break;
-            LOGGER.info("[PDD-RAW] phase=LIVE_DATA source={} block={} original={} callbackType={} " +
-                            "captureNanos={} hit=({},{},{}) otherPresent={} other=({},{},{}) " +
-                            "impact=({},{},{}) signedVelocity={} removed={} owner={} frame={} mutation=OFF",
-                    contact.source(), contact.blockId(), contact.hadOriginal(), contact.callbackType(),
-                    contact.capturedNanos(), contact.hitX(), contact.hitY(), contact.hitZ(),
-                    contact.hasOther(), contact.otherX(), contact.otherY(), contact.otherZ(),
-                    contact.impactX(), contact.impactY(), contact.impactZ(), contact.signedVelocity(),
-                    contact.removeCollision(), contact.ownerSpace(), contact.coordinateFrame());
+        if (debugCollisions) {
+            if (sampleFirst==null && !callbacks.isEmpty()) {
+                sampleFirst=callbacks.get(0);
+                if(callbacks.size()>1)sampleSecond=callbacks.get(1);
+            }
+            if (sampleNative==null && !nativeFeed.isEmpty())sampleNative=nativeFeed.get(0);
         }
-        printed = 0;
-        for (var contact : callbacks) {
-            if (printed++ >= 8) break;
-            var e = contact.frameEvidence();
-            LOGGER.info("[PDD-G-COL-02] dimension={} epoch={} tick={} phase={} " +
-                            "hitOwner={} otherOwner={} rawImpact={} worldFromHit={} worldFromOther={} " +
-                            "hitBody={} otherBody={} rawSignedVelocity={} " +
-                            "inputQuality={} reason={} frameValidation=INGAME_PENDING mutation=OFF",
-                    e.dimension(), e.epoch(), e.serverTick(), e.phase(),
-                    e.hit(), e.other(), e.contactRaw(), e.contactWorldHypothesis(), e.otherWorldHypothesis(),
-                    e.hitBody(), e.otherBody(), contact.signedVelocity(), e.quality(), e.reason());
+        if (++ticks % 100 != 0) return;
+
+        acceptanceReport.log(LOGGER);
+        LOGGER.info("[PDD-G-COL-02] phase=SUMMARY {} reciprocalPairs={} matchingPairs={} " +
+                        "mismatchedPairs={} matchingToleranceBlocks=0.25 mutation=DISABLED",
+                SableFrameCapture.summary(),reciprocalPairs,matchingPairs,mismatchedPairs);
+        long total = NativeCollisionTelemetry.total();
+        long dropped = NativeCollisionTelemetry.dropped();
+        long polls = NativeCollisionTelemetry.polls();
+        long malformed = NativeCollisionTelemetry.malformed();
+        long callbackTotal = SableContactQueue.total();
+        long callbackDropped = SableContactQueue.dropped();
+        long captureErrors = SableContactQueue.captureErrors();
+        LOGGER.info("[PDD-COLLISION] summary ticks=100 nativeCalls={} nativeContacts={} samplesDropped={} malformedArrays={} status={}",
+                polls-lastPolls,total-lastTotal,dropped-lastDropped,malformed-lastMalformed,
+                polls > lastPolls ? "HOOK_ACTIVE" : "HOOK_NOT_OBSERVED");
+        LOGGER.info("[PDD-RAW] summary ticks=100 callbackInvocations={} rawDropped={} captureErrors={} " +
+                        "wrappedWithOriginal={} wrappedNull={} status={} damage=DISABLED",
+                callbackTotal-lastCallbackTotal,callbackDropped-lastCallbackDropped,captureErrors-lastCaptureErrors,
+                SableContactQueue.wrappedOriginal(),SableContactQueue.wrappedNull(),
+                callbackTotal > lastCallbackTotal ? "CALLBACK_INVOKED" : "NO_CALLBACK_OBSERVED");
+        lastTotal=total; lastDropped=dropped; lastPolls=polls; lastMalformed=malformed;
+        lastCallbackTotal=callbackTotal; lastCallbackDropped=callbackDropped; lastCaptureErrors=captureErrors;
+        if (debugCollisions) {
+            logSample(sampleFirst);
+            logSample(sampleSecond);
+            if (sampleNative!=null) logNative(sampleNative);
         }
-        printed = 0;
-        for (var collision : nativeFeed) {
-            if (printed++ >= 8) break;
-            LOGGER.info("[PDD-COLLISION] source=SABLE_RAPIER_NATIVE phase=LIVE_DATA " +
-                            "idA={} idB={} rawImpactScalar={} " +
-                            "rawVector0=({},{},{}) rawVector1=({},{},{}) " +
-                            "rawVector2=({},{},{}) rawVector3=({},{},{}) frame=UNVERIFIED mutation=OFF",
-                    collision.idA(), collision.idB(), collision.rawImpactScalar(),
-                    collision.ax(), collision.ay(), collision.az(),
-                    collision.bx(), collision.by(), collision.bz(),
-                    collision.contactAX(), collision.contactAY(), collision.contactAZ(),
-                    collision.contactBX(), collision.contactBY(), collision.contactBZ());
-        }
-        if (ticks % 100 == 0) {
-            long total = NativeCollisionTelemetry.total();
-            long dropped = NativeCollisionTelemetry.dropped();
-            long polls = NativeCollisionTelemetry.polls();
-            long malformed = NativeCollisionTelemetry.malformed();
-            long callbackTotal = SableContactQueue.total();
-            long callbackDropped = SableContactQueue.dropped();
-            long captureErrors = SableContactQueue.captureErrors();
-            LOGGER.info("[PDD-COLLISION] summary ticks=100 nativeCalls={} nativeContacts={} samplesDropped={} malformedArrays={} status={}",
-                    polls-lastPolls, total-lastTotal, dropped-lastDropped, malformed-lastMalformed,
-                    polls > lastPolls ? "HOOK_ACTIVE" : "HOOK_NOT_OBSERVED");
-            LOGGER.info("[PDD-RAW] summary ticks=100 callbackInvocations={} rawDropped={} captureErrors={} " +
-                            "wrappedWithOriginal={} wrappedNull={} status={} damage=DISABLED",
-                    callbackTotal-lastCallbackTotal, callbackDropped-lastCallbackDropped, captureErrors-lastCaptureErrors,
-                    SableContactQueue.wrappedOriginal(), SableContactQueue.wrappedNull(),
-                    callbackTotal > lastCallbackTotal ? "CALLBACK_INVOKED" : "NO_CALLBACK_OBSERVED");
-            lastTotal=total; lastDropped=dropped; lastPolls=polls; lastMalformed=malformed;
-            lastCallbackTotal=callbackTotal; lastCallbackDropped=callbackDropped; lastCaptureErrors=captureErrors;
-        }
+        sampleFirst=null; sampleSecond=null; sampleNative=null;
+    }
+
+    private static void logSample(RawObservation c) {
+        if(c==null)return;
+        var e=c.frameEvidence();
+        LOGGER.info("[PDD-RAW] phase=LIVE_DATA source={} block={} original={} callbackType={} " +
+                        "hit=({},{},{}) otherPresent={} other=({},{},{}) " +
+                        "impact=({},{},{}) signedVelocity={} removed={} mutation=OFF",
+                c.source(),c.blockId(),c.hadOriginal(),c.callbackType(),
+                c.hitX(),c.hitY(),c.hitZ(),c.hasOther(),c.otherX(),c.otherY(),c.otherZ(),
+                c.impactX(),c.impactY(),c.impactZ(),c.signedVelocity(),c.removeCollision());
+        LOGGER.info("[PDD-G-COL-02] dimension={} epoch={} tick={} phase={} " +
+                        "hitOwner={} otherOwner={} rawImpact={} worldFromHit={} otherLocalFromWorld={} " +
+                        "inputQuality={} geometryCheck={} frameValidation=RECIPROCAL_SAMPLE_REQUIRED mutation=OFF",
+                e.dimension(),e.epoch(),e.serverTick(),e.phase(),e.hit(),e.other(),
+                e.contactRaw(),e.contactWorldHypothesis(),e.otherContactLocalHypothesis(),
+                e.quality(),e.reason());
+    }
+
+    private static void logNative(NativeCollisionTelemetry.Contact c) {
+        LOGGER.info("[PDD-COLLISION] source=SABLE_RAPIER_NATIVE phase=LIVE_DATA " +
+                        "idA={} idB={} rawImpactScalar={} " +
+                        "rawVector0=({},{},{}) rawVector1=({},{},{}) " +
+                        "rawVector2=({},{},{}) rawVector3=({},{},{}) frame=UNVERIFIED mutation=OFF",
+                c.idA(), c.idB(), c.rawImpactScalar(),
+                c.ax(), c.ay(), c.az(),c.bx(), c.by(), c.bz(),
+                c.contactAX(),c.contactAY(),c.contactAZ(),
+                c.contactBX(),c.contactBY(),c.contactBZ());
     }
 }

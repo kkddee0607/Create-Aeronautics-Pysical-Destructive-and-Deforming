@@ -45,3 +45,8 @@ Enable the existing `-Dpdd.debugCollisions=true` Java property for detailed coll
 **Do not mark `G-COL-02` passed merely because INIT, PRE or raw contact logging appears.** Actual in-game scene correspondence is required and still not run. Once validated, record exact source/build hash, dependent JAR hashes and log evidence in `docs/verification/`.
 
 This version does **not** implement 0.3.0 impact energy, 0.4.x damage, deformation, plot/world mutation, or damage persistence. Those remain on the fixed roadmap.
+
+
+### 0.2.13 G-COL-02 coordinate correction
+
+The hit callback point belongs to the hit block coordinate frame. `worldFromHit` is transformed once; `otherLocalFromWorld` is the same world point expressed in the other owner's native frame. Live diagnostics report independent reciprocal same-epoch pair agreement and emit a maximum of two callback and one native detail sample per 100 server ticks. World mutation remains disabled; see `docs/verification/0.2.13-g-col-02-hotfix.md`.

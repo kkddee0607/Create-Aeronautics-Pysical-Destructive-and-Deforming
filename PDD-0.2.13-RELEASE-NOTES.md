@@ -18,3 +18,14 @@ Implemented together:
 **Verification achieved:** pure Java compile, ABI descriptor checks using uploaded Sable 2.0.6, and independent Java compatibility-harness execution of 13 scenarios. The harness is not the official JUnit engine. **Not executed:** Gradle/JUnit CI, game loading, real collision acceptance, Apply ZIP GitHub action. These are marked NOT_RUN in the ledger; none is inferred PASS.
 
 **Safety boundary:** No world mutation, no damage, no physical impulses, no guessed m/s conversion. The `G-COL-02` acceptance gate is pending real gameplay evidence. `0.3.0` remains the next stage after that acceptance.
+
+## 0.2.13 G-COL-02 coordinate-frame correction (2026-10-30)
+
+- Baseline: GitHub `main` `b09c1a3041f7a2fba69ca83201e9a3e525f371f4`.
+- The 2026-10-30 live log showed reciprocal callback points converging near `(78.973, 63, -51.110)` when the hit owner's local/world frame is used, but the old `worldFromOther` mistakenly transformed the **hit-side** raw point using the other body's pose, producing millions-of-block coordinates. The incorrect hypothesis was diagnostic only; it did not mutate blocks.
+- Compute the world point strictly in the **hit owner's** frame. Convert that result into the other owner's local space via the inverse pose (or leave unchanged for static world); never apply the other pose to the original raw point. Log `otherLocalFromWorld`, not a spurious independent world point.
+- Verify independently reported reciprocal hit-side world points when two adjacent opposite-side callbacks share the same solver epoch and exact reversed block owners. Record `reciprocalPairs`, `matchingPairs`, and `mismatchedPairs` (0.25-block comparison radius) in periodic summaries. A mismatch is a diagnostic, not a reason to tamper with Sable's collision handling.
+- Keep geometric plausibility as `DIAGNOSTIC_ONLY`; do not claim the raw Sable ABI is fully validated or enable world mutation until the in-game acceptance gate is passed.
+- Throttle detailed raw/native samples to at most two callback samples and one native sample per 100 server ticks while preserving all existing full capture counters, consumer dispatch and Sable callback semantics. The counts and `[PDD-G-COL-02]` summaries are emitted even when detailed logging is disabled.
+- No Gradle, Java, NeoForge, JUnit, GitHub Actions, or Apply ZIP contract changes. No new dependencies.
+- Added reciprocal-frame unit tests including the large plot coordinate regime; run `./gradlew clean test --no-daemon` and `./gradlew build --no-daemon` on GitHub. Builds and CI for **this corrected archive** remain pending until actually executed.

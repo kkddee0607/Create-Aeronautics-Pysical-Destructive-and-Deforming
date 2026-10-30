@@ -30,7 +30,7 @@ public final class CollisionFrame {
     }
     public record Evidence(long epoch, long serverTick, String dimension, Phase phase,
                            BlockTarget hit, BlockTarget other, Vec contactRaw,
-                           Vec contactWorldHypothesis, Vec otherWorldHypothesis,
+                           Vec contactWorldHypothesis, Vec otherContactLocalHypothesis,
                            Body hitBody, Body otherBody, Quality quality, String reason) {
         public static Evidence invalid(String message) {
             return new Evidence(-1,-1,"UNKNOWN",Phase.UNSCOPED,null,null,null,null,null,null,null,
@@ -75,14 +75,28 @@ public final class CollisionFrame {
                     (b!=null && b.plot() && (otherBody==null || !otherBody.valid())))
                 return new Evidence(epoch,serverTick,dimension,phase,a,b,raw,null,null,
                         hitBody,otherBody,Quality.INVALID,"PLOT_NOT_IN_SNAPSHOT");
-            // Two hypotheses, not one assumed common frame. Both are required for plot/plot cases.
-            Vec fromHit=hitBody==null?raw:hitBody.pose().toWorldPoint(raw);
-            Vec fromOther=b==null?null:otherBody==null?raw:otherBody.pose().toWorldPoint(raw);
-            if (!fromHit.finite() || (fromOther!=null && !fromOther.finite()))
+            // Sable passes the impact in the HIT block's coordinate frame.
+            // Never interpret that same raw point directly in the OTHER body's frame.
+            Vec world=hitBody==null?raw:hitBody.pose().toWorldPoint(raw);
+            Vec otherLocal=b==null?null:otherBody==null?world:otherBody.pose().toLocalPoint(world);
+            if (!world.finite() || (otherLocal!=null && !otherLocal.finite()))
                 return new Evidence(epoch,serverTick,dimension,phase,a,b,raw,null,null,
                         hitBody,otherBody,Quality.INVALID,"NONFINITE_TRANSFORM");
-            return new Evidence(epoch,serverTick,dimension,phase,a,b,raw,fromHit,fromOther,
-                    hitBody,otherBody,Quality.DIAGNOSTIC_ONLY,"RAW_IMPACT_FRAME_UNVERIFIED");
+            // Geometric bounds are diagnostics, not proof of the Sable callback ABI.
+            // A block can expose collision shapes extending outside its unit cube.
+            boolean nearHit=nearBlock(raw,a,2.0);
+            boolean nearOther=b==null || nearBlock(otherLocal,b,2.0);
+            return new Evidence(epoch,serverTick,dimension,phase,a,b,raw,world,otherLocal,
+                    hitBody,otherBody,Quality.DIAGNOSTIC_ONLY,
+                    nearHit && nearOther?"OWNER_FRAME_GEOMETRY_PLAUSIBLE":"CONTACT_OUTSIDE_OWNER_BOUNDS");
+        }
+        /** Euclidean distance to the nearest point on the block's unit AABB. */
+        private static boolean nearBlock(Vec p,BlockTarget b,double margin) {
+            if(p==null || b==null || !p.finite())return false;
+            double dx=Math.max(Math.max(b.x()-p.x(),p.x()-(b.x()+1.0)),0.0);
+            double dy=Math.max(Math.max(b.y()-p.y(),p.y()-(b.y()+1.0)),0.0);
+            double dz=Math.max(Math.max(b.z()-p.z(),p.z()-(b.z()+1.0)),0.0);
+            return dx*dx+dy*dy+dz*dz <= margin*margin;
         }
         private Body findBody(BlockTarget target) {
             if(target==null || !target.plot())return null;
@@ -94,6 +108,19 @@ public final class CollisionFrame {
             return match;
 
         }
+    }
+    /** Independent, opposite-side callback samples: compare world points only when owners and epoch match. */
+    public static boolean reciprocal(Evidence a,Evidence b) {
+        return a!=null && b!=null && a.epoch()==b.epoch()
+                && a.phase()==Phase.PRE_SOLVER && b.phase()==Phase.PRE_SOLVER
+                && a.quality()!=Quality.INVALID && b.quality()!=Quality.INVALID
+                && a.hit()!=null && a.other()!=null && b.hit()!=null && b.other()!=null
+                && a.hit().equals(b.other()) && a.other().equals(b.hit());
+    }
+    public static double contactSeparation(Evidence a,Evidence b) {
+        if (!reciprocal(a,b) || a.contactWorldHypothesis()==null || b.contactWorldHypothesis()==null)
+            throw new IllegalArgumentException("not a reciprocal same-epoch contact pair");
+        return Math.sqrt(a.contactWorldHypothesis().minus(b.contactWorldHypothesis()).squareLength());
     }
     public static boolean sameStep(Snapshot a,Snapshot b) {
         return a!=null && b!=null && a.epoch==b.epoch && a.serverTick==b.serverTick
