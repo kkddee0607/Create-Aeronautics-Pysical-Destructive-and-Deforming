@@ -33,6 +33,7 @@ dependencies {
     testImplementation('dev.ryanhcode.sable:sable-common-1.21.1:2.0.6') { transitive = false }
     // CollisionResult.NONE initializes JOMLConversion.ZERO from Sable Companion.
     // Compile-only Sable API does not place this required class on the JUnit runtime path.
+    compileOnly('dev.ryanhcode.sable-companion:sable-companion-common-1.21.1:1.6.0') { transitive = false }
     testRuntimeOnly('dev.ryanhcode.sable-companion:sable-companion-common-1.21.1:1.6.0') { transitive = false }
     testImplementation 'org.junit.jupiter:junit-jupiter:5.11.4'
     testImplementation 'org.slf4j:slf4j-api:2.0.16'
