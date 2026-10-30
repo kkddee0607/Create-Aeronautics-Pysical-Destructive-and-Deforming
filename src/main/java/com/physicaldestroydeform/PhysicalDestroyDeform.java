@@ -1,5 +1,6 @@
 package com.physicaldestroydeform;
 
+import com.physicaldestroydeform.collision.SableFrameCapture;
 import com.physicaldestroydeform.diagnostics.PddDiagnostics;
 import com.physicaldestroydeform.diagnostics.AcceptanceReport;
 import com.physicaldestroydeform.diagnostics.RawObservationDispatcher;
@@ -19,7 +20,7 @@ import org.slf4j.LoggerFactory;
 @Mod(PhysicalDestroyDeform.MOD_ID)
 public final class PhysicalDestroyDeform {
     public static final String MOD_ID = "physical_destroy_deform";
-    public static final String BUILD_VERSION = "0.2.12-final";
+    public static final String BUILD_VERSION = "0.2.13";
     private static final Logger LOGGER = LoggerFactory.getLogger(PhysicalDestroyDeform.class);
     private final AcceptanceReport acceptanceReport = new AcceptanceReport();
     private final boolean debugCollisions = NativeCollisionTelemetry.ENABLED;
@@ -35,7 +36,7 @@ public final class PhysicalDestroyDeform {
         LOGGER.info("[PDD-DIAG] INIT modId={} version={} status=LOADED capture=ALWAYS_ON logging={}", MOD_ID, BUILD_VERSION, debugCollisions);
         PddDiagnostics.runModelSelfTest(LOGGER);
         LOGGER.info("[PDD-DIAG] RUNTIME_INTEGRATION observation=UNIVERSAL_BAKERY_DECORATOR_PLUS_NATIVE_EFFECT_FEED " +
-                "worldMutation=DISABLED energyCalibration=DISABLED staticAndSublevelFrame=UNVERIFIED");
+                "worldMutation=DISABLED energyCalibration=DISABLED worldAndPlotFrame=HYPOTHESIS_ONLY");
     }
     private void onServerStarted(ServerStartedEvent event) {
         MaterialRegistry.rebuild(event.getServer(), LOGGER);
@@ -49,6 +50,7 @@ public final class PhysicalDestroyDeform {
         MaterialRegistry.clear();
         NativeCollisionTelemetry.drain();
         SableContactQueue.drain();
+        SableFrameCapture.clear();
         acceptanceReport.close();
     }
     private void onServerTick(ServerTickEvent.Post event) {
@@ -56,7 +58,10 @@ public final class PhysicalDestroyDeform {
         var callbacks = SableContactQueue.drain();
         RawObservationDispatcher.dispatch(callbacks);
         var nativeFeed = NativeCollisionTelemetry.drain();
-        if (++ticks % 100 == 0) acceptanceReport.log(LOGGER);
+        if (++ticks % 100 == 0) {
+            acceptanceReport.log(LOGGER);
+            LOGGER.info("[PDD-G-COL-02] phase=SUMMARY {} mutation=DISABLED", SableFrameCapture.summary());
+        }
         if (!debugCollisions) return;
         int printed = 0;
         for (var contact : callbacks) {
@@ -69,6 +74,18 @@ public final class PhysicalDestroyDeform {
                     contact.hasOther(), contact.otherX(), contact.otherY(), contact.otherZ(),
                     contact.impactX(), contact.impactY(), contact.impactZ(), contact.signedVelocity(),
                     contact.removeCollision(), contact.ownerSpace(), contact.coordinateFrame());
+        }
+        printed = 0;
+        for (var contact : callbacks) {
+            if (printed++ >= 8) break;
+            var e = contact.frameEvidence();
+            LOGGER.info("[PDD-G-COL-02] dimension={} epoch={} tick={} phase={} " +
+                            "hitOwner={} otherOwner={} rawImpact={} worldFromHit={} worldFromOther={} " +
+                            "hitBody={} otherBody={} rawSignedVelocity={} " +
+                            "inputQuality={} reason={} frameValidation=INGAME_PENDING mutation=OFF",
+                    e.dimension(), e.epoch(), e.serverTick(), e.phase(),
+                    e.hit(), e.other(), e.contactRaw(), e.contactWorldHypothesis(), e.otherWorldHypothesis(),
+                    e.hitBody(), e.otherBody(), contact.signedVelocity(), e.quality(), e.reason());
         }
         printed = 0;
         for (var collision : nativeFeed) {

@@ -3,6 +3,12 @@
   "minVersion": "0.8",
   "package": "com.physicaldestroydeform.mixin",
   "compatibilityLevel": "JAVA_21",
-  "mixins": ["RapierCollisionTelemetryMixin", "SableUniversalCallbackMixin"],
-  "injectors": {"defaultRequire": 1}
+  "mixins": [
+    "RapierCollisionTelemetryMixin",
+    "SableUniversalCallbackMixin",
+    "SableStepSnapshotMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
 }

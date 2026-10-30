@@ -4,10 +4,10 @@ license="MIT"
 
 [[mods]]
 modId="physical_destroy_deform"
-version="0.2.12-fix"
+version="0.2.13"
 displayName="Create Aeronautics: Physical Destruction and Deforming"
 authors="PDD contributors"
-description='''PDD 0.2.12-fix: bounded, universal Sable collision callback collection; original responses preserved. World damage disabled.'''
+description='''PDD 0.2.13: pre-solver owner/pose/velocity snapshots, raw frame hypotheses, and structured G-COL-02 diagnostics. World damage disabled.'''
 
 [[mixins]]
 config="pdd.mixins.json"

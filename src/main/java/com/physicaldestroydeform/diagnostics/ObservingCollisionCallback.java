@@ -1,5 +1,6 @@
 package com.physicaldestroydeform.diagnostics;
 
+import com.physicaldestroydeform.collision.SableFrameCapture;
 import dev.ryanhcode.sable.api.physics.callback.BlockSubLevelCollisionCallback;
 import net.minecraft.core.BlockPos;
 import org.joml.Vector3d;
@@ -51,7 +52,9 @@ public final class ObservingCollisionCallback implements BlockSubLevelCollisionC
             SableContactQueue.offer(new RawObservation(System.nanoTime(), source,
                     RawObservation.OWNER_UNKNOWN, RawObservation.FRAME_UNVERIFIED,
                     blockId, callbackType, original != null, x, y, z, hasOther,
-                    otherX, otherY, otherZ, impactX, impactY, impactZ, signedVelocity, removed));
+                    otherX, otherY, otherZ, impactX, impactY, impactZ, signedVelocity, removed,
+                    SableFrameCapture.observe(x, y, z, hasOther, otherX, otherY, otherZ,
+                            impactX, impactY, impactZ, signedVelocity)));
         } catch (RuntimeException observationFailure) {
             SableContactQueue.captureError();
         }

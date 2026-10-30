@@ -1,29 +1,47 @@
-# PDD 0.2.12-fix — Create Aeronautics Physical Destruction and Deforming
+# PDD 0.2.13 — Create Aeronautics: Physical Destruction and Deforming
 
-**Target:** Minecraft Java 1.21.1 · NeoForge 21.1.228 · Create 6.0.10 · Create Aeronautics bundled 1.3.2 · Sable 2.0.6.
+**Target:** Minecraft Java 1.21.1 · NeoForge 21.1.228 · Create 6.0.10 · Create Aeronautics bundled 1.3.2 · Sable 2.0.6 · Java 21.
 
-**Specification:** `docs/PDD-1.0.1-Integrated-Design-Specification.md`, §3.2 / §14.2 / `G-COL-01`.
+**Normative design:** `docs/PDD-1.0.1-Integrated-Design-Specification.md`, §§ 3.2, 5.1–5.4, 14.2, 15.1 (`UT-FRAME-01/02`), `G-COL-02`.
 
-0.2.12-fix is a minimal stability patch on top of the latest **CI-passing** GitHub 0.2.12 commit `3ab7c2685c62021797ed3b56cdf125474d96ab33`. All collision-capture Java source and existing JUnit assertions are preserved. This version observes Sable callback results; it **does not implement block damage, deformation or world mutation**.
+**Base GitHub HEAD:** `b39f9c388f8c2050fdd13c8cf958d418834d68b8` (2026-10-30). This delivery is a complete **source archive**, not a tested binary or a GitHub commit.
 
-## GitHub import (current repository only)
+## 0.2.13 implementation scope
 
-Upload this **full source ZIP** under `incoming/` while the GitHub repository remains at the reviewed base SHA. The existing `.github/workflows/apply-pdd-zip.yml` will import source files; it preserves `.github`, `gradle/`, `gradlew`, `gradlew.bat`, `incoming/`, and `.git`. This ZIP contains every other existing tracked project file as of the reviewed base SHA (plus the 1.0.1 spec and fix notes), so the import should not delete historical files.
+- Sable physics **pre-solver** and **post-solver** hook points are bound to the confirmed Sable 2.0.6 call sites using `SableStepSnapshotMixin`. The pre hook copies immutable plot UUID/bounds, pose, and raw linear/angular velocity/mass center into a physics-step epoch before solver work. No physics result or Sable callback is replaced.
+- `CollisionFrame` resolves each callback `hit` and `other` independently into **candidate** `STATIC_WORLD`, `SABLE_PLOT`, or `UNKNOWN` owner spaces. The raw callback coordinates may still use an unverified frame. Both hit/other transform hypotheses are preserved with their source body snapshots and provenance.
+- `FrameMath` uses Sable `Pose3dc` position/rotationPoint/orientation/scale conventions. Position, vector and inverse-transpose normal transforms have separate explicit operations and deterministic tests.
+- Missing Sable step, invalid/missing plot, ambiguous plot ownership and non-finite inputs produce `INVALID` diagnostics; unverified-but-numerically-valid frame candidates are `DIAGNOSTIC_ONLY`. **No candidate authorizes Minecraft world mutation.** The Sable `signedVelocity` remains uncalibrated.
+- `[PDD-G-COL-02]` logs include per-sample epoch, dimension, time phase, both target owners, raw contact and two candidate world contact points, source body states and validity. Every 100 server ticks the summary reports pre/post events, unscoped callbacks and invalid bodies.
+- Existing original-preserving collision decorator and callback-contract tests are maintained.
 
-If the repository has advanced beyond the reviewed SHA, **do not** use the destructive ZIP-sync workflow; instead manually apply the changed files in a Git checkout and compare `git diff` first.
+## Import the entire source ZIP through the existing Apply workflow
 
-## Build in the GitHub checkout
+Upload the provided archive as the **only** ZIP under `incoming/` in the GitHub repository, provided `main` has not moved from the stated base SHA. The existing `Apply PDD ZIP` workflow syncs the entire *unprotected* project tree from the archive; it intentionally retains `.github`, `gradlew`, `gradlew.bat`, `gradle/`, `incoming/`, `.git`. This source ZIP deliberately excludes those protected GitHub-side paths, just like the supplied 0.2.12 full-source ZIP. Do not extract/upload only changed Java files.
 
-```bash
+If `main` has changed, examine the diff before invoking the destructive sync. The ZIP does not contain a Gradle wrapper distribution: the protected GitHub checkout provides it.
+
+## CI (the existing workflow contracts remain unchanged)
+
+In the actual GitHub checkout:
+
+```sh
 chmod +x gradlew
-./gradlew clean test build --no-daemon
+./gradlew test --no-daemon
+./gradlew build --no-daemon
 ```
 
-The ZIP itself does not embed the Gradle Wrapper, because that is protected and already present in the connected GitHub checkout. A standalone extracted ZIP needs the original GitHub `gradlew`, `gradle/wrapper/*`, and a network-enabled dependency resolver.
+The existing `PDD Callback Contract Test` action still invokes `gradle test --tests "com.physicaldestroydeform.diagnostics.ObservingCollisionCallbackTest" --stacktrace` using Gradle 8.14.3. The `PDD Manual Build` workflow already uses the `PDD-0.2.13` JAR artifact name. All GitHub Actions YAML files are unchanged by this archive.
 
-**Previous baseline succeeded in GitHub Actions:** https://github.com/kkddee0607/Create-Aeronautics-Pysical-Destructive-and-Deforming/actions/runs/40856866629
-**0.2.12-fix binary remains unverified until a new CI run.**
+## G-COL-02 in-game evidence collection
 
-## G-COL-01 in-game verification
+Enable the existing `-Dpdd.debugCollisions=true` Java property for detailed collision observations; the property defaults to `true` in the 0.2.12 baseline. Search the server's `logs/latest.log` for `[PDD-G-COL-02]` and `[PDD-G-COL-01]` while performing all of these scenarios:
 
-See `docs/verification/0.2.12-fix.md` and `docs/verification/0.2.12.md`. No build test can prove an actual ordinary-block JNI callback was invoked or guarantee original Sable physical response parity.
+1. Ordinary ship/terrain collision: identify static world and Sable plot owners and compare world impact *hypotheses* with the visible contact.
+2. Plot/plot collision: verify both stable plot UUIDs and independently transformed candidates.
+3. Rotating boundary contact: compare raw angular velocity, pose, contact coordinates and epoch against observed contact.
+4. Absent/invalid plot, nonfinite or wrong-epoch cases: check `INVALID` and zero world changes.
+
+**Do not mark `G-COL-02` passed merely because INIT, PRE or raw contact logging appears.** Actual in-game scene correspondence is required and still not run. Once validated, record exact source/build hash, dependent JAR hashes and log evidence in `docs/verification/`.
+
+This version does **not** implement 0.3.0 impact energy, 0.4.x damage, deformation, plot/world mutation, or damage persistence. Those remain on the fixed roadmap.
