@@ -29,3 +29,16 @@ Implemented together:
 - Throttle detailed raw/native samples to at most two callback samples and one native sample per 100 server ticks while preserving all existing full capture counters, consumer dispatch and Sable callback semantics. The counts and `[PDD-G-COL-02]` summaries are emitted even when detailed logging is disabled.
 - No Gradle, Java, NeoForge, JUnit, GitHub Actions, or Apply ZIP contract changes. No new dependencies.
 - Added reciprocal-frame unit tests including the large plot coordinate regime; run `./gradlew clean test --no-daemon` and `./gradlew build --no-daemon` on GitHub. Builds and CI for **this corrected archive** remain pending until actually executed.
+
+## G-COL-02 final functional implementation — second 2026-10-30 correction
+
+**Source baseline:** GitHub `main` `348f6a44d863381d86188f2e5763f01f7154bbe4` (the applied previous coordinate ZIP). **This is a source ZIP for Apply; it is not a verified published JAR.**
+
+- The earlier hotfix left **every collision** as `DIAGNOSTIC_ONLY` and treated geometrically impossible callback points as mere diagnostic candidates. That was not a functional resolution of the reported defect.
+- `CollisionFrame.Snapshot.observe` now rejects hit-side and other-side contact points that lie outside the respective block collision neighborhood (`CONTACT_OUTSIDE_OWNER_BOUNDS`), and non-pre-solver events (`NOT_PRE_SOLVER`). Never re-interpret a rejected plot-local point as a world point to force a match.
+- New `ContactPairMatcher` joins only **independent** opposite-owner callback samples with the same dimension, tick and physics epoch and world-space contact distance <=0.25 blocks. Spatial buckets avoid an all-to-all scan. Arbitrary adjacent events do not count as reciprocal contacts.
+- Only those independently matched samples become `PRE_SOLVER_VALIDATED` and are dispatched downstream, including `HIT_PLOT_LOCAL_VALIDATED` or `HIT_STATIC_WORLD_VALIDATED` frame labels; unmatched samples remain `DIAGNOSTIC_ONLY` and malformed ones become `INVALID`.
+- Summary reports `validatedPairs`, breakdown `worldPlotPairs`, `plotPlotPairs`, `worldWorldPairs`, `unpairedContacts`, `invalidContacts`. The old `mismatchedPairs` count was misleading (adjacent samples were not necessarily the same contact).
+- Logs preserve raw signed velocity units, unaltered Sable callback results and zero world mutation. The native effects feed remains separate and `UNVERIFIED` by design. Actual damage/energy accounting belong to later design versions.
+- `ContactPairMatcherTest` adds five direct regression scenarios, including **the exact type of plot→plot false coordinate observed in the game log**, rotating independent plots, interleaved callbacks, different epochs, and valid world↔plot pairs. Previous callback-contract tests remain intact.
+- Official `./gradlew clean test` and `./gradlew build`, GitHub Actions on this new ZIP, and in-game G-COL-02 are **NOT_RUN** here. Java 21 auxiliary source-stub and frame tests are *not* Gradle/JUnit substitutes.

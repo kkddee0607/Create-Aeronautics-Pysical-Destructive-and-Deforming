@@ -49,12 +49,18 @@ public final class ObservingCollisionCallback implements BlockSubLevelCollisionC
                          int otherX, int otherY, int otherZ, double impactX, double impactY,
                          double impactZ, double signedVelocity, boolean removed) {
         try {
+            var frame = SableFrameCapture.observe(x, y, z, hasOther, otherX, otherY, otherZ,
+                    impactX, impactY, impactZ, signedVelocity);
+            var hit = frame.hit();
+            String owner = hit==null ? RawObservation.OWNER_UNKNOWN : hit.space().name();
+            // The callback's impact point belongs to the hit-side owner frame.
+            String coordinateFrame = hit==null || !hit.valid()
+                    ? RawObservation.FRAME_UNVERIFIED
+                    : hit.plot() ? "HIT_PLOT_LOCAL_CANDIDATE" : "HIT_STATIC_WORLD_CANDIDATE";
             SableContactQueue.offer(new RawObservation(System.nanoTime(), source,
-                    RawObservation.OWNER_UNKNOWN, RawObservation.FRAME_UNVERIFIED,
-                    blockId, callbackType, original != null, x, y, z, hasOther,
-                    otherX, otherY, otherZ, impactX, impactY, impactZ, signedVelocity, removed,
-                    SableFrameCapture.observe(x, y, z, hasOther, otherX, otherY, otherZ,
-                            impactX, impactY, impactZ, signedVelocity)));
+                    owner, coordinateFrame, blockId, callbackType, original != null,
+                    x, y, z, hasOther, otherX, otherY, otherZ, impactX, impactY, impactZ,
+                    signedVelocity, removed, frame));
         } catch (RuntimeException observationFailure) {
             SableContactQueue.captureError();
         }

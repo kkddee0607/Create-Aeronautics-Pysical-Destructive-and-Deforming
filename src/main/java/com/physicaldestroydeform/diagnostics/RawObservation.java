@@ -21,6 +21,16 @@ public record RawObservation(
                 impactX, impactY, impactZ, signedVelocity, removeCollision,
                 CollisionFrame.Evidence.invalid("LEGACY_OR_SYNTHETIC_OBSERVATION"));
     }
+    /** Preserve the raw arguments; only replace the separately checked frame evidence. */
+    public RawObservation withEvidence(CollisionFrame.Evidence checked) {
+        String label = checked.quality() == CollisionFrame.Quality.PRE_SOLVER_VALIDATED
+                ? checked.hit().plot() ? "HIT_PLOT_LOCAL_VALIDATED" : "HIT_STATIC_WORLD_VALIDATED"
+                : coordinateFrame;
+        return new RawObservation(capturedNanos, source, ownerSpace, label,
+                blockId, callbackType, hadOriginal, hitX, hitY, hitZ, hasOther,
+                otherX, otherY, otherZ, impactX, impactY, impactZ, signedVelocity,
+                removeCollision, checked);
+    }
     public static final String OWNER_UNKNOWN = "UNKNOWN";
     public static final String FRAME_UNVERIFIED = "UNVERIFIED";
     public static final String SOURCE_NATIVE_CALLBACK = "SABLE_BAKERY_NATIVE_CALLBACK";

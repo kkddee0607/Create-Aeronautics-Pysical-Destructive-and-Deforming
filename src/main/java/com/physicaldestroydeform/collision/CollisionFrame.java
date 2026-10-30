@@ -21,7 +21,8 @@ public final class CollisionFrame {
         public boolean valid() {
             return plotId!=null && minX<=maxX && minZ<=maxZ && pose!=null && pose.valid()
                     && handleValid && linearRaw!=null && linearRaw.finite()
-                    && angularRaw!=null && angularRaw.finite();
+                    && angularRaw!=null && angularRaw.finite()
+                    && centerRaw!=null && centerRaw.finite();
         }
     }
     public record BlockTarget(Space space, String dimension, UUID stablePlotId,
@@ -35,6 +36,19 @@ public final class CollisionFrame {
         public static Evidence invalid(String message) {
             return new Evidence(-1,-1,"UNKNOWN",Phase.UNSCOPED,null,null,null,null,null,null,null,
                     Quality.INVALID,message);
+        }
+        /** Evidence is promoted only after an independent opposite-side contact has been matched. */
+        Evidence validated() {
+            if (phase != Phase.PRE_SOLVER || quality != Quality.DIAGNOSTIC_ONLY
+                    || !"OWNER_FRAME_GEOMETRY_PLAUSIBLE".equals(reason))
+                throw new IllegalStateException("cannot validate unpaired or invalid contact");
+            return new Evidence(epoch, serverTick, dimension, phase, hit, other, contactRaw,
+                    contactWorldHypothesis, otherContactLocalHypothesis, hitBody, otherBody,
+                    Quality.PRE_SOLVER_VALIDATED, "RECIPROCAL_SAME_EPOCH_WORLD_CONTACT");
+        }
+        /** Only a confirmed independent pair supplies a validated world position. */
+        public Vec confirmedWorldContact() {
+            return quality == Quality.PRE_SOLVER_VALIDATED ? contactWorldHypothesis : null;
         }
         /** Not authorized to mutate blocks during 0.2.13. */
         public boolean canMutateWorld() { return false; }
@@ -66,6 +80,9 @@ public final class CollisionFrame {
             BlockTarget a=resolve(hx,hy,hz);
             BlockTarget b=hasOther?resolve(ox,oy,oz):null;
             Vec raw=new Vec(px,py,pz);
+            if (phase!=Phase.PRE_SOLVER)
+                return new Evidence(epoch,serverTick,dimension,phase,a,b,raw,null,null,null,null,
+                        Quality.INVALID,"NOT_PRE_SOLVER");
             if (!a.valid || (b!=null && !b.valid) || !raw.finite()
                     || !Double.isFinite(rawSignedVelocity))
                 return new Evidence(epoch,serverTick,dimension,phase,a,b,raw,null,null,null,null,
@@ -82,13 +99,17 @@ public final class CollisionFrame {
             if (!world.finite() || (otherLocal!=null && !otherLocal.finite()))
                 return new Evidence(epoch,serverTick,dimension,phase,a,b,raw,null,null,
                         hitBody,otherBody,Quality.INVALID,"NONFINITE_TRANSFORM");
-            // Geometric bounds are diagnostics, not proof of the Sable callback ABI.
-            // A block can expose collision shapes extending outside its unit cube.
+            // A raw callback position in the wrong frame must never become a usable
+            // target. A 2-block margin allows shapes crossing block boundaries.
+            // In particular, untransformed static-world positions masquerading as
+            // plot-local coordinates would otherwise jump millions of blocks.
             boolean nearHit=nearBlock(raw,a,2.0);
             boolean nearOther=b==null || nearBlock(otherLocal,b,2.0);
+            if (!nearHit || !nearOther)
+                return new Evidence(epoch,serverTick,dimension,phase,a,b,raw,world,otherLocal,
+                        hitBody,otherBody,Quality.INVALID,"CONTACT_OUTSIDE_OWNER_BOUNDS");
             return new Evidence(epoch,serverTick,dimension,phase,a,b,raw,world,otherLocal,
-                    hitBody,otherBody,Quality.DIAGNOSTIC_ONLY,
-                    nearHit && nearOther?"OWNER_FRAME_GEOMETRY_PLAUSIBLE":"CONTACT_OUTSIDE_OWNER_BOUNDS");
+                    hitBody,otherBody,Quality.DIAGNOSTIC_ONLY,"OWNER_FRAME_GEOMETRY_PLAUSIBLE");
         }
         /** Euclidean distance to the nearest point on the block's unit AABB. */
         private static boolean nearBlock(Vec p,BlockTarget b,double margin) {
@@ -112,15 +133,20 @@ public final class CollisionFrame {
     /** Independent, opposite-side callback samples: compare world points only when owners and epoch match. */
     public static boolean reciprocal(Evidence a,Evidence b) {
         return a!=null && b!=null && a.epoch()==b.epoch()
+                && a.serverTick()==b.serverTick() && Objects.equals(a.dimension(),b.dimension())
                 && a.phase()==Phase.PRE_SOLVER && b.phase()==Phase.PRE_SOLVER
                 && a.quality()!=Quality.INVALID && b.quality()!=Quality.INVALID
                 && a.hit()!=null && a.other()!=null && b.hit()!=null && b.other()!=null
+                && a.contactWorldHypothesis()!=null && b.contactWorldHypothesis()!=null
+                && !a.hit().equals(a.other())
                 && a.hit().equals(b.other()) && a.other().equals(b.hit());
     }
     public static double contactSeparation(Evidence a,Evidence b) {
         if (!reciprocal(a,b) || a.contactWorldHypothesis()==null || b.contactWorldHypothesis()==null)
             throw new IllegalArgumentException("not a reciprocal same-epoch contact pair");
-        return Math.sqrt(a.contactWorldHypothesis().minus(b.contactWorldHypothesis()).squareLength());
+        double distance=Math.sqrt(a.contactWorldHypothesis().minus(b.contactWorldHypothesis()).squareLength());
+        if (!Double.isFinite(distance))throw new IllegalArgumentException("nonfinite contact separation");
+        return distance;
     }
     public static boolean sameStep(Snapshot a,Snapshot b) {
         return a!=null && b!=null && a.epoch==b.epoch && a.serverTick==b.serverTick

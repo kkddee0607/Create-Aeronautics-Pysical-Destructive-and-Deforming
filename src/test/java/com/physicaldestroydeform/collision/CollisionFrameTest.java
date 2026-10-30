@@ -23,7 +23,9 @@ class CollisionFrameTest {
         assertEquals(a,first.hit().stablePlotId());
         assertEquals(Space.STATIC_WORLD,first.other().space());
         assertEquals(12,first.contactWorldHypothesis().x(),1e-9);
-        assertEquals(Quality.DIAGNOSTIC_ONLY,first.quality());
+        // Identifying an owner must never make an unrelated, far-away contact valid.
+        assertEquals(Quality.INVALID,first.quality());
+        assertEquals("CONTACT_OUTSIDE_OWNER_BOUNDS",first.reason());
         assertFalse(first.canMutateWorld());
         Evidence second=frame.observe(1,70,1,true,40,70,40,2,3,4,0);
         assertEquals(b,second.other().stablePlotId());
@@ -59,14 +61,18 @@ class CollisionFrameTest {
     }
     @Test void utFrame03DifferentEpochOrOwnerCannotBePaired() {
         UUID id=UUID.randomUUID();
-        Body plot=body(id,0,15);
+        int plotX=20481033, plotZ=20483080;
+        Pose pose=new Pose(new Vec(79,63,-51),new Vec(plotX,128,plotZ),
+                new Vec(1,1,1),0,0,0,1);
+        Body plot=new Body(id,20480000,20482047,20482048,20484095,
+                pose,new Vec(0,0,0),new Vec(0,0,0),new Vec(plotX,128,plotZ),true);
         Snapshot pre=new Snapshot(9,12,"x",Phase.PRE_SOLVER,List.of(plot),true);
-        Evidence a=pre.observe(1,70,1,true,99,70,99,1,70,1,0);
-        Evidence b=pre.observe(99,70,99,true,1,70,1,11,80,11,0);
+        Evidence a=pre.observe(plotX,128,plotZ,true,78,62,-52,plotX,128,plotZ,0);
+        Evidence b=pre.observe(78,62,-52,true,plotX,128,plotZ,79,63,-51,0);
         assertTrue(reciprocal(a,b));
         assertEquals(0,contactSeparation(a,b),1e-9);
         Evidence newer=new Snapshot(10,12,"x",Phase.PRE_SOLVER,List.of(plot),true)
-                .observe(99,70,99,true,1,70,1,11,80,11,0);
+                .observe(78,62,-52,true,plotX,128,plotZ,79,63,-51,0);
         assertFalse(reciprocal(a,newer));
         assertThrows(IllegalArgumentException.class,()->contactSeparation(a,newer));
     }
