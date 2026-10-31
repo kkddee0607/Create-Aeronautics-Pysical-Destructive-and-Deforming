@@ -93,8 +93,9 @@ public final class CollisionFrame {
                     (b!=null && b.plot() && (otherBody==null || !otherBody.valid())))
                 return new Evidence(epoch,serverTick,dimension,phase,a,b,raw,null,null,
                         hitBody,otherBody,Quality.INVALID,"PLOT_POSE_OR_HANDLE_UNAVAILABLE");
-            // Hit-space is an OBSERVED HYPOTHESIS, not a Sable callback ABI guarantee.
-            // Never use a transformed point to decide which storage owns either BlockPos.
+            // Sable 2.0.6 documents impactPosition in the hit-block coordinate frame,
+            // but that alone does not prove that the geometry is the exact solver
+            // contact. Never use a transformed point to identify block ownership.
             Vec world=hitBody==null?raw:hitBody.pose().toWorldPoint(raw);
             Vec otherLocal=b==null?null:otherBody==null?world:otherBody.pose().toLocalPoint(world);
             if (!world.finite() || (otherLocal!=null && !otherLocal.finite()))

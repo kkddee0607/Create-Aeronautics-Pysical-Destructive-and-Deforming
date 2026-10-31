@@ -33,6 +33,35 @@ class ImpactLiveAuditTest {
         assertEquals(Reason.DIRECTION_UNVERIFIED,r.reason());
         assertEquals(0,r.budget());
     }
+    private Evidence worldContact(double plotVelocityY,double plotAngularZ,Vec point) {
+        var impact = new ImpactMath.Body(false,2,.5,Tensor.zero(),
+                new Vec(31,6,31),new Vec(0,plotVelocityY,0),new Vec(0,0,plotAngularZ));
+        var moving = new CollisionFrame.Body(id,0,15,0,15,body.pose(),
+                impact.linearWorld(),impact.angularWorld(),new Vec(0,0,0),true,impact);
+        return new Evidence(10,100,"overworld",Phase.PRE_SOLVER,world,plot,point,
+                null,null,null,moving,Quality.DIAGNOSTIC_ONLY,"CONTACT_FRAME_UNVERIFIED");
+    }
+    @Test void approvedProxyWorksWithoutPreciseContactAndWithVerifiedCubeFace() {
+        var e=worldContact(-3,0,new Vec(30.5,4,30.5));
+        Result r=ImpactLiveAudit.evaluate(e,true,true,new ProxyPolicy(true,.5,20));
+        assertEquals(Kind.CONSERVATIVE_PROXY,r.kind());
+        assertEquals(Reason.APPROVED,r.reason());
+        assertEquals(4.5,r.budget(),1e-9);
+        assertTrue(r.source().startsWith("BLOCK_FACE_ESTIMATE"));
+        assertNull(e.confirmedWorldContact());
+    }
+    @Test void noFaceEvidenceSeparatingAndRotationDominatedAllReject() {
+        var policy=new ProxyPolicy(true,.5,20);
+        var impact=worldContact(-3,0,new Vec(30.5,4,30.5));
+        assertEquals(Reason.DIRECTION_UNVERIFIED,
+                ImpactLiveAudit.evaluate(impact,true,false,policy).reason());
+        assertEquals(Reason.SEPARATING_OR_TANGENTIAL,
+                ImpactLiveAudit.evaluate(worldContact(3,0,new Vec(30.5,4,30.5)),true,true,policy).reason());
+        assertEquals(Reason.ROTATION_UNRESOLVED,
+                ImpactLiveAudit.evaluate(worldContact(-3,100,new Vec(30.5,4,30.5)),true,true,policy).reason());
+        assertEquals(Reason.DIRECTION_UNVERIFIED,
+                ImpactLiveAudit.evaluate(worldContact(-3,0,new Vec(31,4,30.5)),true,true,policy).reason());
+    }
     @Test void cannotPromoteMissingTargetOrPreSolver() {
         var e=observation(new Vec(0,0,0));
         assertEquals(Reason.OWNER_UNVERIFIED,ImpactLiveAudit.evaluate(e,false,ProxyPolicy.disabled()).reason());

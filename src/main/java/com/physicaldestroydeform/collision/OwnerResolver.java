@@ -33,7 +33,9 @@ public final class OwnerResolver {
                 throw new IllegalArgumentException("unverified target identity");
         }
     }
-    public record Check(Status status, TargetKey key, String detail) {
+    public record Check(Status status, TargetKey key, String detail, boolean fullWorldCollisionCube) {
+        /** Keep the original three-argument test/contract constructor. */
+        public Check(Status status, TargetKey key, String detail) { this(status,key,detail,false); }
         public boolean verified() { return status == Status.VERIFIED && key != null; }
         static Check failed(Status status, String detail) { return new Check(status, null, detail); }
     }
@@ -123,6 +125,7 @@ public final class OwnerResolver {
             return Check.failed(Status.BLOCK_MISMATCH,"CALLBACK_BLOCK_ID_DIFFERENT_FROM_LIVE_STATE");
         return new Check(Status.VERIFIED,
                 new TargetKey(proposed.dimension(),proposed.space(),proposed.stablePlotId(),
-                        proposed.x(),proposed.y(),proposed.z(),id+"|"+state),"LIVE_OWNER_AND_BLOCK_VERIFIED");
+                        proposed.x(),proposed.y(),proposed.z(),id+"|"+state),"LIVE_OWNER_AND_BLOCK_VERIFIED",
+                proposed.space()==Space.STATIC_WORLD && state.isCollisionShapeFullBlock(level,pos));
     }
 }
