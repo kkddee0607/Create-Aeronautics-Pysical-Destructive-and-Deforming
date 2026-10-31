@@ -11,6 +11,8 @@ import org.joml.Vector3d;
 
 import java.util.ArrayList;
 import java.util.Map;
+import java.util.List;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.concurrent.atomic.AtomicLong;
@@ -22,6 +24,9 @@ import static com.physicaldestroydeform.collision.FrameMath.*;
 public final class SableFrameCapture {
     private static final Map<SubLevelPhysicsSystem,Snapshot> ACTIVE=new ConcurrentHashMap<>();
     private static final Map<SubLevelPhysicsSystem,Snapshot> LAST_POST=new ConcurrentHashMap<>();
+    // All pre-solver substeps for each server tick. Native post-tick effect
+    // records do not identify their originating substep; do not guess one.
+    private static final ConcurrentLinkedQueue<Snapshot> PRE_HISTORY = new ConcurrentLinkedQueue<>();
     private static final AtomicLong EPOCH=new AtomicLong();
     private static final LongAdder PRE=new LongAdder(),POST=new LongAdder(),CANDIDATE=new LongAdder(),
             REJECTED=new LongAdder(),NO_EPOCH=new LongAdder(),BODY_ERRORS=new LongAdder(),
@@ -52,7 +57,8 @@ public final class SableFrameCapture {
                 bodies.add(new Body(sub.getUniqueId(),Math.multiplyExact(min.x,16),
                         Math.addExact(Math.multiplyExact(max.x,16),15),Math.multiplyExact(min.z,16),
                         Math.addExact(Math.multiplyExact(max.z,16),15),copiedPose,lin,ang,center,valid,
-                        valid && mass!=null ? SableMassAdapter.snapshot(mass,copiedPose,lin,ang) : null));
+                        valid && mass!=null ? SableMassAdapter.snapshot(mass,copiedPose,lin,ang) : null,
+                        sub.getRuntimeId()));
             }catch(RuntimeException broken) {
                 BODY_ERRORS.increment();
                 // Malformed bodies are not silently mapped to a world block. See per-step validity gate.
@@ -67,7 +73,9 @@ public final class SableFrameCapture {
     public static void onPre(SubLevelPhysicsSystem system) {
         long epoch=EPOCH.incrementAndGet();
         try {
-            ACTIVE.put(system,capture(system,epoch,Phase.PRE_SOLVER));
+            Snapshot before=capture(system,epoch,Phase.PRE_SOLVER);
+            ACTIVE.put(system,before);
+            PRE_HISTORY.add(before);
             PRE.increment();
         } catch (RuntimeException unsafe) {
             ACTIVE.remove(system);
@@ -113,5 +121,12 @@ public final class SableFrameCapture {
                 " postWithoutPre="+POST_WITHOUT_PRE.sum()+" activeFrames="+ACTIVE.size()+
                 " lastPostFrames="+LAST_POST.size();
     }
-    public static void clear() {ACTIVE.clear();LAST_POST.clear();}
+    /** Consume once, after Sable's postPhysicsTicks/clearCollisions. */
+    public static List<Snapshot> drainPreHistory() {
+        var frames=new ArrayList<Snapshot>();
+        Snapshot frame;
+        while((frame=PRE_HISTORY.poll())!=null)frames.add(frame);
+        return frames;
+    }
+    public static void clear() {ACTIVE.clear();LAST_POST.clear();PRE_HISTORY.clear();}
 }

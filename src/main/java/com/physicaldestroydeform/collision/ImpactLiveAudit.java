@@ -21,6 +21,12 @@ public final class ImpactLiveAudit {
     public static ImpactMath.Result evaluate(Evidence e, boolean bothOwnersVerified,
                                              boolean verifiedWorldFullCube,
                                              ImpactMath.ProxyPolicy policy) {
+        return evaluate(e,bothOwnersVerified,verifiedWorldFullCube,policy,null);
+    }
+    public static ImpactMath.Result evaluate(Evidence e, boolean bothOwnersVerified,
+                                             boolean verifiedWorldFullCube,
+                                             ImpactMath.ProxyPolicy policy,
+                                             NativePlotDirection.Prepared plotDirections) {
         if(e==null || !bothOwnersVerified || e.hit()==null || e.other()==null)
             return ImpactMath.Result.reject(ImpactMath.Reason.OWNER_UNVERIFIED);
         if(e.phase()!=Phase.PRE_SOLVER || e.epoch()<0)
@@ -34,6 +40,13 @@ public final class ImpactLiveAudit {
             return ImpactMath.Result.reject(ImpactMath.Reason.POLICY_DISABLED);
         if(!policy.configured())
             return ImpactMath.Result.reject(ImpactMath.Reason.POLICY_UNCONFIGURED);
+        // Plot-Plot: independent native collider normals and body runtime IDs.
+        // Because the effect feed is post-solver and substep-aggregated, every
+        // pre-solver snapshot in that tick must independently pass approach and
+        // rotation checks. This is never labelled EXACT_CONTACT.
+        if(e.hit().plot() && e.other().plot())return plotDirections==null
+                ? ImpactMath.Result.reject(ImpactMath.Reason.DIRECTION_UNVERIFIED)
+                : plotDirections.evaluate(e,policy);
         // For an audited STATIC_WORLD full cube only, Sable's original callback
         // point is in the world block frame (Rust hooks.rs: handle_block_params).
         // A unique visible face is independently checked; no reciprocal contact
@@ -51,7 +64,7 @@ public final class ImpactLiveAudit {
     }
     /** Conservative upper bound: angular speed * max distance to any hit voxel corner.
      * If rotation can explain the normal approach, translation-only proxy is denied. */
-    private static boolean rotationMayDominate(Evidence e, ImpactMath.Body a,
+    static boolean rotationMayDominate(Evidence e, ImpactMath.Body a,
                                                 ImpactMath.Body b, FrameMath.Vec n) {
         double closing=Math.max(0,-a.linearWorld().minus(b.linearWorld()).dot(n));
         if(!Double.isFinite(closing))return true;

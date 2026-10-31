@@ -1,10 +1,10 @@
-# PDD 0.3.0 FIX — Create Aeronautics Physical Destruction and Deforming
+# PDD 0.3.0 fixPlot — Create Aeronautics Physical Destruction and Deforming
 
 Target: Minecraft Java 1.21.1 · NeoForge 21.1.x (build contract: 21.1.228) · Java 21 · Create 6.0.10 · Create Aeronautics 1.3.2 · Sable 2.0.6.
 
-**Normative design:** `docs/PDD-1.0.3-Integrated-Design-Specification.md`, §5.3–§6.4 and §14.2 (`G-MATH-01`). Base GitHub main commit: `1adf31dc33b19a7d7cb9bcef2b9b83718475165a`.
+**Normative design:** `docs/PDD-1.0.3-Integrated-Design-Specification.md`, §5.3–§6.4 and §14.2 (`G-MATH-01`). Base GitHub main commit: `5e9b63172d29521ebdbf4185bef0a9a423c6498f`.
 
-This is a **source ZIP**, not a JAR or a confirmed Gradle build. The actual test/verification record is in `docs/verification/0.3.0-fix.md` (the earlier `0.3.0.md` is historical).
+This is a **source ZIP**, not a JAR or a confirmed Gradle build. The actual test/verification record is in `docs/verification/0.3.0-fixPlot.md` (earlier reports are historical).
 
 ## What this release implements
 
@@ -13,8 +13,9 @@ This is a **source ZIP**, not a JAR or a confirmed Gradle build. The actual test
 - `ImpactMath.exact`: validated contact point, world B-to-A normal, synchronized kinematics, `v_linear + omega×r`, and effective inverse normal mass. Results are intensity indicators, **not** claims about actual Sable solver impulse or SI joules.
 - `ImpactMath.proxy`: separate translational game-budget calculation, independent validated approach direction, explicit P-16 factor and step cap. No inferred block-center normal or unverified `signedVelocity`.
 - `ImpactEpisodeLedger`: one approved budget per dimension + pre-solver epoch + canonical body pair, with callback count independent target deduplication. This is a provisional read-only grouping for 0.3.0; 0.3.1 implements final budget allocation.
-- `ImpactLiveAudit` FIX: on a **live-audited full-collision-cube STATIC_WORLD block**, one Sable callback contact point may identify a single axis-aligned block face. A cheap six-face ambiguity/out-of-block gate infers a **proxy-only** B→A direction without any reciprocal point matching or exact contact location requirement. This source is `BLOCK_FACE_ESTIMATE`, **not** a validated Rapier normal. Plot-Plot, ambiguous corners, moving-only rotations or insufficient approaches remain unresolved.
-- Sable 2.0.6 source-proven limitation: Rust `modify_solver_contacts` computes `impactVelocity` as `abs(normal relative velocity)`, so that field does **not** distinguish approach from separation and is never used to create a budget. Post-solver native effect contacts remain diagnostic-only.
+- `ImpactLiveAudit` FIX: on a **live-audited full-collision-cube STATIC_WORLD block**, one Sable callback contact point may identify a single axis-aligned block face. A cheap six-face ambiguity/out-of-block gate infers a **proxy-only** B→A direction without any reciprocal point matching or exact contact location requirement. This source is `BLOCK_FACE_ESTIMATE`, **not** a validated Rapier normal. For Plot–Plot, a separate native-pair-normal bridge is available under the strict conditions below. Ambiguous world faces, unresolved rotations, and insufficient approaches still remain unresolved.
+- Plot–Plot proxy: Sable Rapier 2.0.6 `event_handler.rs` stores opposite local manifold normals and pair runtime IDs in a 15-double effect record. `NativePlotDirection` checks **both normal sides**, actual runtime IDs against verified stable Plot IDs, and the orientation/approach of **every pre-solver substep for the same dimension/tick**. It rejects conflicting normals, any non-approaching or rotation-dominated substep, missing input, untracked bodies or malformed/dropped native effect records. If all pass, it takes the **minimum** independently computed game budget across the substeps. There is no block-center proxy, spatial contact-point matching, or exact-SI-energy claim. Force thresholding means some real contacts have no native record and must be rejected. This is *tick-conservative evidence*, not a claim that a post-tick effect can be assigned to one exact solver substep.
+- Sable 2.0.6 source-proven limitation: Rust `modify_solver_contacts` computes `impactVelocity` as `abs(normal relative velocity)`, so that field does **not** distinguish approach from separation and is never used to create a budget. Native effect **force amounts and point vectors** remain diagnostic only; local normals can contribute solely to the separately gated tick-conservative game proxy.
 - `ImpactContinuityGate` blocks repeat budget credit from resting/continuous owner-pair contacts, including multiple physics substeps; a contact-free full tick is required for a new credit. Multiple owner-pair proxies share a step cap. **No world mutation.**
 - Structured `PDD-G-MATH-01` summary, bounded live pre-solver mass/velocity input samples, rejection reason counts, input quality and `approvedEpisodes`; older `G-COL-01/02` diagnostic logs remain. **No blocks are mutated and damage is disabled.**
 
@@ -28,13 +29,13 @@ P-16 is **off** by default. Optional explicit Java properties:
 -Dpdd.proxy.stepCap=100.0
 ```
 
-The above are **illustrative test-only numbers**, not endorsed physical units or balance settings. Merely enabling policy does not authorize all live impacts: a verified world full-cube face and same-step mass/velocity data remain mandatory. Collision-face estimate is an independently gated **proxy** direction, never an exact Rapier contact normal. Invalid/missing policy numbers do not crash initialization; they reject proxy approval.
+The above are **illustrative test-only numbers**, not endorsed physical units or balance settings. Merely enabling policy does not authorize all live impacts: World–Plot uses a verified world full-cube face. Plot–Plot requires two opposite native normals for the exact runtime body pair, stable orientation and positive translational approach in *all* pre-solver substeps of that tick, and acceptable rotation bound. Both paths require verified target blocks. Collision-face estimate is an independently gated **proxy** direction, never an exact Rapier contact normal. Invalid/missing policy numbers do not crash initialization; they reject proxy approval.
 
 ## Existing Apply ZIP contract
 
 Upload this entire ZIP as **the sole file** in GitHub repository `incoming/`. The existing `Apply PDD ZIP` action preserves `.github/`, `.git/`, `incoming/`, `gradlew`, `gradlew.bat`, and `gradle/` from the GitHub checkout. The ZIP excludes those protected paths and includes all other project source, tests and documentation. Before upload, compare GitHub `main` SHA with the base SHA above; Apply overwrites unprotected repository files.
 
-After Apply, run the existing `PDD Manual Build` and `PDD Callback Contract Test`. The protected build workflow uploads an artifact named `PDD-0.3.0`. The expected JAR inside is `physical-destroy-deform-0.3.0-fix.jar` (inspect the JAR manifest and mod metadata; do not mistake the artifact name for the JAR version).
+After Apply, run the existing `PDD Manual Build` and `PDD Callback Contract Test`. The protected build workflow uploads an artifact named `PDD-0.3.0`. The expected JAR inside is `physical-destroy-deform-0.3.0-fixPlot.jar` (inspect the JAR manifest and mod metadata; do not mistake the artifact name for the JAR version).
 
 ## Validation
 
@@ -45,4 +46,4 @@ Run in a full GitHub checkout:
 ./gradlew build --no-daemon
 ```
 
-Local environment did not contain the protected Gradle wrapper or Gradle distribution; both commands were attempted and exited **127**. The Java 21 auxiliary compiler and JUnit-style assertion runner **do not** establish a successful official Gradle/JUnit build. See `docs/verification/0.3.0-fix.md` for the full matrix and two in-game test sessions.
+Local environment did not contain the protected Gradle wrapper or Gradle distribution; both commands were attempted and exited **127**. The Java 21 auxiliary compiler and JUnit-style assertion runner **do not** establish a successful official Gradle/JUnit build. See `docs/verification/0.3.0-fixPlot.md` for the full matrix and two in-game test sessions.
