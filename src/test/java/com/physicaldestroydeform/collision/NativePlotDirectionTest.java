@@ -105,4 +105,18 @@ class NativePlotDirectionTest {
         assertEquals(Kind.CONSERVATIVE_PROXY,r.kind());
         assertTrue(r.source().contains("NATIVE_PLOT_PAIR_"));
     }
+    @Test void whyRejectNativeEvidenceExplainsAbsenceConflictAndValidPair() {
+        var s=pre(11,100,new Vec(3,0,0),new Vec(0,0,0),new Vec(0,0,0),new Vec(0,0,0));
+        var empty=NativePlotDirection.prepare(List.of(),List.of(s));
+        assertEquals("NO_NATIVE_EFFECT_FOR_BODY_PAIR_TICK",empty.explain(e(s)));
+        var good=NativePlotDirection.prepare(List.of(contact(100)),List.of(s));
+        assertEquals("OPPOSING_NORMAL_VALIDATED_BODY_PAIR_TICK",good.explain(e(s)));
+        var opposite=new NativeCollisionTelemetry.Contact(1,2,10,-1,0,0,1,0,0,
+                0,0,0,0,0,0,DIM,100);
+        var conflict=NativePlotDirection.prepare(List.of(contact(100),opposite),List.of(s));
+        assertEquals("CONFLICTING_MANIFOLD_NORMAL",conflict.explain(e(s)));
+        var later=pre(12,100,new Vec(3,0,0),new Vec(0,0,0),new Vec(0,0,0),new Vec(0,0,0));
+        assertEquals("NO_MATCHING_PRE_SOLVER_EPOCH",
+                NativePlotDirection.prepare(List.of(contact(100)),List.of(later)).explain(e(s)));
+    }
 }

@@ -49,6 +49,22 @@ public final class NativePlotDirection {
         public int acceptedPairs(){return accepted;}
         public int rejectedPairs(){return rejected;}
         public Map<Reject,Long> rejectedReasons(){return rejectedReasons;}
+        /** Explains the *body-pair* native gate, never a per-block solver manifold. */
+        public String explain(Evidence e) {
+            if(e==null||e.hit()==null||e.other()==null||!e.hit().plot()||!e.other().plot())
+                return "NOT_PLOT_PLOT";
+            if(e.hitBody()==null||e.otherBody()==null
+                    ||e.hitBody().runtimeId()<0||e.otherBody().runtimeId()<0)
+                return "BODY_RUNTIME_ID_UNAVAILABLE";
+            PairBundle pair=pairs.get(Key.of(e.dimension(),e.serverTick(),
+                    e.hitBody().runtimeId(),e.otherBody().runtimeId()));
+            if(pair==null)return "NO_NATIVE_EFFECT_FOR_BODY_PAIR_TICK";
+            if(pair.reject!=null)return pair.reject.name();
+            if(pair.frames.isEmpty())return "NO_PRE_SOLVER_FRAMES";
+            boolean epochFound=pair.frames.stream().anyMatch(f->f.snapshot().epoch()==e.epoch());
+            return epochFound?"OPPOSING_NORMAL_VALIDATED_BODY_PAIR_TICK":"NO_MATCHING_PRE_SOLVER_EPOCH";
+        }
+
         public Vec approvedNormal(Evidence e) {
             if(e==null||e.hitBody()==null||e.otherBody()==null)return null;
             PairBundle pair=pairs.get(Key.of(e.dimension(),e.serverTick(),

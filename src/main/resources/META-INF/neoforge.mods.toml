@@ -4,7 +4,7 @@ license="MIT"
 
 [[mods]]
 modId="physical_destroy_deform"
-version="0.3.0-fixPlot"
+version="0.3.0-whyReject"
 displayName="Create Aeronautics: Physical Destruction and Deforming"
 authors="PDD contributors"
 description='''PDD 0.3.0 fixPlot: guarded Sable native Plot-Plot opposing-normal proxy and original world full-cube proxy. No exact-live-contact claim or world mutation.'''

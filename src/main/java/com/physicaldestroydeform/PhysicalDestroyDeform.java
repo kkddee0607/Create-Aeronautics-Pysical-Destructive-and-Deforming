@@ -21,6 +21,7 @@ import com.physicaldestroydeform.diagnostics.AcceptanceReport;
 import com.physicaldestroydeform.diagnostics.RawObservationDispatcher;
 import com.physicaldestroydeform.diagnostics.NativeCollisionTelemetry;
 import com.physicaldestroydeform.diagnostics.SableContactQueue;
+import com.physicaldestroydeform.diagnostics.WhyRejectDiagnostics;
 import com.physicaldestroydeform.diagnostics.RawObservation;
 import com.physicaldestroydeform.material.MaterialRegistry;
 import net.neoforged.fml.common.Mod;
@@ -36,9 +37,12 @@ import org.slf4j.LoggerFactory;
 @Mod(PhysicalDestroyDeform.MOD_ID)
 public final class PhysicalDestroyDeform {
     public static final String MOD_ID = "physical_destroy_deform";
-    public static final String BUILD_VERSION = "0.3.0-fixPlot";
+    public static final String BUILD_VERSION = "0.3.0-whyReject";
     private static final Logger LOGGER = LoggerFactory.getLogger(PhysicalDestroyDeform.class);
     private final AcceptanceReport acceptanceReport = new AcceptanceReport();
+    // Diagnostics only: never affect callback return, proxy approval, or mutation.
+    private final boolean whyRejectEnabled = Boolean.parseBoolean(System.getProperty("pdd.whyReject.enabled","true"));
+    private final WhyRejectDiagnostics whyReject = new WhyRejectDiagnostics();
     private final boolean debugCollisions = Boolean.parseBoolean(System.getProperty("pdd.debugCollisions", "true"));
     private long lastTotal, lastDropped, lastPolls, lastMalformed;
     private long lastCallbackTotal, lastCallbackDropped, lastCaptureErrors;
@@ -77,11 +81,15 @@ public final class PhysicalDestroyDeform {
         NeoForge.EVENT_BUS.addListener(this::onDatapackSync);
         NeoForge.EVENT_BUS.addListener(this::onServerStopped);
         NeoForge.EVENT_BUS.addListener(this::onServerTick);
-        LOGGER.info("[PDD-DIAG] INIT modId={} version={} revision=IDS-1.0.3-G-MATH-01-FIXPLOT status=LOADED capture=ALWAYS_ON logging={}", MOD_ID, BUILD_VERSION, debugCollisions);
+        LOGGER.info("[PDD-DIAG] INIT modId={} version={} revision=IDS-1.0.3-G-MATH-01-WHYREJECT status=LOADED capture=ALWAYS_ON logging={}", MOD_ID, BUILD_VERSION, debugCollisions);
         PddDiagnostics.runModelSelfTest(LOGGER);
         LOGGER.info("[PDD-DIAG] RUNTIME_INTEGRATION observation=UNIVERSAL_BAKERY_DECORATOR_PLUS_NATIVE_EFFECT_FEED " +
                 "worldMutation=DISABLED impactMath=EXACT_AND_PROXY_GATED callbackFrame=UNVERIFIED " +
                 "validation=LIVE_OWNER_BLOCK_AUDIT_GEOMETRY_INDEPENDENT nativePlotNormals=POST_EFFECT_TICK_GATED pairMatcher=DIAGNOSTIC_ONLY targetGate=LIVE_BLOCK_ONLY");
+        LOGGER.info("[PDD-WHY-REJECT] phase=CONFIG enabled={} episodeLineLimitPerTick={} pairTypeLimit={} perEpisodeTargetLimit={} " +
+                "interpretation=CALLBACK_PAIR_NOT_SOLVER_MANIFOLD worldMutation=OFF",
+                whyRejectEnabled,WhyRejectDiagnostics.MAX_EPISODE_LINES_PER_TICK,
+                WhyRejectDiagnostics.MAX_PAIR_TYPES,WhyRejectDiagnostics.MAX_TARGET_PAIRS_PER_EPISODE);
         LOGGER.info("[PDD-G-MATH-01] POLICY proxyEnabled={} factor={} stepCap={} " +
                         "note=NO_HIDDEN_COEFFICIENTS mutation=DISABLED",
                 proxyPolicy.enabled(),proxyPolicy.factor(),proxyPolicy.availableStepCap());
@@ -100,6 +108,7 @@ public final class PhysicalDestroyDeform {
         SableContactQueue.drain();
         SableFrameCapture.clear();
         continuityGate.clear();
+        whyReject.clear();
         acceptanceReport.close();
     }
     private void onServerTick(ServerTickEvent.Post event) {
@@ -169,6 +178,20 @@ public final class PhysicalDestroyDeform {
                             ? ImpactMath.Result.reject(ImpactMath.Reason.DUPLICATE_EPISODE)
                             : ImpactLiveAudit.evaluate(e,true,
                                     audited.hit().fullWorldCollisionCube(),proxyPolicy,plotDirections);
+                    if(whyRejectEnabled) {
+                        String normalStatus=e.hit().plot() && e.other().plot()
+                                ? plotDirections.explain(e)
+                                : "WORLD_FACE:"+ImpactFaceEstimate.fromCallback(e,
+                                    audited.hit().fullWorldCollisionCube()).reason();
+                        String hitRuntime=e.hitBody()==null?"STATIC_WORLD":Integer.toString(e.hitBody().runtimeId());
+                        String otherRuntime=e.otherBody()==null?"STATIC_WORLD":Integer.toString(e.otherBody().runtimeId());
+                        String canonicalRuntimeIds=key.firstOwner().equals(ownerId(e.hit()))
+                                ?hitRuntime+"/"+otherRuntime:otherRuntime+"/"+hitRuntime;
+                        whyReject.observe(key,e.serverTick(),canonicalRuntimeIds,
+                                whyTarget(audited.hit().key()),whyTarget(audited.other().key()),
+                                candidate.reason(),normalStatus,()->whyPreSolverSample(e,
+                                        plotDirections,audited.hit().fullWorldCollisionCube()));
+                    }
                     episode.approveOnce(candidate);
                     if(debugCollisions && candidate.approved())
                         budgetCandidates.putIfAbsent(key,new Sample(c,audited,outcome));
@@ -176,6 +199,8 @@ public final class PhysicalDestroyDeform {
                     impactReasons.merge(ImpactMath.Reason.OWNER_UNVERIFIED,1L,Long::sum);
                 }
             }
+            if(whyRejectEnabled && outcome!=TargetGate.Outcome.BOTH_VERIFIED)
+                whyReject.unverified(c.hasOther(),audited.hit().status().name(),audited.other().status().name(),c.blockId());
             boolean unresolvedGeometry = e.quality()==CollisionFrame.Quality.INVALID
                     || !"HIT_FRAME_HYPOTHESIS_PLAUSIBLE".equals(e.reason());
             geometryReasons.merge(e.reason(), 1L, Long::sum);
@@ -212,6 +237,8 @@ public final class PhysicalDestroyDeform {
                         .thenComparing(x->x.getKey().secondOwner()))
                 .toList();
         var remainingPerStep=new HashMap<String,Double>();
+        int episodeLines=0;
+        int focusEpisodeLines=0;
         for(var entry:ordered) {
             evaluatedEpisodes++;
             var episode=entry.getValue();
@@ -237,6 +264,26 @@ public final class PhysicalDestroyDeform {
                 if(debugCollisions && sampleApproved==null && decision.approved()) {
                     sampleApproved=budgetCandidates.get(key);
                     sampleApprovedResult=decision;
+                }
+                if(whyRejectEnabled) {
+                    var trace=whyReject.finish(key,decision);
+                    // All owner episode outcomes are counted; log size is bounded.
+                    // Suppressed records remain visible in the cumulative summary.
+                    boolean standard=episodeLines++<WhyRejectDiagnostics.MAX_EPISODE_LINES_PER_TICK;
+                    boolean reserved=!standard && trace.focusPhysical()
+                            && focusEpisodeLines++<WhyRejectDiagnostics.EXTRA_FOCUS_EPISODE_LINES_PER_TICK;
+                    if(standard||reserved) {
+                        LOGGER.info("[PDD-WHY-REJECT] phase={} dimension={} physicsEpoch={} sourceServerTick={} nativeRuntimeIdsCanonicalOwners={} ownerA={} ownerB={} " +
+                                        "callbackPairs={} loggedUniqueBlockPairs={} omittedBlockPairSamples={} " +
+                                        "finalReason={} budgetKind={} closingSpeed={} effectiveMass={} budget={} source={} " +
+                                        "targetPairEvidence=CALLBACK_PAIR_NOT_EXACT_MANIFOLD pairs={} worldMutation=OFF",
+                                reserved?"FOCUS_EPISODE":"EPISODE",
+                                key.dimension(),key.epoch(),trace.serverTick(),trace.nativeRuntimeIds(),
+                                key.firstOwner(),key.secondOwner(),
+                                trace.callbacks(),trace.distinctPairs(),trace.unlistedPairs(),
+                                decision.reason(),decision.kind(),decision.closingSpeed(),
+                                decision.effectiveMass(),decision.budget(),decision.source(),trace.pairs());
+                    } else whyReject.suppressEpisodeLine();
                 }
                 impactReasons.merge(decision.reason(),1L,Long::sum);
                 if(decision.approved()) {
@@ -281,6 +328,27 @@ public final class PhysicalDestroyDeform {
         LOGGER.info("[PDD-G-COL-02] phase=QUALITY targetOutcomes={} hitFailures={} " +
                 "otherFailures={} geometryReasons={} mutation=DISABLED",
                 targetOutcomes,hitFailures,otherFailures,geometryReasons);
+        if(whyRejectEnabled) {
+            LOGGER.info("[PDD-WHY-REJECT] phase=SUMMARY verifiedCallbackPairs={} ownerEpisodes={} approvedOwnerEpisodes={} " +
+                            "chainPlotStone={} reinforcedPlotStone={} noOtherCallbacks={} unverifiedCallbacks={} " +
+                            "unverifiedReasons={} pairTypes={} pairTypeOverflow={} unlistedBlockPairSamples={} " +
+                            "episodeLogLinesSuppressed={} nativeDroppedTotal={} nativeMalformedTotal={} " +
+                            "callbackDroppedTotal={} captureErrorsTotal={} interpretation=CALLBACK_PAIRS_NOT_EXACT_CONTACTS",
+                    whyReject.observedCallbacks(),whyReject.allEpisodes(),whyReject.allApproved(),
+                    whyReject.focusCount("chainPlotStone"),whyReject.focusCount("reinforcedPlotStone"),
+                    whyReject.missingOther(),whyReject.unverifiedTargets(),whyReject.unverifiedReasons(),
+                    whyReject.pairTypeCount(),whyReject.unlistedCategories(),whyReject.unlistedPairSamples(),
+                    whyReject.episodeLinesSuppressed(),NativeCollisionTelemetry.dropped(),
+                    NativeCollisionTelemetry.malformed(),SableContactQueue.dropped(),SableContactQueue.captureErrors());
+            // Focus counts are exhaustive even when the episode log is rate-limited.
+            LOGGER.info("[PDD-WHY-REJECT] phase=RAW_UNVERIFIED_HIT_TYPES top={} " +
+                            "interpretation=RAW_HIT_ONLY_NO_VERIFIED_BLOCK_PAIR",
+                    whyReject.unverifiedHitBlockTypes(WhyRejectDiagnostics.MAX_SUMMARY_TYPES));
+            for(String type:whyReject.focusTypes())
+                LOGGER.info("[PDD-WHY-REJECT] phase=FOCUS_PAIR_TYPE {} confidence=VERIFIED_CALLBACK_TARGETS_ONLY",type);
+            for(String type:whyReject.leadingTypes(WhyRejectDiagnostics.MAX_SUMMARY_TYPES))
+                LOGGER.info("[PDD-WHY-REJECT] phase=TOP_PAIR_TYPE {} confidence=VERIFIED_CALLBACK_TARGETS_ONLY",type);
+        }
         LOGGER.info("[PDD-G-MATH-01] phase=NATIVE_PLOT_BRIDGE contactsTotal={} acceptedPairsTotal={} rejectedPairsTotal={} nativeApprovedEpisodesTotal={} pairRejections={} " +
                         "gate=ALL_PRE_SUBSTEPS_AND_OPPOSING_NORMALS nativePhase=POST_TICK_EFFECT_ONLY mutation=OFF",
                 NativeCollisionTelemetry.total(),nativePlotAccepted,nativePlotRejected,nativePlotAcceptedBudgets,
@@ -329,8 +397,10 @@ public final class PhysicalDestroyDeform {
             logSample("ROTATED_PLOT", sampleRotated);
             if(sampleImpactInput!=null)logImpactInput(sampleImpactInput);
             if(sampleApproved!=null && sampleApprovedResult!=null)
-                logApproved(sampleApproved,sampleApprovedResult,null);
-            if(sampleApprovedPlot!=null && sampleApprovedPlotResult!=null)
+                logApproved(sampleApproved,sampleApprovedResult,
+                        sampleApprovedResult.source().startsWith("NATIVE_PLOT_PAIR_")
+                                ? plotDirections.approvedNormal(sampleApproved.observation().frameEvidence()) : null);
+            if(sampleApprovedPlot!=null && sampleApprovedPlotResult!=null && sampleApprovedPlot!=sampleApproved)
                 logApproved(sampleApprovedPlot,sampleApprovedPlotResult,sampleApprovedPlotNormal);
             if (sampleNative!=null) logNative(sampleNative);
         }
@@ -339,6 +409,34 @@ public final class PhysicalDestroyDeform {
         sampleUnresolvedGeometry=null; sampleRotated=null; sampleImpactInput=null;
         sampleApproved=null; sampleApprovedResult=null; sampleNative=null;
         sampleApprovedPlot=null; sampleApprovedPlotResult=null; sampleApprovedPlotNormal=null;
+    }
+
+    private static String whyPreSolverSample(CollisionFrame.Evidence e,
+                                              NativePlotDirection.Prepared directions,
+                                              boolean fullWorldCube) {
+        var normal=e.hit().plot()&&e.other().plot()
+                ?directions.approvedNormal(e)
+                :ImpactFaceEstimate.fromCallback(e,fullWorldCube).normalBtoA();
+        return "normalBtoA="+normal+",hit="+whyBodySample(e.hitBody())
+                +",other="+whyBodySample(e.otherBody())
+                +",callbackGeometryQuality="+e.quality()+",callbackGeometryReason="+e.reason();
+    }
+    private static String whyBodySample(CollisionFrame.Body captured) {
+        if(captured==null)return "STATIC_WORLD_OR_UNAVAILABLE";
+        var body=captured.impactBody();
+        return body==null?"MASS_OR_VELOCITY_UNAVAILABLE"
+                :"(mass="+body.mass()+",linearWorld="+body.linearWorld()
+                    +",angularWorld="+body.angularWorld()+")";
+    }
+
+    private static WhyRejectDiagnostics.Target whyTarget(OwnerResolver.TargetKey target) {
+        if(target==null)throw new IllegalArgumentException("missing verified target");
+        String fingerprint=target.fingerprint();
+        int separator=fingerprint.indexOf('|');
+        String blockId=separator<0?fingerprint:fingerprint.substring(0,separator);
+        return new WhyRejectDiagnostics.Target(target.space().name(),
+                target.stablePlotId()==null?null:target.stablePlotId().toString(),
+                target.x(),target.y(),target.z(),blockId);
     }
 
     private static String ownerId(CollisionFrame.BlockTarget target) {

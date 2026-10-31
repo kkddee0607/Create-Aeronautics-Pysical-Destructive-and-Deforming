@@ -1,10 +1,43 @@
-# PDD 0.3.0 fixPlot — Create Aeronautics Physical Destruction and Deforming
+# PDD 0.3.0 whyReject — Create Aeronautics Physical Destruction and Deforming
 
 Target: Minecraft Java 1.21.1 · NeoForge 21.1.x (build contract: 21.1.228) · Java 21 · Create 6.0.10 · Create Aeronautics 1.3.2 · Sable 2.0.6.
 
 **Normative design:** `docs/PDD-1.0.3-Integrated-Design-Specification.md`, §5.3–§6.4 and §14.2 (`G-MATH-01`). Base GitHub main commit: `5e9b63172d29521ebdbf4185bef0a9a423c6498f`.
 
-This is a **source ZIP**, not a JAR or a confirmed Gradle build. The actual test/verification record is in `docs/verification/0.3.0-fixPlot.md` (earlier reports are historical).
+This is a **source ZIP**, not a JAR or a confirmed Gradle build. The actual test/verification record is in `docs/verification/0.3.0-whyReject.md` (earlier reports are historical).
+
+
+## whyReject: exhaustive target-type counts and bounded episode evidence
+
+The patch keeps every collision result unchanged while adding the read-only
+`[PDD-WHY-REJECT]` stream. By default `pdd.whyReject.enabled=true` and it can
+be disabled for non-debug production use with `-Dpdd.whyReject.enabled=false`.
+
+- `phase=EPISODE`: one record per *owner-pair physics epoch* with original
+  callback-mapped target blocks, Plot UUIDs, allocated local BlockPos, runtime
+  body IDs, source tick, candidate refusal reasons, native **body-pair** gate,
+  and the **final** post-cap/post-continuity decision. A bounded first-instance snapshot also includes mass, velocity, angular velocity, inferred normal, and quality provenance. It does not imply a
+  native per-block contact manifold.
+- `phase=SUMMARY`: cumulative verified callback pair and owner episode counts,
+  never conflating `NO_OTHER` / unverified raw callbacks with verified pairs.
+  `chainPlotStone` and `reinforcedPlotStone` count ONLY callbacks that verified
+  **two different SABLE_PLOT owners** with those block types. Counts of zero
+  mean *not observed and verified by PDD*, not proof that a Rapier contact was absent.
+- `phase=FOCUS_PAIR_TYPE`/`TOP_PAIR_TYPE`: all non-discarded tracked types
+  distinguished by STATIC_WORLD versus SABLE_PLOT; `approvedOwnerEpisodesAssociated`
+  is **not** a block-specific impact or damage attribution.
+- Logs are rate-limited to 128 regular plus 32 additional physical chain/stone
+  or reinforced/stone episodes per server tick. Every omitted episode line and
+  target detail has an explicit cumulative count. The verified category table
+  retains up to 256 block-type combinations and reports any overflow. These
+  caps do not affect the physics pipeline or budget decisions.
+
+The primary regression test is a separately assembled physical stone structure
+against the balloon's bottom chain and reinforced-deepslate weight: compare
+`phase=EPISODE`, `phase=FOCUS_PAIR_TYPE`, native reasons and `chainPlotStone` /
+`reinforcedPlotStone`. The exact contacted block pair cannot be inferred from
+**body-pair-only** native normals; this limitation is intentional.
+
 
 ## What this release implements
 
@@ -35,7 +68,7 @@ The above are **illustrative test-only numbers**, not endorsed physical units or
 
 Upload this entire ZIP as **the sole file** in GitHub repository `incoming/`. The existing `Apply PDD ZIP` action preserves `.github/`, `.git/`, `incoming/`, `gradlew`, `gradlew.bat`, and `gradle/` from the GitHub checkout. The ZIP excludes those protected paths and includes all other project source, tests and documentation. Before upload, compare GitHub `main` SHA with the base SHA above; Apply overwrites unprotected repository files.
 
-After Apply, run the existing `PDD Manual Build` and `PDD Callback Contract Test`. The protected build workflow uploads an artifact named `PDD-0.3.0`. The expected JAR inside is `physical-destroy-deform-0.3.0-fixPlot.jar` (inspect the JAR manifest and mod metadata; do not mistake the artifact name for the JAR version).
+After Apply, run the existing `PDD Manual Build` and `PDD Callback Contract Test`. The protected build workflow uploads an artifact named `PDD-0.3.0`. The expected JAR inside is `physical-destroy-deform-0.3.0-whyReject.jar` (inspect the JAR manifest and mod metadata; do not mistake the artifact name for the JAR version).
 
 ## Validation
 
@@ -46,4 +79,4 @@ Run in a full GitHub checkout:
 ./gradlew build --no-daemon
 ```
 
-Local environment did not contain the protected Gradle wrapper or Gradle distribution; both commands were attempted and exited **127**. The Java 21 auxiliary compiler and JUnit-style assertion runner **do not** establish a successful official Gradle/JUnit build. See `docs/verification/0.3.0-fixPlot.md` for the full matrix and two in-game test sessions.
+Local environment did not contain the protected Gradle wrapper or Gradle distribution; both commands were attempted and exited **127**. The Java 21 auxiliary compiler and JUnit-style assertion runner **do not** establish a successful official Gradle/JUnit build. See `docs/verification/0.3.0-whyReject.md` for the full matrix and two in-game test sessions.
