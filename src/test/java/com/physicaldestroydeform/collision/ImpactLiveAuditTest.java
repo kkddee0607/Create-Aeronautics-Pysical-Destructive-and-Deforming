@@ -76,4 +76,30 @@ class ImpactLiveAuditTest {
                 Quality.DIAGNOSTIC_ONLY,"NONE");
         assertEquals(Reason.MASS_INVALID,ImpactLiveAudit.evaluate(e,true,ProxyPolicy.disabled()).reason());
     }
+    @Test void moreRogExplainsExactExistingRotationGuardWithoutChangingDecision() {
+        var e=worldContact(-3,1,new Vec(30.5,4,30.5));
+        // Verified world top-face normal B -> A. Voxel-center projection is diagnostic only.
+        var normal=new Vec(0,-1,0);
+        var report=ImpactLiveAudit.rotationEvidence(e,normal);
+        var moving=ImpactLiveAudit.body(e.other(),e.otherBody());
+        var stationary=ImpactLiveAudit.body(e.hit(),e.hitBody());
+        assertEquals(3.0,report.translationClosing(),1e-10);
+        assertEquals(0.0,report.hit().omegaMagnitude(),1e-10);
+        assertTrue(report.other().omegaMagnitude()>0);
+        assertTrue(report.other().voxelCornerRadiusUpper()>=report.other().centerDistance());
+        assertEquals(ImpactLiveAudit.rotationMayDominate(e,stationary,moving,normal),
+                report.rotationGateRejects());
+        assertEquals(ImpactMath.Reason.ROTATION_UNRESOLVED,
+                ImpactLiveAudit.evaluate(e,true,true,new ProxyPolicy(true,.5,100)).reason());
+        assertTrue(report.explain().contains("BLOCK_VOXEL_CENTER_DIAGNOSTIC_ONLY"));
+    }
+    @Test void moreRogDoesNotPromoteRotationAtRestIntoApprovedContact() {
+        var e=worldContact(0,0,new Vec(30.5,4,30.5));
+        var report=ImpactLiveAudit.rotationEvidence(e,new Vec(0,-1,0));
+        assertEquals(0.0,report.translationClosing(),1e-10);
+        assertFalse(report.rotationGateRejects());
+        assertEquals(ImpactMath.Reason.SEPARATING_OR_TANGENTIAL,
+                ImpactLiveAudit.evaluate(e,true,true,new ProxyPolicy(true,.5,100)).reason());
+    }
+
 }

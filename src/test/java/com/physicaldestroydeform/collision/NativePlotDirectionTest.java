@@ -119,4 +119,60 @@ class NativePlotDirectionTest {
         assertEquals("NO_MATCHING_PRE_SOLVER_EPOCH",
                 NativePlotDirection.prepare(List.of(contact(100)),List.of(later)).explain(e(s)));
     }
+    @Test void moreRogCapturesNativeRecordAndFirstConflictWithoutInventingManifoldId() {
+        var s=pre(11,100,new Vec(3,0,0),new Vec(0,0,0),new Vec(0,0,0),new Vec(0,0,0));
+        var opposing=new NativeCollisionTelemetry.Contact(1,2,10,-1,0,0,1,0,0,
+                0,0,0,0,0,0,DIM,100);
+        var d=NativePlotDirection.prepare(List.of(contact(100),opposing),List.of(s));
+        assertEquals(1,d.rejectedPairs());
+        var detail=d.moreRogNativeEvidence(e(s));
+        assertTrue(detail.contains("manifoldId=UNAVAILABLE"));
+        assertTrue(detail.contains("substepPerEffect=UNAVAILABLE"));
+        assertTrue(detail.contains("pairGate=CONFLICTING_MANIFOLD_NORMAL"));
+        if(Boolean.getBoolean("pdd.moreRog.enabled")) {
+            assertTrue(detail.contains("commonDot=-1.0"));
+            assertTrue(detail.contains("effectOrdinal=2"));
+            assertTrue(detail.contains("rawPointA_FRAME_UNVERIFIED="));
+        }
+        assertTrue(d.moreRogSubsteps(e(s),POLICY).contains("NO_VALIDATED_NORMAL"));
+        assertEquals(Reason.DIRECTION_UNVERIFIED,d.evaluate(e(s),POLICY).reason());
+    }
+    @Test void moreRogInspectsAllSubstepsEvenWhenFirstAppearsApproaching() {
+        var first=pre(11,100,new Vec(4,0,0),new Vec(0,0,0),new Vec(0,0,0),new Vec(0,0,0));
+        var last=pre(12,100,new Vec(4,0,0),new Vec(0,0,0),new Vec(0,2,0),new Vec(0,0,0));
+        var d=NativePlotDirection.prepare(List.of(contact(100)),List.of(first,last));
+        assertEquals(Reason.ROTATION_UNRESOLVED,d.evaluate(e(first),POLICY).reason());
+        String trace=d.moreRogSubsteps(e(first),POLICY);
+        assertTrue(trace.contains("preSolverSubsteps=2"));
+        assertTrue(trace.contains("rotationRejectSubsteps=1"));
+        assertTrue(trace.contains("firstRejectedSubstep="));
+        assertTrue(trace.contains("nativeEffectSubstepMapping=UNAVAILABLE"));
+    }
+
+    @Test void moreRogSeparatesNonOpposingSideNormalsFromManifoldConflict() {
+        var s=pre(11,100,new Vec(3,0,0),new Vec(0,0,0),new Vec(0,0,0),new Vec(0,0,0));
+        var bad=new NativeCollisionTelemetry.Contact(1,2,10,1,0,0,1,0,0,
+                0,0,0,0,0,0,DIM,100);
+        var d=NativePlotDirection.prepare(List.of(bad),List.of(s));
+        assertEquals("SIDES_NOT_OPPOSED",d.explain(e(s)));
+        String detail=d.moreRogNativeEvidence(e(s));
+        assertTrue(detail.contains("pairGate=SIDES_NOT_OPPOSED"));
+        if(Boolean.getBoolean("pdd.moreRog.enabled"))
+            assertTrue(detail.contains("opposingDot=1.0"));
+        assertEquals(Reason.DIRECTION_UNVERIFIED,d.evaluate(e(s),POLICY).reason());
+    }
+    @Test void moreRogBoundsRecordExamplesWithoutDroppingOriginalInputs() {
+        var s=pre(11,100,new Vec(3,0,0),new Vec(0,0,0),new Vec(0,0,0),new Vec(0,0,0));
+        var d=NativePlotDirection.prepare(List.of(contact(100),contact(100),contact(100),
+                contact(100),contact(100),contact(100)),List.of(s));
+        assertEquals(1,d.acceptedPairs());
+        assertEquals(Reason.APPROVED,d.evaluate(e(s),POLICY).reason());
+        if(Boolean.getBoolean("pdd.moreRog.enabled")) {
+            String detail=d.moreRogNativeEvidence(e(s));
+            assertTrue(detail.contains("nativeRecordCount=6"));
+            assertTrue(detail.contains("shownRecordCount=4"));
+            assertFalse(detail.contains("effectOrdinalWithinPair=5,"));
+        }
+    }
+
 }

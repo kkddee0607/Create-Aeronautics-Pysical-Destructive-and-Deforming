@@ -37,12 +37,13 @@ import org.slf4j.LoggerFactory;
 @Mod(PhysicalDestroyDeform.MOD_ID)
 public final class PhysicalDestroyDeform {
     public static final String MOD_ID = "physical_destroy_deform";
-    public static final String BUILD_VERSION = "0.3.0-whyReject";
+    public static final String BUILD_VERSION = "0.3.0-moreRog";
     private static final Logger LOGGER = LoggerFactory.getLogger(PhysicalDestroyDeform.class);
     private final AcceptanceReport acceptanceReport = new AcceptanceReport();
     // Diagnostics only: never affect callback return, proxy approval, or mutation.
     private final boolean whyRejectEnabled = Boolean.parseBoolean(System.getProperty("pdd.whyReject.enabled","true"));
     private final WhyRejectDiagnostics whyReject = new WhyRejectDiagnostics();
+    private final boolean moreRogEnabled=Boolean.parseBoolean(System.getProperty("pdd.moreRog.enabled","false"));
     private final boolean debugCollisions = Boolean.parseBoolean(System.getProperty("pdd.debugCollisions", "true"));
     private long lastTotal, lastDropped, lastPolls, lastMalformed;
     private long lastCallbackTotal, lastCallbackDropped, lastCaptureErrors;
@@ -81,7 +82,7 @@ public final class PhysicalDestroyDeform {
         NeoForge.EVENT_BUS.addListener(this::onDatapackSync);
         NeoForge.EVENT_BUS.addListener(this::onServerStopped);
         NeoForge.EVENT_BUS.addListener(this::onServerTick);
-        LOGGER.info("[PDD-DIAG] INIT modId={} version={} revision=IDS-1.0.3-G-MATH-01-WHYREJECT status=LOADED capture=ALWAYS_ON logging={}", MOD_ID, BUILD_VERSION, debugCollisions);
+        LOGGER.info("[PDD-DIAG] INIT modId={} version={} revision=IDS-1.0.3-G-MATH-01-MOREROG status=LOADED capture=ALWAYS_ON logging={}", MOD_ID, BUILD_VERSION, debugCollisions);
         PddDiagnostics.runModelSelfTest(LOGGER);
         LOGGER.info("[PDD-DIAG] RUNTIME_INTEGRATION observation=UNIVERSAL_BAKERY_DECORATOR_PLUS_NATIVE_EFFECT_FEED " +
                 "worldMutation=DISABLED impactMath=EXACT_AND_PROXY_GATED callbackFrame=UNVERIFIED " +
@@ -90,6 +91,8 @@ public final class PhysicalDestroyDeform {
                 "interpretation=CALLBACK_PAIR_NOT_SOLVER_MANIFOLD worldMutation=OFF",
                 whyRejectEnabled,WhyRejectDiagnostics.MAX_EPISODE_LINES_PER_TICK,
                 WhyRejectDiagnostics.MAX_PAIR_TYPES,WhyRejectDiagnostics.MAX_TARGET_PAIRS_PER_EPISODE);
+        LOGGER.info("[PDD-MORE-ROG] phase=CONFIG enabled={} method=READ_ONLY_ROTATION_AND_NATIVE_PAIR_NORMAL_AUDIT " +
+                "manifoldId=UNAVAILABLE nativeEffectSubstep=UNAVAILABLE worldMutation=OFF",moreRogEnabled);
         LOGGER.info("[PDD-G-MATH-01] POLICY proxyEnabled={} factor={} stepCap={} " +
                         "note=NO_HIDDEN_COEFFICIENTS mutation=DISABLED",
                 proxyPolicy.enabled(),proxyPolicy.factor(),proxyPolicy.availableStepCap());
@@ -190,7 +193,9 @@ public final class PhysicalDestroyDeform {
                         whyReject.observe(key,e.serverTick(),canonicalRuntimeIds,
                                 whyTarget(audited.hit().key()),whyTarget(audited.other().key()),
                                 candidate.reason(),normalStatus,()->whyPreSolverSample(e,
-                                        plotDirections,audited.hit().fullWorldCollisionCube()));
+                                        plotDirections,audited.hit().fullWorldCollisionCube()),
+                                moreRogEnabled?()->moreRogSample(e,plotDirections,
+                                        audited.hit().fullWorldCollisionCube()):null);
                     }
                     episode.approveOnce(candidate);
                     if(debugCollisions && candidate.approved())
@@ -283,6 +288,12 @@ public final class PhysicalDestroyDeform {
                                 trace.callbacks(),trace.distinctPairs(),trace.unlistedPairs(),
                                 decision.reason(),decision.kind(),decision.closingSpeed(),
                                 decision.effectiveMass(),decision.budget(),decision.source(),trace.pairs());
+                        if(moreRogEnabled)
+                            LOGGER.info("[PDD-MORE-ROG] phase=EPISODE_EVIDENCE dimension={} physicsEpoch={} sourceServerTick={} " +
+                                            "ownerA={} ownerB={} finalReason={} focusPhysical={} evidence={} worldMutation=OFF",
+                                    key.dimension(),key.epoch(),trace.serverTick(),
+                                    key.firstOwner(),key.secondOwner(),decision.reason(),
+                                    trace.focusPhysical(),trace.moreRogEvidence());
                     } else whyReject.suppressEpisodeLine();
                 }
                 impactReasons.merge(decision.reason(),1L,Long::sum);
@@ -409,6 +420,25 @@ public final class PhysicalDestroyDeform {
         sampleUnresolvedGeometry=null; sampleRotated=null; sampleImpactInput=null;
         sampleApproved=null; sampleApprovedResult=null; sampleNative=null;
         sampleApprovedPlot=null; sampleApprovedPlotResult=null; sampleApprovedPlotNormal=null;
+    }
+
+    /** Reads existing evidence only. Rotation uses a voxel-corner upper bound;
+     * native collision effect records do not expose manifold IDs or substeps.
+     * This must never change G-MATH-01 budgets or source callback behavior. */
+    private String moreRogSample(CollisionFrame.Evidence e,
+                                        NativePlotDirection.Prepared directions,
+                                        boolean fullWorldCube) {
+        if(e.hit().plot()&&e.other().plot())
+            return "path=PLOT_PLOT,nativePair={"+directions.moreRogNativeEvidence(e)
+                    +"},substeps={"+directions.moreRogSubsteps(e,
+                            proxyPolicy)+"}";
+        var normal=ImpactFaceEstimate.fromCallback(e,fullWorldCube).normalBtoA();
+        if(normal==null)return "path=WORLD_PLOT,rotation=NOT_EVALUABLE_WITHOUT_VERIFIED_NORMAL";
+        try {
+            return "path=WORLD_PLOT,rotation={"+ImpactLiveAudit.rotationEvidence(e,normal).explain()+"}";
+        }catch(IllegalArgumentException invalid) {
+            return "path=WORLD_PLOT,rotation=INVALID_INPUT";
+        }
     }
 
     private static String whyPreSolverSample(CollisionFrame.Evidence e,

@@ -62,6 +62,76 @@ public final class ImpactLiveAudit {
                     result.closingSpeed(),result.effectiveMass(),
                     "BLOCK_FACE_ESTIMATE:VERIFIED_WORLD_FULL_CUBE_SINGLE_FACE") : result;
     }
+
+    /** Evidence-only replay of the existing conservative rotation guard.
+     * The voxel center is NOT a solver contact point. Its omega cross r normal
+     * projection is an illustrative diagnostic, NEVER an approval input. */
+    public record RotationSide(String status,double omegaMagnitude,double centerDistance,
+                               double voxelCornerRadiusUpper,double tangentialSpeedUpper,
+                               double blockCenterOmegaCrossRNormal,boolean guardRejects) {
+        public String explain() {
+            return "status="+status+",omegaMagnitude="+omegaMagnitude
+                    +",centerDistance="+centerDistance+",cornerRadiusUpper="+voxelCornerRadiusUpper
+                    +",omegaRadiusUpper="+tangentialSpeedUpper
+                    +",blockCenterOmegaCrossRNormal_DIAGNOSTIC_ONLY="+blockCenterOmegaCrossRNormal
+                    +",guardRejects="+guardRejects;
+        }
+    }
+    public record RotationEvidence(double signedTranslationNormalVelocity,double translationClosing,
+                                   RotationSide hit,RotationSide other,boolean rotationGateRejects) {
+        public String explain() {
+            return "signedTranslationNormalVelocity="+signedTranslationNormalVelocity
+                    +",translationClosing="+translationClosing+",hit={"+hit.explain()
+                    +"},other={"+other.explain()+"},rotationGateRejects="+rotationGateRejects
+                    +",rule=ANY_SIDE_OMEGA_RADIUS_GE_CLOSING"
+                    +",contactPoint=UNAVAILABLE candidatePoint=BLOCK_VOXEL_CENTER_DIAGNOSTIC_ONLY";
+        }
+    }
+    public static RotationEvidence rotationEvidence(Evidence e,FrameMath.Vec normalBtoA) {
+        if(e==null||normalBtoA==null||!normalBtoA.finite())
+            throw new IllegalArgumentException("rotation evidence requires a finite normal");
+        ImpactMath.Body a=body(e.hit(),e.hitBody());
+        ImpactMath.Body b=body(e.other(),e.otherBody());
+        if(a==null||b==null)throw new IllegalArgumentException("missing motion body");
+        double signed=a.linearWorld().minus(b.linearWorld()).dot(normalBtoA);
+        double closing=Math.max(0,-signed);
+        return new RotationEvidence(signed,closing,
+                rotationSide(e.hit(),e.hitBody(),a,normalBtoA,closing),
+                rotationSide(e.other(),e.otherBody(),b,normalBtoA,closing),
+                rotationMayDominate(e,a,b,normalBtoA));
+    }
+    private static RotationSide rotationSide(BlockTarget t,Body captured,ImpactMath.Body b,
+                                             FrameMath.Vec normal,double closing) {
+        if(b.isStatic())return new RotationSide("STATIC_WORLD",0,0,0,0,0,false);
+        double omega=Math.sqrt(b.angularWorld().squareLength());
+        if(!Double.isFinite(omega))return new RotationSide("INVALID_OMEGA",omega,
+                Double.NaN,Double.NaN,Double.NaN,Double.NaN,true);
+        // Mirror the original guard, including its low-omega thresholds.
+        if(closing<=0)return new RotationSide("NO_TRANSLATIONAL_APPROACH",omega,
+                Double.NaN,Double.NaN,Double.NaN,Double.NaN,b.angularWorld().squareLength()>1e-24);
+        if(omega<=1e-12)return new RotationSide("OMEGA_BELOW_GUARD_THRESHOLD",omega,
+                Double.NaN,Double.NaN,0,0,false);
+        if(t==null||captured==null||captured.pose()==null||!captured.pose().valid())
+            return new RotationSide("POSE_UNAVAILABLE",omega,Double.NaN,Double.NaN,
+                    Double.NaN,Double.NaN,true);
+        try {
+            var pose=captured.pose();
+            var center=pose.toWorldPoint(new FrameMath.Vec(t.x()+.5,t.y()+.5,t.z()+.5));
+            var relative=center.minus(b.centerWorld());
+            double distance=Math.sqrt(relative.squareLength());
+            double scaleMax=Math.max(Math.abs(pose.scale().x()),
+                    Math.max(Math.abs(pose.scale().y()),Math.abs(pose.scale().z())));
+            double radius=distance+0.8660254037844386*scaleMax;
+            double upper=omega*radius;
+            double projected=b.angularWorld().cross(relative).dot(normal);
+            return new RotationSide(!Double.isFinite(radius)?"INVALID_RADIUS":"VALID_VOXEL_UPPER_BOUND",
+                    omega,distance,radius,upper,projected,!Double.isFinite(radius)||upper>=closing);
+        }catch(IllegalArgumentException ex) {
+            return new RotationSide("INVALID_POSE_TRANSFORM",omega,Double.NaN,Double.NaN,
+                    Double.NaN,Double.NaN,true);
+        }
+    }
+
     /** Conservative upper bound: angular speed * max distance to any hit voxel corner.
      * If rotation can explain the normal approach, translation-only proxy is denied. */
     static boolean rotationMayDominate(Evidence e, ImpactMath.Body a,

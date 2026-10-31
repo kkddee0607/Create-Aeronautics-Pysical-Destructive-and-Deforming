@@ -1,11 +1,51 @@
-# PDD 0.3.0 whyReject — Create Aeronautics Physical Destruction and Deforming
+# PDD 0.3.0 moreRog — Create Aeronautics Physical Destruction and Deforming
 
 Target: Minecraft Java 1.21.1 · NeoForge 21.1.x (build contract: 21.1.228) · Java 21 · Create 6.0.10 · Create Aeronautics 1.3.2 · Sable 2.0.6.
 
-**Normative design:** `docs/PDD-1.0.3-Integrated-Design-Specification.md`, §5.3–§6.4 and §14.2 (`G-MATH-01`). Base GitHub main commit: `5e9b63172d29521ebdbf4185bef0a9a423c6498f`.
+**Normative design:** `docs/PDD-1.0.3-Integrated-Design-Specification.md`, §5.3–§6.4 and §14.2 (`G-MATH-01`). Base GitHub main commit: `e97cd7c61f4fa890b6efe607d5a9bda31b201d9c`.
 
 This is a **source ZIP**, not a JAR or a confirmed Gradle build. The actual test/verification record is in `docs/verification/0.3.0-whyReject.md` (earlier reports are historical).
 
+
+
+## moreRog — rejection evidence patch (read-only)
+
+Extends the previous whyReject diagnostics without changing any approved impact
+budget, callback return, native array, collision policy, damage or mutation. To
+activate the additional bounded diagnostic output, append:
+
+```text
+-Dpdd.moreRog.enabled=true
+```
+
+Existing parameters (`-Dpdd.debugCollisions=true`,
+`-Dpdd.whyReject.enabled=true`, and optional explicit P-16 proxy settings)
+remain unchanged. `moreRog` defaults **off** to avoid expensive diagnostics in
+normal play. Each logged owner-pair episode gets a separate
+`[PDD-MORE-ROG] phase=EPISODE_EVIDENCE` with:
+
+- Native body-pair post-effect record counts, first four raw local-normal
+  vectors and uninterpreted point fields, converted world normals,
+  opposing-side cosine, first incompatible canonical-normal cosine and the
+  *actual rejecting record ordinal*. This ordinal is **not a manifold ID**;
+  manifold ID and native-effect pre-solver substep index are unavailable.
+- For every retained pre-solver frame of a **validated** native pair,
+  the normal, computed translational approach, radius to the candidate voxel
+  center plus voxel corner, each `|omega|*radius` bound, and the first failing
+  substep. Up to four frames are shown, but all are counted. An invalid pair
+  normal stays invalid: rotation is not inferred from a rejected direction.
+- For World–Plot events, an identical rotation upper-bound check whenever the
+  static cube face normal is independently verified.
+- A voxel-center `omega x r` projection is marked **diagnostic-only**, not the
+  solver's contact-point rotational speed. `worldMutation=OFF` always.
+
+These entries are emitted once per **owner-pair episode** rather than once per
+callback. A subsequently observed chain/stone or reinforced-deepslate/stone
+pair replaces an unrelated diagnostic example in the same episode. Existing
+whyReject full target-pair list and category counts remain unchanged.
+
+See `docs/verification/0.3.0-moreRog.md` for build status, explicit source
+contracts, two-session in-game procedures and PASS/FAIL/UNVERIFIED criteria.
 
 ## whyReject: exhaustive target-type counts and bounded episode evidence
 
@@ -68,7 +108,7 @@ The above are **illustrative test-only numbers**, not endorsed physical units or
 
 Upload this entire ZIP as **the sole file** in GitHub repository `incoming/`. The existing `Apply PDD ZIP` action preserves `.github/`, `.git/`, `incoming/`, `gradlew`, `gradlew.bat`, and `gradle/` from the GitHub checkout. The ZIP excludes those protected paths and includes all other project source, tests and documentation. Before upload, compare GitHub `main` SHA with the base SHA above; Apply overwrites unprotected repository files.
 
-After Apply, run the existing `PDD Manual Build` and `PDD Callback Contract Test`. The protected build workflow uploads an artifact named `PDD-0.3.0`. The expected JAR inside is `physical-destroy-deform-0.3.0-whyReject.jar` (inspect the JAR manifest and mod metadata; do not mistake the artifact name for the JAR version).
+After Apply, run the existing `PDD Manual Build` and `PDD Callback Contract Test`. The protected build workflow uploads an artifact named `PDD-0.3.0`. The expected JAR inside is `physical-destroy-deform-0.3.0-moreRog.jar` (inspect the JAR manifest and mod metadata; do not mistake the artifact name for the JAR version).
 
 ## Validation
 
@@ -79,4 +119,4 @@ Run in a full GitHub checkout:
 ./gradlew build --no-daemon
 ```
 
-Local environment did not contain the protected Gradle wrapper or Gradle distribution; both commands were attempted and exited **127**. The Java 21 auxiliary compiler and JUnit-style assertion runner **do not** establish a successful official Gradle/JUnit build. See `docs/verification/0.3.0-whyReject.md` for the full matrix and two in-game test sessions.
+Local environment did not contain the protected Gradle wrapper or Gradle distribution; both commands were attempted and exited **127**. The Java 21 auxiliary compiler and JUnit-style assertion runner **do not** establish a successful official Gradle/JUnit build. See `docs/verification/0.3.0-moreRog.md` for the current validation matrix and two in-game test sessions.

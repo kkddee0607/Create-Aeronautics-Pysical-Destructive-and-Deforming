@@ -72,10 +72,13 @@ public final class WhyRejectDiagnostics {
         long serverTick=Long.MIN_VALUE;
         String nativeRuntimeIds="UNKNOWN";
         boolean focusPhysical;
+        String moreRogEvidence="DISABLED";
+        boolean moreRogFocused;
     }
     public record FinalEvent(ImpactEpisodeLedger.Key key,long serverTick,String nativeRuntimeIds,
                              long callbacks,int distinctPairs,long unlistedPairs,
-                             boolean focusPhysical,ImpactMath.Result result,String pairs) {
+                             boolean focusPhysical,ImpactMath.Result result,String pairs,
+                             String moreRogEvidence) {
         public boolean approved(){return result!=null&&result.approved();}
     }
 
@@ -95,6 +98,11 @@ public final class WhyRejectDiagnostics {
     }
     public void observe(ImpactEpisodeLedger.Key key,long sourceTick,String runtimeIds,Target a,Target b,
                         ImpactMath.Reason candidate,String nativeGate,Supplier<String> initialSample) {
+        observe(key,sourceTick,runtimeIds,a,b,candidate,nativeGate,initialSample,null);
+    }
+    public void observe(ImpactEpisodeLedger.Key key,long sourceTick,String runtimeIds,Target a,Target b,
+                        ImpactMath.Reason candidate,String nativeGate,Supplier<String> initialSample,
+                        Supplier<String> moreRogSample) {
         if(key==null||a==null||b==null||candidate==null||nativeGate==null||initialSample==null)
             throw new IllegalArgumentException("invalid trace");
         observedCallbacks++;
@@ -114,9 +122,16 @@ public final class WhyRejectDiagnostics {
             episode.nativeRuntimeIds="MIXED_RUNTIME_OR_TICK";
         }
         episode.callbacks++;
-        if(category.isPhysicalPair("minecraft:chain","minecraft:stone")
-                ||category.isPhysicalPair("minecraft:reinforced_deepslate","minecraft:stone"))
-            episode.focusPhysical=true;
+        boolean focused=category.isPhysicalPair("minecraft:chain","minecraft:stone")
+                ||category.isPhysicalPair("minecraft:reinforced_deepslate","minecraft:stone");
+        if(focused)episode.focusPhysical=true;
+        // One bounded diagnostic per owner episode. Prefer the specifically
+        // requested physical block pair if it appears after an unrelated callback.
+        if(moreRogSample!=null && (episode.moreRogEvidence.equals("DISABLED")
+                ||(focused && !episode.moreRogFocused))) {
+            episode.moreRogEvidence=moreRogSample.get();
+            episode.moreRogFocused=focused;
+        }
         if(categories.containsKey(category))episode.types.put(category,Boolean.TRUE);
         // Both orientations are semantically different callback records, but
         // one pair of verified target keys must not flood an episode's log.
@@ -165,7 +180,7 @@ public final class WhyRejectDiagnostics {
         episode.pairs.values().forEach(p->pairs.add(p.describe()));
         return new FinalEvent(key,episode.serverTick,episode.nativeRuntimeIds,episode.callbacks,
                 episode.pairs.size(),episode.unlistedPairs,
-                episode.focusPhysical,finalDecision,pairs.toString());
+                episode.focusPhysical,finalDecision,pairs.toString(),episode.moreRogEvidence);
     }
     public void suppressEpisodeLine(){episodeLinesSuppressed++;}
     public long observedCallbacks(){return observedCallbacks;}

@@ -122,4 +122,21 @@ class WhyRejectDiagnosticsTest {
         assertEquals(1,event.distinctPairs());
         assertTrue(event.pairs().contains("firstPreSolverEvidence=normal=null mass=10"));
     }
+    @Test void moreRogSamplesOncePerOwnerPairAndPrefersRelevantTarget() {
+        var report=new WhyRejectDiagnostics();
+        var calls=new java.util.concurrent.atomic.AtomicInteger();
+        for(int i=0;i<10;i++)report.observe(key(22),600,"1/2",WORLD_STONE,PLOT_STONE,
+                ImpactMath.Reason.DIRECTION_UNVERIFIED,"NO_NATIVE_EFFECT",
+                ()->"kinematics",()->{calls.incrementAndGet();return "otherPair";});
+        assertEquals(1,calls.get());
+        for(int i=0;i<10;i++)report.observe(key(22),600,"1/2",CHAIN,PLOT_STONE,
+                ImpactMath.Reason.ROTATION_UNRESOLVED,"VALID",
+                ()->"kinematics",()->{calls.incrementAndGet();return "focusedPair";});
+        var event=report.finish(key(22),ImpactMath.Result.reject(ImpactMath.Reason.ROTATION_UNRESOLVED));
+        assertEquals(2,calls.get());
+        assertEquals("focusedPair",event.moreRogEvidence());
+        assertTrue(event.focusPhysical());
+        assertEquals(20,event.callbacks());
+    }
+
 }

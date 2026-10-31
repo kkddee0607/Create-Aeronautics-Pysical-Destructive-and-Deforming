@@ -24,6 +24,9 @@ public final class NativePlotDirection {
     // Diagnostic confidence criteria, NOT hidden damage coefficients.
     private static final double MIN_OPPOSITE_COS=0.98;
     private static final double MIN_COMMON_COS=0.98;
+    private static final boolean MORE_ROG=Boolean.parseBoolean(System.getProperty("pdd.moreRog.enabled","false"));
+    private static final int MAX_NATIVE_EXAMPLES=4;
+    private static final int MAX_SUBSTEP_EXAMPLES=4;
 
     public record Key(String dimension,long tick,int lowId,int highId) {
         static Key of(String dimension,long tick,int a,int b) {
@@ -37,6 +40,10 @@ public final class NativePlotDirection {
         private final List<PairFrame> frames=new ArrayList<>();
         private Vec referenceNormal;
         private Reject reject;
+        private long nativeRecordCount;
+        private final List<String> nativeExamples=new ArrayList<>();
+        private String firstFailure;
+        private String firstSuccessfulFrame;
     }
     public static final class Prepared {
         private final Map<Key,PairBundle> pairs;
@@ -56,6 +63,9 @@ public final class NativePlotDirection {
             if(e.hitBody()==null||e.otherBody()==null
                     ||e.hitBody().runtimeId()<0||e.otherBody().runtimeId()<0)
                 return "BODY_RUNTIME_ID_UNAVAILABLE";
+            if(e.hitBody().runtimeId()<0||e.otherBody().runtimeId()<0
+                    ||e.hitBody().runtimeId()==e.otherBody().runtimeId())
+                return "BODY_RUNTIME_ID_UNAVAILABLE_OR_SAME";
             PairBundle pair=pairs.get(Key.of(e.dimension(),e.serverTick(),
                     e.hitBody().runtimeId(),e.otherBody().runtimeId()));
             if(pair==null)return "NO_NATIVE_EFFECT_FOR_BODY_PAIR_TICK";
@@ -63,6 +73,75 @@ public final class NativePlotDirection {
             if(pair.frames.isEmpty())return "NO_PRE_SOLVER_FRAMES";
             boolean epochFound=pair.frames.stream().anyMatch(f->f.snapshot().epoch()==e.epoch());
             return epochFound?"OPPOSING_NORMAL_VALIDATED_BODY_PAIR_TICK":"NO_MATCHING_PRE_SOLVER_EPOCH";
+        }
+
+        /** One bounded owner-body-pair diagnostic. Effect record ordinal is NOT
+         * a Sable manifold ID; native data do not carry a pre-solver substep. */
+        public String moreRogNativeEvidence(Evidence e) {
+            if(e==null||e.hitBody()==null||e.otherBody()==null)return "NATIVE_BODY_PAIR_UNAVAILABLE";
+            if(e.hitBody().runtimeId()<0||e.otherBody().runtimeId()<0
+                    ||e.hitBody().runtimeId()==e.otherBody().runtimeId())
+                return "BODY_RUNTIME_ID_UNAVAILABLE_OR_SAME";
+            PairBundle pair=pairs.get(Key.of(e.dimension(),e.serverTick(),
+                    e.hitBody().runtimeId(),e.otherBody().runtimeId()));
+            if(pair==null)return "NO_NATIVE_EFFECT_FOR_BODY_PAIR_TICK";
+            return "nativeRecordCount="+pair.nativeRecordCount
+                    +",shownRecordCount="+pair.nativeExamples.size()
+                    +",nativeExamples="+pair.nativeExamples
+                    +",firstSuccessfulFrame="+pair.firstSuccessfulFrame
+                    +",firstFailure="+pair.firstFailure
+                    +",pairGate="+(pair.reject==null?"VALIDATED":pair.reject)
+                    +",manifoldId=UNAVAILABLE,substepPerEffect=UNAVAILABLE"
+                    +",nativeContactPoints=RAW_UNVERIFIED_NOT_SOLVER_CONTACT";
+        }
+        /** Diagnose every retained pre-solver snapshot, not just the first
+         * candidate callback. A rejected pair has no approved normals, so do
+         * not reconstruct an exact contact from its rejected reference. */
+        public String moreRogSubsteps(Evidence e,ImpactMath.ProxyPolicy policy) {
+            if(e==null||e.hitBody()==null||e.otherBody()==null)return "UNAVAILABLE";
+            if(e.hitBody().runtimeId()<0||e.otherBody().runtimeId()<0
+                    ||e.hitBody().runtimeId()==e.otherBody().runtimeId())
+                return "BODY_RUNTIME_ID_UNAVAILABLE_OR_SAME";
+            PairBundle pair=pairs.get(Key.of(e.dimension(),e.serverTick(),
+                    e.hitBody().runtimeId(),e.otherBody().runtimeId()));
+            if(pair==null)return "NO_NATIVE_EFFECT";
+            if(pair.reject!=null)return "NO_VALIDATED_NORMAL gate="+pair.reject
+                    +" note=ROTATION_NOT_EVALUABLE_WITH_REJECTED_NORMAL";
+            int steps=0,rotationRejects=0,otherRejects=0;
+            String firstReject=null;
+            List<String> examples=new ArrayList<>();
+            for(PairFrame frame:pair.frames) {
+                boolean reversed=frame.a().runtimeId()!=e.hitBody().runtimeId();
+                Body hitFrame=reversed?frame.b():frame.a();
+                Body otherFrame=reversed?frame.a():frame.b();
+                Vec normal=reversed?frame.normalBtoA().times(-1):frame.normalBtoA();
+                var cloned=new Evidence(frame.snapshot().epoch(),frame.snapshot().serverTick(),
+                        e.dimension(),Phase.PRE_SOLVER,e.hit(),e.other(),null,null,null,
+                        hitFrame,otherFrame,Quality.DIAGNOSTIC_ONLY,"NATIVE_TICK_PAIR");
+                String sample;
+                try {
+                    var rotation=ImpactLiveAudit.rotationEvidence(cloned,normal);
+                    var outcome=ImpactMath.proxy(new ImpactMath.ProxyInput(
+                            ImpactLiveAudit.body(e.hit(),hitFrame),
+                            ImpactLiveAudit.body(e.other(),otherFrame),normal,true,true,true,
+                            rotation.rotationGateRejects()),policy);
+                    if(outcome.reason()==ImpactMath.Reason.ROTATION_UNRESOLVED)rotationRejects++;
+                    else if(!outcome.approved())otherRejects++;
+                    sample="{epoch="+frame.snapshot().epoch()+",normalBtoA="+normal
+                            +",candidateReason="+outcome.reason()+","+rotation.explain()+"}";
+                }catch(IllegalArgumentException invalid) {
+                    otherRejects++;
+                    sample="{epoch="+frame.snapshot().epoch()+",diagnostic=UNAVAILABLE}";
+                }
+                steps++;
+                if(examples.size()<MAX_SUBSTEP_EXAMPLES)examples.add(sample);
+                if(firstReject==null && (sample.contains("candidateReason=ROTATION_UNRESOLVED")
+                        ||sample.contains("candidateReason=SEPARATING_OR_TANGENTIAL")))firstReject=sample;
+            }
+            return "preSolverSubsteps="+steps+",rotationRejectSubsteps="+rotationRejects
+                    +",otherRejectSubsteps="+otherRejects+",substepExamples="+examples
+                    +",firstRejectedSubstep="+firstReject
+                    +",nativeEffectSubstepMapping=UNAVAILABLE";
         }
 
         public Vec approvedNormal(Evidence e) {
@@ -140,33 +219,78 @@ public final class NativePlotDirection {
                     ||c.idA()==c.idB())continue;
             Key key=Key.of(c.dimension(),c.serverTick(),c.idA(),c.idB());
             PairBundle bundle=pairs.computeIfAbsent(key,k->new PairBundle());
+            if(MORE_ROG) {
+                bundle.nativeRecordCount++;
+                if(bundle.nativeExamples.size()<MAX_NATIVE_EXAMPLES)
+                    bundle.nativeExamples.add("{effectOrdinalWithinPair="+bundle.nativeRecordCount
+                            +",rawBodyOrder="+c.idA()+"/"+c.idB()
+                            +",localNormalA=("+c.ax()+","+c.ay()+","+c.az()+")"
+                            +",localNormalB=("+c.bx()+","+c.by()+","+c.bz()+")"
+                            +",rawPointA_FRAME_UNVERIFIED=("+c.contactAX()+","+c.contactAY()+","+c.contactAZ()+")"
+                            +",rawPointB_FRAME_UNVERIFIED=("+c.contactBX()+","+c.contactBY()+","+c.contactBZ()+")"
+                            +",rawScalar_NOT_ENERGY="+c.rawImpactScalar()+"}");
+            }
             if(bundle.reject!=null)continue;
             List<Snapshot> frames=byTick.get(stamp(c.dimension(),c.serverTick()));
-            if(frames==null||frames.isEmpty()) {bundle.reject=Reject.NO_PRE_SNAPSHOT;continue;}
+            if(frames==null||frames.isEmpty()) {
+                bundle.reject=Reject.NO_PRE_SNAPSHOT;
+                if(MORE_ROG && bundle.firstFailure==null)bundle.firstFailure="NO_PRE_SNAPSHOT";
+                continue;
+            }
             Vec rawA=new Vec(c.ax(),c.ay(),c.az()),rawB=new Vec(c.bx(),c.by(),c.bz());
-            if(!unit(rawA)||!unit(rawB)) {bundle.reject=Reject.NONFINITE_NORMAL;continue;}
+            if(!unit(rawA)||!unit(rawB)) {
+                bundle.reject=Reject.NONFINITE_NORMAL;
+                if(MORE_ROG && bundle.firstFailure==null)bundle.firstFailure="NONFINITE_OR_NONUNIT_NORMAL";
+                continue;
+            }
             for(Snapshot s:frames) {
                 Body a=find(s,c.idA()),b=find(s,c.idB());
                 if(!s.containerAvailable()||a==null||b==null||a.plotId().equals(b.plotId())||!a.valid()||!b.valid()
                         ||a.impactBody()==null||b.impactBody()==null) {
-                    bundle.reject=Reject.BODY_ID_OR_MASS_UNVERIFIED;break;
+                    bundle.reject=Reject.BODY_ID_OR_MASS_UNVERIFIED;
+                    if(MORE_ROG && bundle.firstFailure==null)bundle.firstFailure="BODY_ID_OR_MASS_UNVERIFIED epoch="+s.epoch();
+                    break;
                 }
                 Vec normalA,normalB;
                 try {
                     normalA=a.pose().toWorldNormal(rawA);
                     normalB=b.pose().toWorldNormal(rawB);
-                }catch(IllegalArgumentException invalid) {bundle.reject=Reject.NONFINITE_NORMAL;break;}
+                }catch(IllegalArgumentException invalid) {
+                    bundle.reject=Reject.NONFINITE_NORMAL;
+                    if(MORE_ROG && bundle.firstFailure==null)bundle.firstFailure="NORMAL_TRANSFORM_INVALID epoch="+s.epoch();
+                    break;
+                }
                 // Rapier local_n1 and local_n2 refer to opposing collider normals.
                 // Require both independently reconstructed sides to agree.
-                if(normalA.dot(normalB)>-MIN_OPPOSITE_COS) {bundle.reject=Reject.SIDES_NOT_OPPOSED;break;}
+                double oppositeDot=normalA.dot(normalB);
+                if(oppositeDot>-MIN_OPPOSITE_COS) {
+                    bundle.reject=Reject.SIDES_NOT_OPPOSED;
+                    if(MORE_ROG && bundle.firstFailure==null)
+                        bundle.firstFailure="reason=SIDES_NOT_OPPOSED effectOrdinal="+bundle.nativeRecordCount
+                            +" epoch="+s.epoch()+" worldA="+normalA+" worldB="+normalB
+                            +" opposingDot="+oppositeDot+" threshold=-"+MIN_OPPOSITE_COS;
+                    break;
+                }
                 Vec n=normalA.times(-1); // B -> A, consistent with ImpactMath.
                 // Canonicalize solver's arbitrary collider order before comparing
                 // other manifold normals; both orientations must not cancel.
                 if(c.idA()!=key.lowId()) {n=n.times(-1);Body swap=a;a=b;b=swap;}
-                if(bundle.referenceNormal!=null && n.dot(bundle.referenceNormal)<MIN_COMMON_COS) {
-                    bundle.reject=Reject.CONFLICTING_MANIFOLD_NORMAL;break;
+                double referenceDot=bundle.referenceNormal==null?Double.NaN:n.dot(bundle.referenceNormal);
+                if(bundle.referenceNormal!=null && referenceDot<MIN_COMMON_COS) {
+                    bundle.reject=Reject.CONFLICTING_MANIFOLD_NORMAL;
+                    if(MORE_ROG && bundle.firstFailure==null)
+                        bundle.firstFailure="reason=CONFLICTING_MANIFOLD_NORMAL effectOrdinal="+bundle.nativeRecordCount
+                            +" epoch="+s.epoch()+" canonicalBtoA="+n
+                            +" referenceCanonicalBtoA="+bundle.referenceNormal
+                            +" commonDot="+referenceDot+" threshold="+MIN_COMMON_COS
+                            +" worldA="+normalA+" worldB="+normalB+" opposingDot="+oppositeDot;
+                    break;
                 }
                 if(bundle.referenceNormal==null)bundle.referenceNormal=n;
+                if(MORE_ROG && bundle.firstSuccessfulFrame==null)
+                    bundle.firstSuccessfulFrame="effectOrdinal="+bundle.nativeRecordCount
+                        +" epoch="+s.epoch()+" canonicalBtoA="+n+" worldA="+normalA
+                        +" worldB="+normalB+" opposingDot="+oppositeDot;
                 // Store each substep once even when multiple manifold records
                 // independently corroborate the same direction.
                 if(bundle.frames.size()<frames.size())bundle.frames.add(new PairFrame(s,a,b,n));
