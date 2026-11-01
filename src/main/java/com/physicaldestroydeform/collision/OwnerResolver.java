@@ -9,6 +9,8 @@ import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.phys.shapes.VoxelShape;
+import com.physicaldestroydeform.collision.FrameMath.Vec;
 
 import java.util.UUID;
 import java.util.Map;
@@ -78,6 +80,47 @@ public final class OwnerResolver {
         }
     }
 
+    /** Source-verified native effect point in Sable's own allocated voxel grid.
+     * Re-reads the actual owner/accessor after the physics step; never loads chunks. */
+    public static Check auditNative(MinecraftServer server,String dimension,String stableOwner,BlockPos allocatedPos,
+                                    Vec nativeOwnerPoint) {
+        if(server==null || dimension==null || stableOwner==null || allocatedPos==null)
+            return Check.failed(Status.OWNER_UNRESOLVED,"BAD_NATIVE_OWNER_INPUT");
+        try {
+            ServerLevel level=null;
+            for(var candidate:server.getAllLevels())
+                if(candidate.dimension().location().toString().equals(dimension)) {level=candidate;break;}
+            if(level==null)return Check.failed(Status.OWNER_UNRESOLVED,"DIMENSION_MISSING");
+            Space space;
+            UUID plotId=null;
+            if(stableOwner.equals("WORLD:"+dimension))space=Space.STATIC_WORLD;
+            else if(stableOwner.startsWith("PLOT:")) {
+                space=Space.SABLE_PLOT;
+                try {plotId=UUID.fromString(stableOwner.substring(5));}
+                catch(IllegalArgumentException badId){return Check.failed(Status.OWNER_UNRESOLVED,"INVALID_PLOT_UUID");}
+            }else return Check.failed(Status.OWNER_UNRESOLVED,"UNKNOWN_OWNER_SPACE");
+            var container=SubLevelContainer.getContainer(level);
+            var proposed=new BlockTarget(space,dimension,plotId,
+                    allocatedPos.getX(),allocatedPos.getY(),allocatedPos.getZ(),true,
+                    "SABLE_EFFECT_CONSUMER_ALLOCATED_GRID");
+            return check(level,container,proposed,null,nativeOwnerPoint);
+        } catch(RuntimeException unsafe){return Check.failed(Status.OWNER_UNRESOLVED,"NATIVE_AUDIT_ERROR");}
+    }
+
+    /** A source point must be on/in the actual collision shape of that owner
+     * block, not merely inside some populated neighboring block. */
+    private static boolean nearShape(VoxelShape shape,Vec point,BlockPos block) {
+        if(shape==null || shape.isEmpty() || point==null || !point.finite())return false;
+        double x=point.x()-block.getX(),y=point.y()-block.getY(),z=point.z()-block.getZ();
+        final double eps2=(1.0/32)*(1.0/32);
+        for(var box:shape.toAabbs()) {
+            double dx=Math.max(0,Math.max(box.minX-x,x-box.maxX));
+            double dy=Math.max(0,Math.max(box.minY-y,y-box.maxY));
+            double dz=Math.max(0,Math.max(box.minZ-z,z-box.maxZ));
+            if(dx*dx+dy*dy+dz*dz<=eps2)return true;
+        }
+        return false;
+    }
     /** Converts allocated Plot-grid BlockPos to EmbeddedPlotLevelAccessor's centered coordinates. */
     public static BlockPos toEmbeddedPosition(BlockPos allocated, BlockPos plotCenter) {
         return new BlockPos(allocated.getX()-plotCenter.getX(),
@@ -86,6 +129,10 @@ public final class OwnerResolver {
 
     private static Check check(ServerLevel level, dev.ryanhcode.sable.api.sublevel.ServerSubLevelContainer container,
                                BlockTarget proposed, String expectedBlockId) {
+        return check(level,container,proposed,expectedBlockId,null);
+    }
+    private static Check check(ServerLevel level, dev.ryanhcode.sable.api.sublevel.ServerSubLevelContainer container,
+                               BlockTarget proposed, String expectedBlockId,Vec localContact) {
         if(proposed==null) return Check.failed(Status.NO_TARGET,"OTHER_NOT_PRESENT");
         if(!proposed.valid() || container==null || proposed.space()==Space.UNKNOWN)
             return Check.failed(Status.OWNER_UNRESOLVED, proposed.provenance());
@@ -95,6 +142,7 @@ public final class OwnerResolver {
         try { actualPlot=container.getPlot(chunk); }
         catch(RuntimeException ex) { return Check.failed(Status.OWNER_UNRESOLVED,"PLOT_LOOKUP_EXCEPTION"); }
         BlockState state;
+        BlockPos keyPosition=pos; // WORLD is absolute; Plot key is embedded-accessor relative.
         if(proposed.space()==Space.SABLE_PLOT) {
             if(actualPlot==null || !(actualPlot.getSubLevel() instanceof ServerSubLevel sub)
                     || sub.isRemoved() || sub.getLevel()!=level || sub.getPlot()!=actualPlot
@@ -107,17 +155,32 @@ public final class OwnerResolver {
             BlockPos center=actualPlot.getCenterBlock();
             ChunkPos centerChunk=actualPlot.getCenterChunk();
             BlockPos relative=toEmbeddedPosition(pos,center);
+            keyPosition=relative;
             if(!actualPlot.getEmbeddedLevelAccessor().hasChunk(
                     chunk.x-centerChunk.x,chunk.z-centerChunk.z))
                 return Check.failed(Status.BLOCK_UNAVAILABLE,"PLOT_CHUNK_UNLOADED");
-            try { state=actualPlot.getEmbeddedLevelAccessor().getBlockState(relative); }
-            catch(RuntimeException ex) {return Check.failed(Status.BLOCK_UNAVAILABLE,"PLOT_BLOCK_READ_FAILED");}
+            try {
+                state=actualPlot.getEmbeddedLevelAccessor().getBlockState(relative);
+                if(state!=null) {
+                    var shape=state.getCollisionShape(actualPlot.getEmbeddedLevelAccessor(),relative);
+                    if(shape.isEmpty())return Check.failed(Status.BLOCK_UNAVAILABLE,"PLOT_SHAPE_EMPTY");
+                    if(localContact!=null && !nearShape(shape,localContact,pos))
+                        return Check.failed(Status.BLOCK_MISMATCH,"PLOT_SHAPE_MISS");
+                }
+            } catch(RuntimeException ex) {return Check.failed(Status.BLOCK_UNAVAILABLE,"PLOT_BLOCK_READ_FAILED");}
         } else {
             if(actualPlot!=null || container.inBounds(chunk))
                 return Check.failed(Status.OWNER_UNRESOLVED,"PLOT_AREA_MUST_NOT_FALLBACK_TO_WORLD");
             if(!level.hasChunkAt(pos)) return Check.failed(Status.BLOCK_UNAVAILABLE,"WORLD_CHUNK_UNLOADED");
-            try {state=level.getBlockState(pos);}
-            catch(RuntimeException ex) {return Check.failed(Status.BLOCK_UNAVAILABLE,"WORLD_BLOCK_READ_FAILED");}
+            try {
+                state=level.getBlockState(pos);
+                if(state!=null) {
+                    var shape=state.getCollisionShape(level,pos);
+                    if(shape.isEmpty())return Check.failed(Status.BLOCK_UNAVAILABLE,"WORLD_SHAPE_EMPTY");
+                    if(localContact!=null && !nearShape(shape,localContact,pos))
+                        return Check.failed(Status.BLOCK_MISMATCH,"WORLD_SHAPE_MISS");
+                }
+            } catch(RuntimeException ex) {return Check.failed(Status.BLOCK_UNAVAILABLE,"WORLD_BLOCK_READ_FAILED");}
         }
         if(state==null || state.isAir())return Check.failed(Status.BLOCK_UNAVAILABLE,"BLOCK_MISSING_OR_AIR");
         String id=BuiltInRegistries.BLOCK.getKey(state.getBlock()).toString();
@@ -125,7 +188,7 @@ public final class OwnerResolver {
             return Check.failed(Status.BLOCK_MISMATCH,"CALLBACK_BLOCK_ID_DIFFERENT_FROM_LIVE_STATE");
         return new Check(Status.VERIFIED,
                 new TargetKey(proposed.dimension(),proposed.space(),proposed.stablePlotId(),
-                        proposed.x(),proposed.y(),proposed.z(),id+"|"+state),"LIVE_OWNER_AND_BLOCK_VERIFIED",
+                        keyPosition.getX(),keyPosition.getY(),keyPosition.getZ(),id+"|"+state),"LIVE_OWNER_AND_BLOCK_VERIFIED",
                 proposed.space()==Space.STATIC_WORLD && state.isCollisionShapeFullBlock(level,pos));
     }
 }

@@ -13,6 +13,33 @@ public final class RealFixBoundaryCandidates {
     public record Result(Reason reason,List<Block> blocks) {
         public Result {blocks=List.copyOf(blocks);}
     }
+    /** R4: native world-side point anchors a narrow loaded-cell band; plot
+     * AABB is a broad-phase exclusion only. This NEVER proves block contact. */
+    public static Result nearPlanePoint(RealFixBoundsEvidence.Box moving,
+                                        double x,double y,double z,int remainingChecks) {
+        if(moving==null)return new Result(Reason.NO_SWEPT_BOUNDS,List.of());
+        if(!Double.isFinite(x)||!Double.isFinite(y)||!Double.isFinite(z) ||
+                x<=Integer.MIN_VALUE+2||y<=Integer.MIN_VALUE+2||z<=Integer.MIN_VALUE+2||
+                x>=Integer.MAX_VALUE-2||y>=Integer.MAX_VALUE-2||z>=Integer.MAX_VALUE-2)
+            return new Result(Reason.NONFINITE_OR_OUT_OF_WORLD,List.of());
+        if(x<moving.minX()-1||x>moving.maxX()+1 || y<moving.minY()-1||y>moving.maxY()+1 ||
+                z<moving.minZ()-1||z>moving.maxZ()+1)
+            return new Result(Reason.NO_SWEPT_BOUNDS,List.of());
+        int[] xx=nearAxis(x),yy=nearAxis(y),zz=nearAxis(z);
+        int count=xx.length*yy.length*zz.length;
+        if(count>Math.min(MAX_PER_OWNER,Math.max(0,remainingChecks)))
+            return new Result(Reason.TOO_BROAD,List.of());
+        var blocks=new ArrayList<Block>(count);
+        for(int a:xx)for(int b:yy)for(int c:zz)blocks.add(new Block(a,b,c));
+        return new Result(Reason.CANDIDATES,blocks);
+    }
+    private static int[] nearAxis(double value) {
+        int low=(int)Math.floor(value);
+        double f=value-low;
+        if(f<1.0/32.0)return new int[]{low,low-1};
+        if(f>1-1.0/32.0)return new int[]{low,low+1};
+        return new int[]{low};
+    }
     public static Result nearOverlap(RealFixBoundsEvidence.Box source,int remainingChecks) {
         if(source==null)return new Result(Reason.NO_SWEPT_BOUNDS,List.of());
         // Sample only the local world-grid footprint of a real Sable world AABB;
@@ -24,7 +51,8 @@ public final class RealFixBoundaryCandidates {
            hiX>Integer.MAX_VALUE-2||hiY>Integer.MAX_VALUE-2||hiZ>Integer.MAX_VALUE-2)
             return new Result(Reason.NONFINITE_OR_OUT_OF_WORLD,List.of());
         long nx=(long)(hiX-loX+1),ny=(long)(hiY-loY+1),nz=(long)(hiZ-loZ+1);
-        if(nx<=0||ny<=0||nz<=0 || nx>MAX_PER_OWNER||ny>MAX_PER_OWNER||nz>MAX_PER_OWNER||
+        if(nx<=0||ny<=0||nz<=0) return new Result(Reason.TOO_BROAD,List.of());
+        if(nx>MAX_PER_OWNER||ny>MAX_PER_OWNER||nz>MAX_PER_OWNER||
                 nx*ny*nz>Math.min(MAX_PER_OWNER,Math.max(0,remainingChecks)))
             return new Result(Reason.TOO_BROAD,List.of());
         var result=new ArrayList<Block>((int)(nx*ny*nz));

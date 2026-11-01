@@ -1,5 +1,8 @@
 package com.physicaldestroydeform.diagnostics;
 
+import com.physicaldestroydeform.collision.FrameMath;
+import java.util.UUID;
+import java.util.function.IntFunction;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ConcurrentLinkedQueue;
@@ -19,10 +22,20 @@ public final class NativeCollisionTelemetry {
     private static final AtomicLong TOTAL = new AtomicLong();
     private static final AtomicLong DROPPED = new AtomicLong();
     private static final AtomicLong MALFORMED = new AtomicLong();
+    private static final AtomicLong OBSERVER_ERRORS = new AtomicLong();
+    public static void observerError(){ OBSERVER_ERRORS.incrementAndGet(); }
+    public static long observerErrors(){ return OBSERVER_ERRORS.get(); }
 
     private NativeCollisionTelemetry() { }
     public static void capture(double[] nativeData) {capture(nativeData,null,-1);}
     public static void capture(double[] nativeData,String dimension,long serverTick) {
+        capture(nativeData,dimension,serverTick,null);
+    }
+    /** Snapshot a body's actual Sable collision-effect consumer pose during the native read.
+     * The callback must only read activeSubLevels; it must not mutate the physics state.
+     * A missing frame is explicit UNKNOWN, never guessed from the nearest Plot. */
+    public static void capture(double[] nativeData,String dimension,long serverTick,
+                               IntFunction<OwnerFrame> frameReader) {
         POLLS.incrementAndGet();
         if (nativeData == null || nativeData.length % FIELDS != 0) {
             MALFORMED.incrementAndGet();
@@ -56,7 +69,20 @@ public final class NativeCollisionTelemetry {
                     nativeData[offset+6], nativeData[offset+7], nativeData[offset+8],
                     nativeData[offset+9], nativeData[offset+10], nativeData[offset+11],
                     nativeData[offset+12], nativeData[offset+13], nativeData[offset+14],
-                    dimension,serverTick));
+                    dimension,serverTick,
+                    frame(frameReader,(int)nativeData[offset]),frame(frameReader,(int)nativeData[offset+1])));
+        }
+    }
+    private static OwnerFrame frame(IntFunction<OwnerFrame> reader,int id) {
+        if(id==-1 || reader==null) return null;
+        try { return reader.apply(id); }
+        catch(RuntimeException unavailable) {return null;}
+    }
+    /** Immutable evidence: the pose belongs to the exact Sable effect consumer phase. */
+    public record OwnerFrame(UUID uuid, FrameMath.Pose pose) {
+        public OwnerFrame {
+            if(uuid==null || pose==null || !pose.valid())
+                throw new IllegalArgumentException("invalid effect owner frame");
         }
     }
     public static List<Contact> drain() {
@@ -74,13 +100,22 @@ public final class NativeCollisionTelemetry {
             double ax, double ay, double az, double bx, double by, double bz,
             double contactAX, double contactAY, double contactAZ,
             double contactBX, double contactBY, double contactBZ,
-            String dimension,long serverTick) {
+            String dimension,long serverTick,OwnerFrame frameA,OwnerFrame frameB) {
+        public Contact(int idA,int idB,double rawImpactScalar,
+                       double ax,double ay,double az,double bx,double by,double bz,
+                       double contactAX,double contactAY,double contactAZ,
+                       double contactBX,double contactBY,double contactBZ,
+                       String dimension,long serverTick) {
+            this(idA,idB,rawImpactScalar,ax,ay,az,bx,by,bz,
+                    contactAX,contactAY,contactAZ,contactBX,contactBY,contactBZ,
+                    dimension,serverTick,null,null);
+        }
         public Contact(int idA,int idB,double rawImpactScalar,
                        double ax,double ay,double az,double bx,double by,double bz,
                        double contactAX,double contactAY,double contactAZ,
                        double contactBX,double contactBY,double contactBZ) {
             this(idA,idB,rawImpactScalar,ax,ay,az,bx,by,bz,
-                    contactAX,contactAY,contactAZ,contactBX,contactBY,contactBZ,null,-1);
+                    contactAX,contactAY,contactAZ,contactBX,contactBY,contactBZ,null,-1,null,null);
         }
     }
 }

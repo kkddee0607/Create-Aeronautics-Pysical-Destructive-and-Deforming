@@ -24,7 +24,7 @@ import org.slf4j.LoggerFactory;
 @Mod(PhysicalDestroyDeform.MOD_ID)
 public final class PhysicalDestroyDeform {
     public static final String MOD_ID = "physical_destroy_deform";
-    public static final String BUILD_VERSION = "0.3.0realFix";
+    public static final String BUILD_VERSION = "0.3.0superFix";
     private static final Logger LOGGER = LoggerFactory.getLogger(PhysicalDestroyDeform.class);
     private final AcceptanceReport acceptanceReport = new AcceptanceReport();
     private final RealFixRuntimeBridge bridge = new RealFixRuntimeBridge();
@@ -37,15 +37,15 @@ public final class PhysicalDestroyDeform {
         NeoForge.EVENT_BUS.addListener(this::onServerStopped);
         NeoForge.EVENT_BUS.addListener(this::onServerTick);
         LOGGER.info("[PDD-DIAG] INIT modId={} version={} revision=IDS-1.0.5-A source=SABLE_ORIGINAL_POST_EFFECT " +
-                "target=CALLBACK_R1_AUDITED_AND_NO_UNVERIFIED_R2_R4 state=FOUR_PHASE_CREDIT " +
+                "target=SABLE_CONSUMER_R2_R3_AND_BOUNDED_R4 state=FOUR_PHASE_CREDIT " +
                 "worldMutation=OFF",MOD_ID,BUILD_VERSION);
         PddDiagnostics.runModelSelfTest(LOGGER);
     }
 
     private void onServerStarted(ServerStartedEvent event) {
         MaterialRegistry.rebuild(event.getServer(), LOGGER);
-        LOGGER.info("[PDD-REALFIX] phase=START bridge=READ_ONLY nativeScalar=GAME_FORCE_PROXY " +
-                "newNativeABI=NOT_REQUIRED customNullCallback=DISABLED worldMutation=OFF");
+        LOGGER.info("[PDD-SUPERFIX] phase=START bridge=READ_ONLY nativeScalar=GAME_FORCE_PROXY " +
+                "newNativeABI=NOT_REQUIRED customNullCallback=DISABLED baseSha=ed5f206ed06883ce90de85ae847f3211489a31b0 worldMutation=OFF");
     }
     private void onDatapackSync(OnDatapackSyncEvent event) {
         if (event.getPlayer()==null) MaterialRegistry.rebuild(event.getPlayerList().getServer(), LOGGER);
@@ -57,7 +57,7 @@ public final class PhysicalDestroyDeform {
         SableContactQueue.drain();
         SableFrameCapture.clear();
         acceptanceReport.close();
-        LOGGER.info("[PDD-REALFIX] phase=STOP state=CLEARED worldMutation=OFF");
+        LOGGER.info("[PDD-SUPERFIX] phase=STOP state=CLEARED worldMutation=OFF");
     }
     private void onServerTick(ServerTickEvent.Post event) {
         // Snapshot and native inputs are consumed exactly once on the server tick.
@@ -69,7 +69,7 @@ public final class PhysicalDestroyDeform {
             bridge.tick(event.getServer(),callbacks,nativeEffects,preHistory,LOGGER);
         } catch (RuntimeException invalid) {
             // Never let a diagnostic bridge disrupt the physics/game tick.
-            LOGGER.error("[PDD-REALFIX] phase=BRIDGE_EXCEPTION reason={} nativeEffects={} " +
+            LOGGER.error("[PDD-SUPERFIX] phase=BRIDGE_EXCEPTION reason={} nativeEffects={} " +
                     "callbacks={} Q=0 worldMutation=OFF",invalid.getClass().getName(),
                     nativeEffects.size(),callbacks.size(),invalid);
         } finally {

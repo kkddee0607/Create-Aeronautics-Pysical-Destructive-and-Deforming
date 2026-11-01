@@ -24,4 +24,24 @@ public class NativeCollisionTelemetryTest {
         NativeCollisionTelemetry.capture(new double[]{1,2});
         assertEquals(initial+1, NativeCollisionTelemetry.malformed());
     }
+    @Test void exactEffectPhaseOwnerSnapshotDoesNotAlterOriginalArray() {
+        NativeCollisionTelemetry.drain();
+        double[] raw={9,-1,42,1,0,0,-1,0,0,0.1,0.2,0.3,4,5,6};
+        double[] before=raw.clone();
+        var uuid=java.util.UUID.fromString("10000000-0000-0000-0000-000000000001");
+        var pose=new com.physicaldestroydeform.collision.FrameMath.Pose(
+                new com.physicaldestroydeform.collision.FrameMath.Vec(10,20,30),
+                new com.physicaldestroydeform.collision.FrameMath.Vec(512,64,1024),
+                new com.physicaldestroydeform.collision.FrameMath.Vec(1,1,1),0,0,0,1);
+        var calls=new java.util.concurrent.atomic.AtomicInteger();
+        NativeCollisionTelemetry.capture(raw,"minecraft:overworld",12,id->{
+            calls.incrementAndGet();
+            return new NativeCollisionTelemetry.OwnerFrame(uuid,pose);
+        });
+        assertArrayEquals(before,raw);
+        var sample=NativeCollisionTelemetry.drain().getFirst();
+        assertEquals(1,calls.get()); // -1 WORLD sentinel is not a Plot UUID lookup
+        assertEquals(uuid,sample.frameA().uuid());
+        assertNull(sample.frameB());
+    }
 }
