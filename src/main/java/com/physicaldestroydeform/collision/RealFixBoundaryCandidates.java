@@ -11,7 +11,11 @@ public final class RealFixBoundaryCandidates {
     public static final int MAX_PER_TICK=1024;
     public enum Reason { CANDIDATES, NO_SWEPT_BOUNDS, TOO_BROAD, NONFINITE_OR_OUT_OF_WORLD }
     public record Block(int x,int y,int z) {}
-    public record Result(Reason reason,List<Block> blocks) {
+    public record Result(Reason reason,List<Block> blocks,int uniqueCells,
+                         int sourcePoints,int failedPointIndex,String detail) {
+        public Result(Reason reason,List<Block> blocks) {
+            this(reason,blocks,blocks.size(),0,-1,"NONE");
+        }
         public Result {blocks=List.copyOf(blocks);}
     }
     /** R4: native world-side point anchors a narrow loaded-cell band; plot
@@ -29,7 +33,9 @@ public final class RealFixBoundaryCandidates {
         int[] xx=nearAxis(x),yy=nearAxis(y),zz=nearAxis(z);
         int count=xx.length*yy.length*zz.length;
         if(count>Math.min(MAX_PER_OWNER,Math.max(0,remainingChecks)))
-            return new Result(Reason.TOO_BROAD,List.of());
+            return new Result(Reason.TOO_BROAD,List.of(),count,1,0,
+                    "POINT_CELL_COUNT_EXCEEDS_BUDGET pointCells="+count+
+                    " remaining="+remainingChecks+" ownerCap="+MAX_PER_OWNER);
         var blocks=new ArrayList<Block>(count);
         for(int a:xx)for(int b:yy)for(int c:zz)blocks.add(new Block(a,b,c));
         return new Result(Reason.CANDIDATES,blocks);
@@ -42,15 +48,22 @@ public final class RealFixBoundaryCandidates {
         if(moving==null)return new Result(Reason.NO_SWEPT_BOUNDS,List.of());
         if(points==null || points.isEmpty())return new Result(Reason.NO_SWEPT_BOUNDS,List.of());
         var unique=new LinkedHashSet<Block>();
-        for(var point:points) {
-            if(point==null)return new Result(Reason.NONFINITE_OR_OUT_OF_WORLD,List.of());
+        for(int i=0;i<points.size();i++) {
+            var point=points.get(i);
+            if(point==null)return new Result(Reason.NONFINITE_OR_OUT_OF_WORLD,List.of(),
+                    unique.size(),points.size(),i,"NULL_WORLD_CONTACT_POINT");
             Result next=nearPlanePoint(moving,point.x(),point.y(),point.z(),remainingChecks);
-            if(next.reason()!=Reason.CANDIDATES)return next;
+            if(next.reason()!=Reason.CANDIDATES)
+                return new Result(next.reason(),List.of(),Math.max(unique.size(),next.uniqueCells()),
+                        points.size(),i,"CONTACT_POINT="+i+" "+next.detail());
             unique.addAll(next.blocks());
             if(unique.size()>Math.min(MAX_PER_OWNER,Math.max(0,remainingChecks)))
-                return new Result(Reason.TOO_BROAD,List.of());
+                return new Result(Reason.TOO_BROAD,List.of(),unique.size(),points.size(),i,
+                        "UNIQUE_CONTACT_CELLS_EXCEED_BUDGET unique="+unique.size()+
+                        " remaining="+remainingChecks+" ownerCap="+MAX_PER_OWNER);
         }
-        return new Result(Reason.CANDIDATES,List.copyOf(unique));
+        return new Result(Reason.CANDIDATES,List.copyOf(unique),unique.size(),
+                points.size(),-1,"BOUNDED_UNION");
     }
     private static int[] nearAxis(double value) {
         int low=(int)Math.floor(value);

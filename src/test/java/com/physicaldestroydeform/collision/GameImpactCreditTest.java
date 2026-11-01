@@ -19,6 +19,29 @@ final class GameImpactCreditTest {
                                boolean separation,boolean approach,Target a,Target b) {
         return new Frame(P,tick,observed,separation,approach,a,b);
     }
+    @Test void verificationSnapshotIsReadOnlyAndShowsPendingEvidenceConsumption() {
+        var engine=new GameImpactCredit(Settings.provisional());
+        assertEquals(Phase.UNINITIALIZED,engine.evidence(P).phase());
+        engine.step(frame(1,List.of(),true,false,TA,TB));
+        engine.step(frame(2,List.of(),true,false,TA,TB));
+        assertEquals(2,engine.evidence(P).separatedSamples());
+        var initial=engine.step(frame(3,MANY,false,true,null,null));
+        assertEquals(Reason.TARGET_UNVERIFIED,initial.reason());
+        var before=engine.evidence(P);
+        assertEquals(Phase.ACTIVE,before.phase());
+        assertTrue(before.hasUnspentAuthorization());
+        assertEquals(3,before.authorizationTick());
+        assertEquals(before,engine.evidence(P));
+        var granted=engine.step(frame(4,MANY,false,false,TA,TB));
+        var after=engine.evidence(P);
+        assertEquals(Reason.APPROVED,granted.reason());
+        assertFalse(after.pendingApproach());
+        assertFalse(after.hasUnspentAuthorization());
+        assertEquals(3,after.authorizationTick());
+        assertEquals(1,after.episode());
+        assertEquals(Reason.DUPLICATE_EPISODE,
+                engine.step(frame(5,MANY,false,true,TA,TB)).reason());
+    }
     @Test void defaultPolicyIsBoundedAndDocumented() {
         assertEquals(10.0,Settings.provisional().candidate(42));
         assertEquals(0.0,Settings.provisional().candidate(1.8));

@@ -39,6 +39,11 @@ import static com.physicaldestroydeform.collision.RealFixBoundsEvidence.*;
 public final class RealFixRuntimeBridge {
     private static final int MAX_TRACKED=4096;
     private static final int MAX_LOG_PER_TICK=64;
+    // Verification-build-only instrumentation; never changes credit, owner or Q logic.
+    private static final boolean VERF_ENABLED=Boolean.parseBoolean(
+            System.getProperty("pdd.verf.enabled","true"));
+    private static final long VERF_SAMPLE_TICKS=Math.max(20L,
+            Long.getLong("pdd.verf.sampleTicks",100L));
     private String runId=UUID.randomUUID().toString();
     private final GameImpactCredit credit=new GameImpactCredit(Settings.fromSystemProperties());
     private final ContactCreditLedger regionLedger=new ContactCreditLedger();
@@ -56,6 +61,12 @@ public final class RealFixRuntimeBridge {
         boolean lastPositiveSeparation;
         long lastSeparatedTick=-1;
         double lastPeak=Double.NaN;
+        String lastVerfRegion="";
+        long lastVerfRegionTick=-1;
+        String lastVerfFsm="";
+        long lastVerfFsmTick=-1;
+        String lastVerfR4="";
+        long lastVerfR4Tick=-1;
     }
     private static final class Generation {
         int runtimeId;
@@ -210,6 +221,8 @@ public final class RealFixRuntimeBridge {
                 if(b!=null)t.b=b;
                 Box boxA=box(server,pair.a().stableKey(),a==null?t.a:a,stamp.dimension,worldBounds,knownWorldBlocks);
                 Box boxB=box(server,pair.b().stableKey(),b==null?t.b:b,stamp.dimension,worldBounds,knownWorldBlocks);
+                long previousContactTick=t.lastSeen;
+                var gapBefore=credit.evidence(pair);
                 boolean previousSeparated=t.lastPositiveSeparation
                         && t.lastSeparatedTick>=0 && now-t.lastSeparatedTick<=2;
                 Phase phaseBefore=credit.phase(pair);
@@ -224,12 +237,36 @@ public final class RealFixRuntimeBridge {
                 double rise=Double.isFinite(t.lastPeak)?group.forcePeak()-t.lastPeak:Double.NaN;
                 t.lastPeak=group.forcePeak();
                 t.lastPositiveSeparation=false;
+                Box priorBoxA=t.previousA, priorBoxB=t.previousB;
                 Box sweptA=RealFixBoundsEvidence.swept(t.previousA,boxA);
                 Box sweptB=RealFixBoundsEvidence.swept(t.previousB,boxB);
                 t.previousA=boxA;t.previousB=boxB;
                 t.lastSeen=now;t.lastProcessed=now;
                 contacted.add(pair);
                 if(a==null&&b==null)missingTarget++;
+                // Diagnostic-only, sampled per pair/rejection cause so resting
+                // contact cannot flood a small server's log every physics tick.
+                var trace=regions.trace();
+                String regionSignature=regions.status()+":"+trace.failure()+":"+trace.detail();
+                if(VERF_ENABLED && regions.status()!=SableContactRegions.Status.PROVED
+                        && ( !regionSignature.equals(t.lastVerfRegion)
+                        || now-t.lastVerfRegionTick>=VERF_SAMPLE_TICKS)) {
+                    log.info("[PDD-VERF-REGION] nativeTick={} serverTick={} pair={}/{} bodyIds={}/{} " +
+                            "status={} failure={} failedRecordIndex={} inspectedRecords={} sourceRecords={} " +
+                            "checksA={} checksB={} remainingA={} remainingB={} requestedA={} requestedB={} " +
+                            "verifiedA={} verifiedB={} regionsBeforeFailure={} rejectedContacts={} " +
+                            "detail={} sampleRawContact={} sampleConsumerA={} sampleConsumerB={} frameA={} frameB={} mutation=OFF",
+                            stamp.tick,now,pair.a().stableKey(),pair.b().stableKey(),
+                            group.runtimePair().lowId(),group.runtimePair().highId(),
+                            regions.status(),trace.failure(),trace.sourceIndex(),trace.processedRecords(),records.size(),
+                            regions.checksA(),regions.checksB(),trace.remainingA(),trace.remainingB(),
+                            trace.requestedA(),trace.requestedB(),trace.verifiedTargetsA(),trace.verifiedTargetsB(),
+                            trace.regionCount(),trace.rejectedContacts(),trace.detail(),
+                            sampleContact(records),sampleConsumerPoint(records,true),
+                            sampleConsumerPoint(records,false),
+                            sampleFrame(records,true),sampleFrame(records,false));
+                    t.lastVerfRegion=regionSignature;t.lastVerfRegionTick=now;
+                }
                 if(lines++<MAX_LOG_PER_TICK) log.info("[PDD-NATIVE-TARGET] dim={} tick={} ownerA={} ownerB={} methodA={} reasonA={} checkedA={} methodB={} reasonB={} checkedB={} regionCount={} rejectedPoints={} callbackHintA={} callbackHintB={} worldMutation=OFF",
                         stamp.dimension,stamp.tick,pair.a().stableKey(),pair.b().stableKey(),
                         methodA,regions.status(),regions.checksA(),methodB,regions.status(),regions.checksB(),
@@ -237,12 +274,18 @@ public final class RealFixRuntimeBridge {
                 // R4 shadow audit. This only describes plausible loaded world
                 // blocks; WITHOUT in-game ground truth it can never mint credit.
                 if(pair.a().stableKey().startsWith("WORLD:") && a==null) {
-                    String status=probeWorldR4(server,stamp.dimension,sweptB,records,remainingR4Checks);
-                    if(lines++<MAX_LOG_PER_TICK)log.info("[PDD-TARGET] source=R4_SWEPT_PROVISIONAL dimension={} tick={} worldCandidate={} credited=false",stamp.dimension,stamp.tick,status);
+                    int before=remainingR4Checks[0];
+                    R4Probe probe=probeWorldR4(server,stamp.dimension,sweptB,records,remainingR4Checks);
+                    if(lines++<MAX_LOG_PER_TICK)log.info("[PDD-TARGET] source=R4_SWEPT_PROVISIONAL dimension={} tick={} worldCandidate={} credited=false",stamp.dimension,stamp.tick,probe.status());
+                    if(!probe.status().startsWith("PROVISIONAL_ONLY"))
+                        logVerfR4(log,t,now,stamp.tick,pair,probe,records.size(),before,remainingR4Checks[0],sweptB);
                 }
                 if(pair.b().stableKey().startsWith("WORLD:") && b==null) {
-                    String status=probeWorldR4(server,stamp.dimension,sweptA,records,remainingR4Checks);
-                    if(lines++<MAX_LOG_PER_TICK)log.info("[PDD-TARGET] source=R4_SWEPT_PROVISIONAL dimension={} tick={} worldCandidate={} credited=false",stamp.dimension,stamp.tick,status);
+                    int before=remainingR4Checks[0];
+                    R4Probe probe=probeWorldR4(server,stamp.dimension,sweptA,records,remainingR4Checks);
+                    if(lines++<MAX_LOG_PER_TICK)log.info("[PDD-TARGET] source=R4_SWEPT_PROVISIONAL dimension={} tick={} worldCandidate={} credited=false",stamp.dimension,stamp.tick,probe.status());
+                    if(!probe.status().startsWith("PROVISIONAL_ONLY"))
+                        logVerfR4(log,t,now,stamp.tick,pair,probe,records.size(),before,remainingR4Checks[0],sweptA);
                 }
                 if(!complete || batch.invalidRecords()>0 || batch.discardedRecords()>0 || batch.malformedArray()) {
                     zero++;
@@ -256,6 +299,37 @@ public final class RealFixRuntimeBridge {
                     // mapped, verified owner-local block. Force is a GAME proxy.
                     var frame=new Frame(pair,now,group.samples(),false,approach,a,b,group.forcePeak());
                     var result=credit.step(frame);
+                    var gapAfter=credit.evidence(pair);
+                    String fsmSignature=result.reason()+":"+gapBefore.phase()+":"+gapAfter.phase();
+                    if(VERF_ENABLED && (result.credited() || gapBefore.phase()!=gapAfter.phase()
+                            || !fsmSignature.equals(t.lastVerfFsm) || now-t.lastVerfFsmTick>=VERF_SAMPLE_TICKS)) {
+                        log.info("[PDD-VERF-FSM] nativeTick={} serverTick={} bodyIds={}/{} pair={}/{} " +
+                                "stateBefore={} stateAfter={} stateTickBefore={} stateTickAfter={} " +
+                                "pendingBefore={} pendingAfter={} burstBefore={} burstAfter={} " +
+                                "separatedSamplesBefore={} separatedSamplesAfter={} " +
+                                "authorizationBefore={} authorizationAfter={} evidenceAge={} " +
+                                "episodeBefore={} episodeAfter={} generationBefore={} generationAfter={} " +
+                                "separationEvidenceServerTick={} lastContactServerTick={} recentGap={} armedFromGap={} " +
+                                "aabbClosing={} verifiedApproach={} prevAabbGap={} currentAabbGap={} " +
+                                "targetA={} targetB={} targetStatus={} cause={} issuedQ={} " +
+                                "reason={} authConsumed={} source=POST_EFFECT_GAME_POLICY mutation=OFF",
+                                stamp.tick,now,group.runtimePair().lowId(),group.runtimePair().highId(),
+                                pair.a().stableKey(),pair.b().stableKey(),
+                                gapBefore.phase(),gapAfter.phase(),gapBefore.stateTick(),gapAfter.stateTick(),
+                                gapBefore.pendingApproach(),gapAfter.pendingApproach(),
+                                gapBefore.burstFrames(),gapAfter.burstFrames(),
+                                gapBefore.separatedSamples(),gapAfter.separatedSamples(),
+                                gapBefore.authorizationTick(),gapAfter.authorizationTick(),
+                                gapAfter.authorizationTick()>=0?now-gapAfter.authorizationTick():-1,
+                                gapBefore.episode(),gapAfter.episode(),
+                                gapBefore.episodeGeneration(),gapAfter.episodeGeneration(),
+                                separationEvidenceTick,previousContactTick,previousSeparated,armedFromGap,
+                                aabbClosing,approach,verifiedGap(priorBoxA,priorBoxB),verifiedGap(boxA,boxB),
+                                a==null?"UNVERIFIED":a.localBlock(),b==null?"UNVERIFIED":b.localBlock(),
+                                regions.status(),"PAIR_EPISODE_"+result.episodeGeneration(),result.issuedQ(),
+                                result.reason(),gapBefore.pendingApproach()&&!gapAfter.pendingApproach());
+                        t.lastVerfFsm=fsmSignature;t.lastVerfFsmTick=now;
+                    }
                     ContactCreditLedger.Grant grant=result.credited()?regionLedger.issue(pair,result,
                             ContactCreditLedger.Source.SABLE_POST_EFFECT,regions.regions()):null;
                     boolean granted=grant!=null && grant.credited();
@@ -310,21 +384,30 @@ public final class RealFixRuntimeBridge {
             if(definitelySeparate) {
                 t.lastPositiveSeparation=true;
                 t.lastSeparatedTick=now;
-                try {credit.step(new Frame(p,now,List.of(),true,false,t.a,t.b));}
+                try {
+                    var before=credit.evidence(p);
+                    var d=credit.step(new Frame(p,now,List.of(),true,false,t.a,t.b));
+                    if(VERF_ENABLED && before.phase()!=d.phase())
+                        log.info("[PDD-VERF-SEPARATION] serverTick={} pair={}/{} source=OBSERVED_AABB_GAP " +
+                                "stateBefore={} stateAfter={} separatedBefore={} separatedAfter={} " +
+                                "aabbGap={} sourceVerified=true mutation=OFF",
+                                now,p.a().stableKey(),p.b().stableKey(),before.phase(),d.phase(),
+                                before.separatedSamples(),credit.evidence(p).separatedSamples(),verifiedGap(a,b));
+                }
                 catch(RuntimeException ignored) { /* invalid snapshot: Q=0 */ }
             }
         }
         // Pre-contact state construction (§22). Silence alone never proves
         // separation: plot-plot uses real Sable world AABBs; plot-world uses a
         // complete, loaded, bounded world-collider clearance inspection.
-        prearmIndependentPairs(server,now,worldBounds,contacted,remainingR4Checks);
+        prearmIndependentPairs(server,now,worldBounds,contacted,remainingR4Checks,log);
         if(now%100==0) {
             credit.prune(now);
             regionLedger.prune(now);
             generations.entrySet().removeIf(e->!e.getValue().present
                     && e.getValue().lastSeen>=0 && now-e.getValue().lastSeen>600);
             tracked.entrySet().removeIf(e->now>e.getValue().lastSeen && now-e.getValue().lastSeen>600);
-            log.info("[PDD-0.3.1] phase=SUMMARY observed={} credited={} zero={} ownerMissing={} targetMissing={} ambiguous={} trackedPairs={} r2Verified={} r2Rejected={} r3Verified={} prearmed={} r1Fallback={} regionGroups={} regionCount={} regionTooBroad={} ledgerRejected={} activeCredits={} observerErrors={} nativeDropped={} nativeMalformed={} callbackDropped={} preHistoryDropped={} generation=IDS-1.0.5-A mutation=OFF",
+            log.info("[PDD-0.3.1verf] phase=SUMMARY observed={} credited={} zero={} ownerMissing={} targetMissing={} ambiguous={} trackedPairs={} r2Verified={} r2Rejected={} r3Verified={} prearmed={} r1Fallback={} regionGroups={} regionCount={} regionTooBroad={} ledgerRejected={} activeCredits={} observerErrors={} nativeDropped={} nativeMalformed={} callbackDropped={} preHistoryDropped={} generation=IDS-1.0.5-A mutation=OFF",
                     observed,credited,zero,missingOwner,missingTarget,ambiguousOwners,tracked.size(),
                     r2Verified,r2Rejected,r3Verified,prearmed,r1Fallback,
                     multiGroupCredits,multiRegions,multiTooBroad,ledgerRejected,regionLedger.size(),
@@ -461,7 +544,7 @@ public final class RealFixRuntimeBridge {
     /** Bounded verified precontact clearance. Will not load a chunk or scan a big ship. */
     private void prearmIndependentPairs(MinecraftServer server,long now,
                                        Map<String,Map<String,Box>> bounds,Set<Pair> contacted,
-                                       int[] remaining) {
+                                       int[] remaining,Logger log) {
         int attempted=0;
         for(var dimEntry:bounds.entrySet()) {
             String dim=dimEntry.getKey();
@@ -478,7 +561,7 @@ public final class RealFixRuntimeBridge {
                         Pair pair=Pair.canonical(runId,dim,
                                 new Owner(first.getKey(),currentGeneration(dim,first.getKey())),
                                 new Owner(second.getKey(),currentGeneration(dim,second.getKey())));
-                        seedSeparation(pair,now,contacted,first.getKey(),firstBox,secondBox);
+                        seedSeparation(pair,now,contacted,first.getKey(),firstBox,secondBox,log);
                     }
                 }
                 if(attempted>=128)break;
@@ -486,7 +569,7 @@ public final class RealFixRuntimeBridge {
                 if(confirmedWorldClearance(server,dim,firstBox,remaining)) {
                     Pair pair=Pair.canonical(runId,dim,new Owner("WORLD:"+dim,1),
                             new Owner(first.getKey(),currentGeneration(dim,first.getKey())));
-                    seedSeparation(pair,now,contacted,"WORLD:"+dim,null,firstBox);
+                    seedSeparation(pair,now,contacted,"WORLD:"+dim,null,firstBox,log);
                 }
             }
         }
@@ -503,14 +586,22 @@ public final class RealFixRuntimeBridge {
         return null;
     }
     private void seedSeparation(Pair pair,long now,Set<Pair> contacted,
-                                String firstOwner,Box first,Box second) {
+                                String firstOwner,Box first,Box second,Logger log) {
         if(contacted.contains(pair) || tracked.size()>=MAX_TRACKED && !tracked.containsKey(pair))return;
         Box[] ordered=alignBounds(pair,firstOwner,first,second);
         if(ordered==null)return;
         Tracked t=tracked.computeIfAbsent(pair,k->new Tracked());
         try {
+            var prior=credit.evidence(pair);
             var d=credit.step(new Frame(pair,now,List.of(),true,false,null,null));
             if(d.reason()==GameImpactCredit.Reason.STALE_FRAME)return;
+            if(VERF_ENABLED && prior.phase()!=d.phase())
+                log.info("[PDD-VERF-SEPARATION] serverTick={} pair={}/{} source=PRECONTACT_CLEARANCE " +
+                        "stateBefore={} stateAfter={} separatedBefore={} separatedAfter={} " +
+                        "aabbGap={} sourceVerified=true mutation=OFF",
+                        now,pair.a().stableKey(),pair.b().stableKey(),prior.phase(),d.phase(),
+                        prior.separatedSamples(),credit.evidence(pair).separatedSamples(),
+                        verifiedGap(ordered[0],ordered[1]));
             t.lastPositiveSeparation=true;
             t.lastSeparatedTick=now;
             t.lastProcessed=now;
@@ -544,12 +635,44 @@ public final class RealFixRuntimeBridge {
         }
         return false;
     }
-    private static String probeWorldR4(MinecraftServer server,String dimension,Box moving,
+    private record R4Probe(String status,int points,int candidateCells,int failedPoint,String detail) { }
+    private static String sampleContact(List<NativeCollisionTelemetry.Contact> records) {
+        if(records.isEmpty())return "NONE";
+        var c=records.get(0);
+        return "("+c.contactAX()+","+c.contactAY()+","+c.contactAZ()+")/("+
+                c.contactBX()+","+c.contactBY()+","+c.contactBZ()+")";
+    }
+    private static String sampleConsumerPoint(List<NativeCollisionTelemetry.Contact> records,boolean first) {
+        if(records.isEmpty())return "NONE";
+        var local=SableConsumerTargets.candidate(records.get(0),first);
+        return local==null?"UNKNOWN":local.toString();
+    }
+    private static String sampleFrame(List<NativeCollisionTelemetry.Contact> records,boolean first) {
+        if(records.isEmpty())return "NONE";
+        var f=first?records.get(0).frameA():records.get(0).frameB();
+        return f==null?"NO_FRAME":f.uuid().toString();
+    }
+    private static String verifiedGap(Box a,Box b) {
+        return a==null||b==null?"UNKNOWN":Double.toString(a.gap(b));
+    }
+    private static void logVerfR4(Logger log,Tracked t,long now,long nativeTick,
+                                  Pair pair,R4Probe probe,int records,int before,int after,Box swept) {
+        if(!VERF_ENABLED)return;
+        String signature="R4:"+probe.status()+":"+probe.detail();
+        if(signature.equals(t.lastVerfR4) && now-t.lastVerfR4Tick<VERF_SAMPLE_TICKS)return;
+        log.info("[PDD-VERF-R4] nativeTick={} serverTick={} pair={}/{} reason={} detail={} " +
+                "sourceRecords={} sourcePoints={} candidateCells={} failedPointIndex={} " +
+                "tickBudgetBefore={} tickBudgetAfter={} sweptBounds={} credited=false mutation=OFF",
+                nativeTick,now,pair.a().stableKey(),pair.b().stableKey(),probe.status(),probe.detail(),
+                records,probe.points(),probe.candidateCells(),probe.failedPoint(),before,after,swept);
+        t.lastVerfR4=signature;t.lastVerfR4Tick=now;
+    }
+    private static R4Probe probeWorldR4(MinecraftServer server,String dimension,Box moving,
                                        List<NativeCollisionTelemetry.Contact> records,
                                        int[] remainingChecks) {
         // World-side native point is in the coordinate convention Sable itself
         // uses for static BlockPos. Do not sample arbitrary ship AABB faces.
-        if(records.isEmpty())return "NATIVE_WORLD_POINT_MISSING";
+        if(records.isEmpty())return new R4Probe("NATIVE_WORLD_POINT_MISSING",0,0,-1,"NONE");
         // Do not fail merely because different native points occupy different
         // contact regions. This is a bounded R4 diagnostic, NEVER Q authority.
         var points=new ArrayList<FrameMath.Vec>(records.size());
@@ -558,18 +681,19 @@ public final class RealFixRuntimeBridge {
                 points.add(new FrameMath.Vec(c.contactAX(),c.contactAY(),c.contactAZ()));
             else if(c.idB()==-1)
                 points.add(new FrameMath.Vec(c.contactBX(),c.contactBY(),c.contactBZ()));
-            else return "NOT_WORLD_COLLIDER";
+            else return new R4Probe("NOT_WORLD_COLLIDER",points.size(),0,-1,"NATIVE_SIDE_MISMATCH");
         }
         var candidates=RealFixBoundaryCandidates.nearContactPoints(moving,points,remainingChecks[0]);
         if(candidates.reason()!=RealFixBoundaryCandidates.Reason.CANDIDATES)
-            return candidates.reason().name();
+            return new R4Probe(candidates.reason().name(),points.size(),
+                    candidates.uniqueCells(),candidates.failedPointIndex(),candidates.detail());
         int found=0;String sole="NONE";
         for(ServerLevel level:server.getAllLevels()) {
             if(!level.dimension().location().toString().equals(dimension))continue;
             var c=SubLevelContainer.getContainer(level);
-            if(c==null)return "CONTAINER_MISSING";
+            if(c==null)return new R4Probe("CONTAINER_MISSING",points.size(),candidates.uniqueCells(),-1,"NONE");
             for(var block:candidates.blocks()) {
-                if(--remainingChecks[0]<0)return "TICK_CANDIDATE_LIMIT";
+                if(--remainingChecks[0]<0)return new R4Probe("TICK_CANDIDATE_LIMIT",points.size(),candidates.uniqueCells(),-1,"R4_TICK_BUDGET_EXHAUSTED");
                 BlockPos pos=new BlockPos(block.x(),block.y(),block.z());
                 try {
                     if(!level.hasChunkAt(pos))continue;
@@ -578,14 +702,15 @@ public final class RealFixRuntimeBridge {
                     var state=level.getBlockState(pos);
                     if(state.isAir()||state.getCollisionShape(level,pos).isEmpty())continue;
                     found++;
-                    if(found>1)return "TARGET_MULTI_UNRESOLVED";
+                    if(found>1)return new R4Probe("TARGET_MULTI_UNRESOLVED",points.size(),candidates.uniqueCells(),-1,"MULTIPLE_SOLID_BLOCKS");
                     sole=block.x()+","+block.y()+","+block.z()+":"+
                             BuiltInRegistries.BLOCK.getKey(state.getBlock());
-                }catch(RuntimeException skipped){return "R4_READ_ERROR";}
+                }catch(RuntimeException skipped){return new R4Probe("R4_READ_ERROR",points.size(),candidates.uniqueCells(),-1,"BLOCK_READ_EXCEPTION");}
             }
-            return found==1?"PROVISIONAL_ONLY:"+sole:"TARGET_UNRESOLVED";
+            return new R4Probe(found==1?"PROVISIONAL_ONLY:"+sole:"TARGET_UNRESOLVED",
+                    points.size(),candidates.uniqueCells(),-1,"NONE");
         }
-        return "DIMENSION_MISSING";
+        return new R4Probe("DIMENSION_MISSING",points.size(),candidates.uniqueCells(),-1,"NONE");
     }
 
     private static Box box(MinecraftServer server,String owner,Target target,String dimension,

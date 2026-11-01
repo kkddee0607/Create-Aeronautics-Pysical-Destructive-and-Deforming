@@ -62,6 +62,32 @@ final class SableContactRegionsTest {
         assertEquals(2,result.checksB());
         assertTrue(result.regions().stream().allMatch(r->(r.a()==null)!=(r.b()==null)));
     }
+    @Test void verificationTraceDistinguishesTargetLimitFromCellBudget() {
+        var many=new ArrayList<NativeCollisionTelemetry.Contact>();
+        for(int i=0;i<5;i++)many.add(contact(i));
+        var overTarget=SableContactRegions.collect(PAIR,many,
+                (contact,owner,remaining)->new SableContactRegions.Check(
+                        List.of(target(owner,(int)contact.contactAX())),1));
+        assertEquals(SableContactRegions.AuditFailure.TARGET_LIMIT_A,
+                overTarget.trace().failure());
+        assertEquals(4,overTarget.trace().sourceIndex());
+        assertEquals(5,overTarget.trace().verifiedTargetsA());
+        var overCells=SableContactRegions.collect(PAIR,List.of(contact(1)),
+                (contact,owner,remaining)->new SableContactRegions.Check(
+                        List.of(),0,true,"UNVERIFIED","R2_CELL_BUDGET planned=8 remaining=0"));
+        assertEquals(SableContactRegions.AuditFailure.SIDE_A_AND_B_INCOMPLETE,
+                overCells.trace().failure());
+        assertTrue(overCells.trace().detail().contains("R2_CELL_BUDGET"));
+    }
+    @Test void verificationTraceExplainsUncorroboratedSource() {
+        var invalid=new NativeCollisionTelemetry.Contact(7,-1,42,0,0,0,0,0,0,
+                0,0,0,15,0,0,"minecraft:overworld",9);
+        var result=SableContactRegions.collect(PAIR,List.of(invalid),
+                (contact,owner,remaining)->new SableContactRegions.Check(List.of(),0));
+        assertEquals(SableContactRegions.AuditFailure.UNCORROBORATED,
+                result.trace().failure());
+        assertTrue(result.trace().detail().contains("uncorroborated=1"));
+    }
     @Test void overBudgetBlocksPartialCredit() {
         var result=SableContactRegions.collect(PAIR,List.of(contact(1)),
                 (e,owner,remaining)->new SableContactRegions.Check(List.of(target(owner,1)),16));

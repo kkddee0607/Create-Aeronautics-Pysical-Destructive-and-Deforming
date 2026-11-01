@@ -41,6 +41,17 @@ final class RealFixBoundaryCandidatesTest {
         assertEquals(Reason.CANDIDATES,r.reason());
         assertEquals(1,r.blocks().size());
     }
+    @Test void verificationMetadataExplainsR4BroadnessWithoutChangingCandidates() {
+        var moving=new Box(-2,-2,-2,5,5,5);
+        var samples=List.of(new FrameMath.Vec(0.4,1.5,0.4),
+                new FrameMath.Vec(2.4,1.5,0.4));
+        var result=RealFixBoundaryCandidates.nearContactPoints(moving,samples,1);
+        assertEquals(Reason.TOO_BROAD,result.reason());
+        assertEquals(2,result.sourcePoints());
+        assertEquals(1,result.failedPointIndex());
+        assertTrue(result.detail().contains("UNIQUE_CONTACT_CELLS_EXCEED_BUDGET"));
+        assertTrue(result.blocks().isEmpty());
+    }
     @Test void missingSourceAndBudgetAreRejected() {
         assertEquals(Reason.NO_SWEPT_BOUNDS,RealFixBoundaryCandidates.nearOverlap(null,1024).reason());
         assertEquals(Reason.TOO_BROAD,RealFixBoundaryCandidates.nearOverlap(

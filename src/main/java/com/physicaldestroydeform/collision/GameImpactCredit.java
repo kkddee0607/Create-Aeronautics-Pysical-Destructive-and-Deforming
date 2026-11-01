@@ -189,6 +189,20 @@ public final class GameImpactCredit {
         State s=states.get(Objects.requireNonNull(pair));
         return s==null?0:s.episodeGeneration;
     }
+    /** Immutable verification-only snapshot. Does not advance, rearm or consume evidence. */
+    public record EvidenceSnapshot(Phase phase,long stateTick,int separatedSamples,
+                                   boolean pendingApproach,int burstFrames,long episode,
+                                   long episodeGeneration,long authorizationTick) {
+        public boolean hasUnspentAuthorization() {
+            return phase==Phase.ACTIVE && pendingApproach && burstFrames<2;
+        }
+    }
+    public EvidenceSnapshot evidence(Pair pair) {
+        State s=states.get(Objects.requireNonNull(pair));
+        return s==null?new EvidenceSnapshot(Phase.UNINITIALIZED,-1,0,false,0,0,0,-1)
+                :new EvidenceSnapshot(s.phase,s.tick,s.separatedSamples,s.pendingApproach,
+                        s.burstFrames,s.episode,s.episodeGeneration,s.authorizationTick);
+    }
     public void clear() { states.clear(); }
     /** Recycled native bodies or removed plots cannot retain the old episode. */
     public void invalidateOwner(String stableOwner) {
