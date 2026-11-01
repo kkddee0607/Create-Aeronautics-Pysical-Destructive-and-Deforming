@@ -12,7 +12,7 @@ import org.joml.Vector3d;
 import java.util.ArrayList;
 import java.util.Map;
 import java.util.List;
-import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.concurrent.atomic.AtomicLong;
@@ -26,7 +26,9 @@ public final class SableFrameCapture {
     private static final Map<SubLevelPhysicsSystem,Snapshot> LAST_POST=new ConcurrentHashMap<>();
     // All pre-solver substeps for each server tick. Native post-tick effect
     // records do not identify their originating substep; do not guess one.
-    private static final ConcurrentLinkedQueue<Snapshot> PRE_HISTORY = new ConcurrentLinkedQueue<>();
+    private static final int PRE_HISTORY_LIMIT = 4096;
+    private static final ArrayBlockingQueue<Snapshot> PRE_HISTORY = new ArrayBlockingQueue<>(PRE_HISTORY_LIMIT);
+    private static final LongAdder HISTORY_DROPPED = new LongAdder();
     private static final AtomicLong EPOCH=new AtomicLong();
     private static final LongAdder PRE=new LongAdder(),POST=new LongAdder(),CANDIDATE=new LongAdder(),
             REJECTED=new LongAdder(),NO_EPOCH=new LongAdder(),BODY_ERRORS=new LongAdder(),
@@ -75,7 +77,7 @@ public final class SableFrameCapture {
         try {
             Snapshot before=capture(system,epoch,Phase.PRE_SOLVER);
             ACTIVE.put(system,before);
-            PRE_HISTORY.add(before);
+            if (!PRE_HISTORY.offer(before)) HISTORY_DROPPED.increment();
             PRE.increment();
         } catch (RuntimeException unsafe) {
             ACTIVE.remove(system);
@@ -119,8 +121,10 @@ public final class SableFrameCapture {
                 " rejected="+REJECTED.sum()+" noEpoch="+NO_EPOCH.sum()+
                 " bodyErrors="+BODY_ERRORS.sum()+" stepErrors="+STEP_ERRORS.sum()+
                 " postWithoutPre="+POST_WITHOUT_PRE.sum()+" activeFrames="+ACTIVE.size()+
-                " lastPostFrames="+LAST_POST.size();
+                " lastPostFrames="+LAST_POST.size()+" preHistoryDropped="+HISTORY_DROPPED.sum();
     }
+    /** Dropped snapshots make owner mapping incomplete; zero credit rather than guessing. */
+    public static long preHistoryDropped() { return HISTORY_DROPPED.sum(); }
     /** Consume once, after Sable's postPhysicsTicks/clearCollisions. */
     public static List<Snapshot> drainPreHistory() {
         var frames=new ArrayList<Snapshot>();

@@ -1,0 +1,2 @@
+Source-rebuild using 1.0.5-A realFix live bridge and developer-default credit core.
+DO NOT represent this as a released or in-game validated 0.3.0realFix.

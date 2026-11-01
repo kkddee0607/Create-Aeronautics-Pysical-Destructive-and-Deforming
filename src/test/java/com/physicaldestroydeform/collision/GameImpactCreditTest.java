@@ -1,0 +1,97 @@
+package com.physicaldestroydeform.collision;
+
+import org.junit.jupiter.api.Test;
+import java.util.List;
+import static org.junit.jupiter.api.Assertions.*;
+import static com.physicaldestroydeform.collision.GameImpactCredit.*;
+
+/** Additional official JUnit tests once integrated into the original Gradle project. */
+final class GameImpactCreditTest {
+    private static final Owner A=new Owner("PLOT:1",1);
+    private static final Owner B=new Owner("WORLD:minecraft:overworld",1);
+    private static final Pair P=Pair.canonical("run","minecraft:overworld",A,B);
+    private static final Target TA=new Target(P.a().stableKey(),"1,2,3","minecraft:stone");
+    private static final Target TB=new Target(P.b().stableKey(),"4,5,6","minecraft:stone");
+    private static final List<ObservedForce> MANY=List.of(
+            new ObservedForce(-1,1,42,0),new ObservedForce(-1,1,42,1),
+            new ObservedForce(-1,1,42,2),new ObservedForce(-1,1,42,3));
+    private static Frame frame(long tick,List<ObservedForce> observed,
+                               boolean separation,boolean approach,Target a,Target b) {
+        return new Frame(P,tick,observed,separation,approach,a,b);
+    }
+    @Test void defaultPolicyIsBoundedAndDocumented() {
+        assertEquals(10.0,Settings.provisional().candidate(42));
+        assertEquals(0.0,Settings.provisional().candidate(1.8));
+        assertEquals(64.0,Settings.provisional().candidate(100000));
+    }
+    @Test void duplicateForcePointsProduceOneGroupPeak() {
+        assertEquals(42.0,GameImpactCredit.peak(MANY));
+        var e=new GameImpactCredit(Settings.provisional());
+        e.step(frame(1,List.of(),true,false,TA,TB));
+        e.step(frame(2,List.of(),true,false,TA,TB));
+        var result=e.step(frame(3,MANY,false,true,TA,TB));
+        assertEquals(10.0,result.issuedQ());
+        assertEquals(5.0,result.allocation().sideA());
+        assertEquals(5.0,result.allocation().sideB());
+    }
+    @Test void noNewCreditDuringTwentySustainedTicks() {
+        var e=new GameImpactCredit(Settings.provisional());
+        e.step(frame(1,List.of(),true,false,TA,TB));
+        e.step(frame(2,List.of(),true,false,TA,TB));
+        assertTrue(e.step(frame(3,MANY,false,true,TA,TB)).credited());
+        for(int t=4;t<=24;t++)assertFalse(e.step(frame(t,MANY,false,true,TA,TB)).credited());
+    }
+    @Test void silenceDoesNotProveSeparation() {
+        var e=new GameImpactCredit(Settings.provisional());
+        e.step(frame(1,MANY,false,true,TA,TB));
+        assertEquals(Reason.UNKNOWN_SEPARATION,
+                e.step(frame(2,List.of(),false,false,TA,TB)).reason());
+        assertEquals(Reason.DUPLICATE_EPISODE,
+                e.step(frame(3,MANY,false,true,TA,TB)).reason());
+    }
+    @Test void requiresVerifiedApproachAndAtLeastOneRealTarget() {
+        var e=new GameImpactCredit(Settings.provisional());
+        e.step(frame(1,List.of(),true,false,TA,TB));
+        e.step(frame(2,List.of(),true,false,TA,TB));
+        assertEquals(Reason.APPROACH_UNVERIFIED,
+                e.step(frame(3,MANY,false,false,TA,TB)).reason());
+        e.step(frame(4,List.of(),true,false,TA,TB));
+        e.step(frame(5,List.of(),true,false,TA,TB));
+        assertEquals(Reason.TARGET_UNVERIFIED,
+                e.step(frame(6,MANY,false,true,null,null)).reason());
+    }
+    @Test void oneVerifiedSideReservesHalf() {
+        var e=new GameImpactCredit(Settings.provisional());
+        e.step(frame(1,List.of(),true,false,TA,TB));
+        e.step(frame(2,List.of(),true,false,TA,TB));
+        var c=e.step(frame(3,MANY,false,true,TA,null));
+        assertEquals(10.0,c.issuedQ());
+        assertEquals(5.0,c.allocation().sideA());
+        assertEquals(0.0,c.allocation().sideB());
+        assertEquals(5.0,c.allocation().unused());
+    }
+    @Test void malformedNativeDataIsNeverPromoted() {
+        assertTrue(GameImpactCredit.parse(new double[14]).isEmpty());
+        double[] arr=new double[15];arr[0]=3;arr[1]=-1;arr[2]=Double.NaN;
+        assertTrue(GameImpactCredit.parse(arr).isEmpty());
+        arr[2]=42;assertEquals(1,GameImpactCredit.parse(arr).size());
+    }
+    @Test void collisionLocalPointRequiresVerifiedTransform() {
+        var resolver=OwnerLocalTargetCandidates.provisional();
+        var input=new OwnerLocalTargetCandidates.Request("PLOT:1",true,null,false,
+                new OwnerLocalTargetCandidates.Point(10.5,64.5,10.5),false,
+                null,false,List.of());
+        var inspector=(OwnerLocalTargetCandidates.Inspector)(owner,pos)->
+                new OwnerLocalTargetCandidates.Evidence(owner,pos,"minecraft:stone",true,true,true,false);
+        assertFalse(resolver.resolve(input,inspector).verified());
+    }
+    @Test void directCallbackTargetCanBeValidatedWithoutNativeGeometry() {
+        var resolver=OwnerLocalTargetCandidates.provisional();
+        var location=new OwnerLocalTargetCandidates.Block(10,64,10);
+        var input=new OwnerLocalTargetCandidates.Request("PLOT:1",true,location,true,
+                null,false,null,false,List.of());
+        var inspector=(OwnerLocalTargetCandidates.Inspector)(owner,pos)->
+                new OwnerLocalTargetCandidates.Evidence(owner,pos,"minecraft:stone",true,true,true,false);
+        assertTrue(resolver.resolve(input,inspector).verified());
+    }
+}

@@ -10,8 +10,7 @@ import java.util.concurrent.atomic.AtomicLong;
  * body IDs may be cross-checked for an independently gated game proxy;
  * force scalar and contact points are never elevated to exact physics input. */
 public final class NativeCollisionTelemetry {
-    public static final boolean ENABLED = Boolean.parseBoolean(System.getProperty("pdd.debugCollisions", "true"))
-            || Boolean.parseBoolean(System.getProperty("pdd.proxy.enabled", "false"));
+    public static final boolean ENABLED = true;
     public static final int FIELDS = 15;
     public static final int CAPACITY = 2048;
     private static final ConcurrentLinkedQueue<Contact> QUEUE = new ConcurrentLinkedQueue<>();
@@ -37,8 +36,10 @@ public final class NativeCollisionTelemetry {
             double first=nativeData[offset],second=nativeData[offset+1];
             boolean valid=Double.isFinite(first)&&Double.isFinite(second)
                     && first==Math.rint(first)&&second==Math.rint(second)
-                    && first>=Integer.MIN_VALUE&&first<=Integer.MAX_VALUE
-                    && second>=Integer.MIN_VALUE&&second<=Integer.MAX_VALUE;
+                    && first>=-1&&first<=Integer.MAX_VALUE
+                    && second>=-1&&second<=Integer.MAX_VALUE
+                    && !(first==-1 && second==-1) && first!=second
+                    && Double.isFinite(nativeData[offset+2]) && nativeData[offset+2]>=0;
             for(int i=2;i<FIELDS;i++)valid &= Double.isFinite(nativeData[offset+i]);
             if(!valid){MALFORMED.incrementAndGet();continue;}
             int old;

@@ -17,7 +17,7 @@ public abstract class SableUniversalCallbackMixin {
             at = @At(value = "INVOKE", target = "Ldev/ryanhcode/sable/api/block/BlockWithSubLevelCollisionCallback;sable$getCallback(Lnet/minecraft/world/level/block/state/BlockState;)Ldev/ryanhcode/sable/api/physics/callback/BlockSubLevelCollisionCallback;"),
             remap = false, require = 1)
     private BlockSubLevelCollisionCallback pdd$wrapFactoryResult(BlockSubLevelCollisionCallback original, BlockState state) {
-        if (state.isAir()) return original;
+        if (state.isAir() || original == null) return original;
         SableContactQueue.registered(original != null);
         return new ObservingCollisionCallback(original, BuiltInRegistries.BLOCK.getKey(state.getBlock()).toString());
     }
