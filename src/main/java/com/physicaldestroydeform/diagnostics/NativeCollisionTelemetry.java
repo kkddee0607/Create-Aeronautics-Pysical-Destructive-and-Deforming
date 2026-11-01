@@ -16,12 +16,16 @@ public final class NativeCollisionTelemetry {
     public static final boolean ENABLED = true;
     public static final int FIELDS = 15;
     public static final int CAPACITY = 2048;
+    /** Confirmed Rust clearCollisions source uses reported.truncate(100).
+     * Exactly 100 records is only cap saturation, NOT proven record loss. */
+    public static final int NATIVE_EFFECT_MAX_RECORDS = 100;
     private static final ConcurrentLinkedQueue<Contact> QUEUE = new ConcurrentLinkedQueue<>();
     private static final AtomicInteger SIZE = new AtomicInteger();
     private static final AtomicLong POLLS = new AtomicLong();
     private static final AtomicLong TOTAL = new AtomicLong();
     private static final AtomicLong DROPPED = new AtomicLong();
     private static final AtomicLong MALFORMED = new AtomicLong();
+    private static final AtomicLong NATIVE_CAP_SATURATED = new AtomicLong();
     private static final AtomicLong OBSERVER_ERRORS = new AtomicLong();
     public static void observerError(){ OBSERVER_ERRORS.incrementAndGet(); }
     public static long observerErrors(){ return OBSERVER_ERRORS.get(); }
@@ -42,6 +46,7 @@ public final class NativeCollisionTelemetry {
             return;
         }
         int n = nativeData.length / FIELDS;
+        if(n==NATIVE_EFFECT_MAX_RECORDS)NATIVE_CAP_SATURATED.incrementAndGet();
         TOTAL.addAndGet(n);
         for (int offset = 0; offset < nativeData.length; offset += FIELDS) {
             // A NaN ID would cast to zero and could falsely impersonate a
@@ -95,6 +100,7 @@ public final class NativeCollisionTelemetry {
     public static long total() { return TOTAL.get(); }
     public static long dropped() { return DROPPED.get(); }
     public static long malformed() { return MALFORMED.get(); }
+    public static long nativeCapSaturatedPolls() {return NATIVE_CAP_SATURATED.get();}
     public static int size() { return SIZE.get(); }
     public record Contact(int idA, int idB, double rawImpactScalar,
             double ax, double ay, double az, double bx, double by, double bz,

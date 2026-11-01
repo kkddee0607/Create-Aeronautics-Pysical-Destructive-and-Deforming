@@ -75,9 +75,9 @@ public final class SableContactRegions {
         var cache=new HashMap<AuditKey,Check>();
         var nativeBatch=new OwnerResolver.NativeAuditBatch(server,dimension);
         Result collected=collect(pair,records,(contact,owner,remainingChecks)-> {
-            boolean onA=matches(contact.idA(),contact.frameA(),owner,dimension);
-            boolean onB=matches(contact.idB(),contact.frameB(),owner,dimension);
-            if(onA==onB)return new Check(List.of(),0,false,"UNVERIFIED","OWNER_FRAME_MISMATCH");
+            int sourceSide=SableConsumerTargets.sourceSide(owner,contact,dimension);
+            if(sourceSide==0)return new Check(List.of(),0,false,"UNVERIFIED","OWNER_FRAME_MISMATCH");
+            boolean onA=sourceSide==1;
             var point=SableConsumerTargets.candidate(contact,onA);
             if(point==null)return new Check(List.of(),0,false,"UNVERIFIED","NATIVE_POINT_OR_FRAME_MISSING");
             var key=new AuditKey(owner,point,onA?contact.frameA():contact.frameB());
@@ -105,18 +105,11 @@ public final class SableContactRegions {
             if(!found.isEmpty())result=new Check(new ArrayList<>(found),checked,false,"R2_CONTACT_REGION",
                     "R2_SHAPE_VERIFIED reusedCells="+reused);
             else {
-                // R3 may genuinely need only one cell, so avoid pessimistic
-                // reserving all eight candidate checks up front. An exhausted
-                // fallback is still a hard fail-closed incomplete audit.
-                var cross=SableConsumerTargets.crossProject(server,dimension,owner,List.of(contact),
-                        remainingChecks-checked);
-                if(cross.reason()==SableConsumerTargets.Reason.TOO_MANY_CANDIDATES)
-                    return new Check(List.of(),checked+cross.checked(),true,"UNVERIFIED",
-                            "R3_ACTUAL_CHECK_BUDGET attempted="+cross.checked()+" remaining="+(remainingChecks-checked));
-                result=new Check(cross.verified()?List.of(cross.target()):List.of(),
-                        checked+cross.checked(),false,
-                        cross.verified()?"R3_CROSS_SIDE_REGION":"UNVERIFIED",
-                        cross.verified()?"R3_SHAPE_VERIFIED":"R2_R3_NO_SHAPE:"+cross.reason());
+                // Sable native contacts are body-local. Projecting the other
+                // witness through last-post poses silently mixes substeps.
+                // R3 remains diagnostic-only until per-contact poses exist.
+                result=new Check(List.of(),checked,false,"UNVERIFIED",
+                        "R2_NO_SHAPE_R3_CROSS_PHASE_UNCALIBRATED");
             }
             cache.put(key,result);
             return result;
@@ -131,11 +124,6 @@ public final class SableContactRegions {
     }
     private record AuditKey(String owner, FrameMath.Vec point,
                             NativeCollisionTelemetry.OwnerFrame frame) {}
-    private static boolean matches(int id,NativeCollisionTelemetry.OwnerFrame frame,
-                                   String owner,String dimension) {
-        return id==-1?owner.equals("WORLD:"+dimension)
-                :frame!=null&&owner.equals("PLOT:"+frame.uuid());
-    }
     /** Testable no-world-evidence policy: never approve a side from a guessed owner. */
     public static Result collect(GameImpactCredit.Pair pair,
                                  List<NativeCollisionTelemetry.Contact> records,Inspector inspector) {
@@ -147,28 +135,37 @@ public final class SableContactRegions {
         boolean exceededA=false,exceededB=false,regionCompacted=false;
         int overflowIndex=-1,overflowCountA=0,overflowCountB=0;
         String firstFrameMismatch="NONE";
+        int witnessSeparated=0,worldProjectionUnavailable=0;
         String firstEmptyA="NONE",firstEmptyB="NONE";
         String methodA="UNVERIFIED",methodB="UNVERIFIED";
         for(var record:records) {
             int index=processed++;
-            if(record==null || !SableConsumerTargets.corroboratedContact(record)) {
-                if(firstFrameMismatch.equals("NONE")) {
-                    var residue=SableConsumerTargets.frameResidual(record);
-                    firstFrameMismatch="nativeRecord="+index+" frameReason="+residue.reason()
-                            +" rawA="+(record==null?"NULL":("("+record.contactAX()+","+record.contactAY()+","+record.contactAZ()+")"))
-                            +" rawB="+(record==null?"NULL":("("+record.contactBX()+","+record.contactBY()+","+record.contactBZ()+")"))
-                            +" nativeFrameA="+(record==null?"NULL":record.frameA())
-                            +" nativeFrameB="+(record==null?"NULL":record.frameB())
-                            +" worldA="+residue.a()+" worldB="+residue.b()
-                            +" worldDelta="+residue.delta()+" distance="+residue.distance();
-                }
+            // Independent Rapier witness points need not coincide. A source
+            // record is rejected only for invalid native fields, not distance.
+            if(!SableConsumerTargets.sourceRecordValid(record)
+                    || !pair.dimension().equals(record.dimension())) {
                 skipped++;uncorroborated++;continue;
+            }
+            var residue=SableConsumerTargets.frameResidual(record);
+            if("WITNESS_SEPARATED_GT_0.25".equals(residue.reason()))witnessSeparated++;
+            if("EFFECT_POSE_UNAVAILABLE".equals(residue.reason()))worldProjectionUnavailable++;
+            if(firstFrameMismatch.equals("NONE") && "WITNESS_SEPARATED_GT_0.25".equals(residue.reason())) {
+                firstFrameMismatch="nativeRecord="+index+" frameReason="+residue.reason()
+                        +" rawA=("+record.contactAX()+","+record.contactAY()+","+record.contactAZ()+")"
+                        +" rawB=("+record.contactBX()+","+record.contactBY()+","+record.contactBZ()+")"
+                        +" nativeFrameA="+record.frameA()+" nativeFrameB="+record.frameB()
+                        +" worldA="+residue.a()+" worldB="+residue.b()
+                        +" worldDelta="+residue.delta()+" distance="+residue.distance();
             }
             int remainA=MAX_CHECKS_PER_SIDE-checkedA,remainB=MAX_CHECKS_PER_SIDE-checkedB;
             Check a=exceededA?new Check(List.of(),0,false,"UNVERIFIED","TARGET_LIMIT_A_SIDE_QUARANTINED")
-                    :inspector.verify(record,pair.a().stableKey(),remainA);
+                    :SableConsumerTargets.sourceSide(pair.a().stableKey(),record,record.dimension())==0
+                            ?new Check(List.of(),0,false,"UNVERIFIED","OWNER_FRAME_MISMATCH_A")
+                            :inspector.verify(record,pair.a().stableKey(),remainA);
             Check b=exceededB?new Check(List.of(),0,false,"UNVERIFIED","TARGET_LIMIT_B_SIDE_QUARANTINED")
-                    :inspector.verify(record,pair.b().stableKey(),remainB);
+                    :SableConsumerTargets.sourceSide(pair.b().stableKey(),record,record.dimension())==0
+                            ?new Check(List.of(),0,false,"UNVERIFIED","OWNER_FRAME_MISMATCH_B")
+                            :inspector.verify(record,pair.b().stableKey(),remainB);
             int askedA=a==null?0:a.inspected(),askedB=b==null?0:b.inspected();
             if(a==null||b==null || a.incomplete() || b.incomplete()) {
                 AuditFailure why=a==null||a.incomplete()?
@@ -249,13 +246,20 @@ public final class SableContactRegions {
                 exceededB?AuditFailure.TARGET_LIMIT_B:
                 regions.isEmpty()?(uncorroborated==records.size()&& !records.isEmpty()?
                         AuditFailure.UNCORROBORATED:AuditFailure.NO_VERIFIED_REGION):AuditFailure.NONE;
+        // A valid one-sided Q reservation is PARTIAL, even if every record
+        // was inspected. Never describe a missing source owner as PROVED.
+        boolean hasA=regions.stream().anyMatch(r->r.a()!=null);
+        boolean hasB=regions.stream().anyMatch(r->r.b()!=null);
         Status status=regions.isEmpty()?Status.NO_VERIFIED_REGION:
-                skipped==0 && !exceededA && !exceededB?Status.PROVED:Status.PARTIAL;
+                skipped==0 && !exceededA && !exceededB && hasA && hasB
+                        ?Status.PROVED:Status.PARTIAL;
         return traced(new ArrayList<>(regions),status,checkedA,checkedB,skipped,
                 regions.isEmpty()?"UNVERIFIED":methodA,regions.isEmpty()?"UNVERIFIED":methodB,
                 failure,overflowIndex>=0?overflowIndex:-1,processed,MAX_CHECKS_PER_SIDE-checkedA,MAX_CHECKS_PER_SIDE-checkedB,
                 0,0,targetsA.size(),targetsB.size(),regions.size(),
-                "uncorroborated="+uncorroborated+" noShapeContactRecords="+emptyChecks+
+                "invalidSourceRecords="+uncorroborated+" witnessSeparated="+witnessSeparated+
+                " worldProjectionUnavailable="+worldProjectionUnavailable+
+                " noShapeContactRecords="+emptyChecks+
                 " firstEmptyA="+firstEmptyA+" firstEmptyB="+firstEmptyB+
                 " overflowA="+exceededA+" overflowB="+exceededB+
                 " overflowCountA="+overflowCountA+" overflowCountB="+overflowCountB+

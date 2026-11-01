@@ -24,7 +24,7 @@ import org.slf4j.LoggerFactory;
 @Mod(PhysicalDestroyDeform.MOD_ID)
 public final class PhysicalDestroyDeform {
     public static final String MOD_ID = "physical_destroy_deform";
-    public static final String BUILD_VERSION = "0.3.1fix";
+    public static final String BUILD_VERSION = "0.3.1plotRog";
     private static final Logger LOGGER = LoggerFactory.getLogger(PhysicalDestroyDeform.class);
     private final AcceptanceReport acceptanceReport = new AcceptanceReport();
     private final RealFixRuntimeBridge bridge = new RealFixRuntimeBridge();
@@ -37,15 +37,15 @@ public final class PhysicalDestroyDeform {
         NeoForge.EVENT_BUS.addListener(this::onServerStopped);
         NeoForge.EVENT_BUS.addListener(this::onServerTick);
         LOGGER.info("[PDD-DIAG] INIT modId={} version={} revision=IDS-1.0.5-A source=SABLE_ORIGINAL_POST_EFFECT " +
-                "target=SABLE_CONSUMER_R2_R3_AND_BOUNDED_R4 state=FOUR_PHASE_REGIONAL_LEDGER " +
+                "target=NATIVE_BODY_LOCAL_INDEPENDENT_R2_R3_UNCALIBRATED_R4_PROVISIONAL state=FOUR_PHASE_REGIONAL_LEDGER " +
                 "worldMutation=OFF",MOD_ID,BUILD_VERSION);
         PddDiagnostics.runModelSelfTest(LOGGER);
     }
 
     private void onServerStarted(ServerStartedEvent event) {
         MaterialRegistry.rebuild(event.getServer(), LOGGER);
-        LOGGER.info("[PDD-0.3.1fix] phase=START bridge=READ_ONLY nativeScalar=GAME_FORCE_PROXY " +
-                "newNativeABI=NOT_REQUIRED customNullCallback=DISABLED baseSha=191185a61faf25ab8d45ffd9fafd2426f969aa44 worldMutation=OFF");
+        LOGGER.info("[PDD-0.3.1plotRog] phase=START bridge=READ_ONLY nativeScalar=GAME_FORCE_PROXY " +
+                "newNativeABI=NOT_REQUIRED customNullCallback=DISABLED baseSha=5a87ab16c848f4a111055f0b74464a33024718cc worldMutation=OFF");
     }
     private void onDatapackSync(OnDatapackSyncEvent event) {
         if (event.getPlayer()==null) MaterialRegistry.rebuild(event.getPlayerList().getServer(), LOGGER);
@@ -57,7 +57,7 @@ public final class PhysicalDestroyDeform {
         SableContactQueue.drain();
         SableFrameCapture.clear();
         acceptanceReport.close();
-        LOGGER.info("[PDD-0.3.1fix] phase=STOP state=CLEARED worldMutation=OFF");
+        LOGGER.info("[PDD-0.3.1plotRog] phase=STOP state=CLEARED worldMutation=OFF");
     }
     private void onServerTick(ServerTickEvent.Post event) {
         // Snapshot and native inputs are consumed exactly once on the server tick.
@@ -69,7 +69,7 @@ public final class PhysicalDestroyDeform {
             bridge.tick(event.getServer(),callbacks,nativeEffects,preHistory,LOGGER);
         } catch (RuntimeException invalid) {
             // Never let a diagnostic bridge disrupt the physics/game tick.
-            LOGGER.error("[PDD-0.3.1fix] phase=BRIDGE_EXCEPTION reason={} nativeEffects={} " +
+            LOGGER.error("[PDD-0.3.1plotRog] phase=BRIDGE_EXCEPTION reason={} nativeEffects={} " +
                     "callbacks={} Q=0 worldMutation=OFF",invalid.getClass().getName(),
                     nativeEffects.size(),callbacks.size(),invalid);
         } finally {
@@ -78,13 +78,13 @@ public final class PhysicalDestroyDeform {
         if(++ticks%100!=0)return;
         acceptanceReport.log(LOGGER);
         LOGGER.info("[PDD-OBS] phase=SUMMARY physicsSnapshots={} nativeRecords={} callbackRecords={} " +
-                "nativeDropped={} callbackDropped={} nativeMalformed={} reason=READ_ONLY " +
+                "nativeDropped={} callbackDropped={} nativeMalformed={} nativeCapSaturatedPolls={} reason=READ_ONLY " +
                 "worldMutation=OFF",SableFrameCapture.summary(),
                 NativeCollisionTelemetry.total()-lastNative,
                 SableContactQueue.total()-lastCallbacks,
                 NativeCollisionTelemetry.dropped()-lastNativeDropped,
                 SableContactQueue.dropped()-lastCallbackDropped,
-                NativeCollisionTelemetry.malformed());
+                NativeCollisionTelemetry.malformed(),NativeCollisionTelemetry.nativeCapSaturatedPolls());
         lastNative=NativeCollisionTelemetry.total();
         lastCallbacks=SableContactQueue.total();
         lastNativeDropped=NativeCollisionTelemetry.dropped();

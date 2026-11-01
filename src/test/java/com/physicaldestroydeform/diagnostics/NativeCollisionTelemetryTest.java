@@ -44,4 +44,21 @@ public class NativeCollisionTelemetryTest {
         assertEquals(uuid,sample.frameA().uuid());
         assertNull(sample.frameB());
     }
+    @Test void nativeHundredRecordCapSaturationIsNotReportedAsConfirmedDrop() {
+        NativeCollisionTelemetry.drain();
+        long before=NativeCollisionTelemetry.nativeCapSaturatedPolls();
+        long dropped=NativeCollisionTelemetry.dropped();
+        double[] records=new double[NativeCollisionTelemetry.NATIVE_EFFECT_MAX_RECORDS
+                *NativeCollisionTelemetry.FIELDS];
+        for(int i=0;i<NativeCollisionTelemetry.NATIVE_EFFECT_MAX_RECORDS;i++) {
+            int o=i*NativeCollisionTelemetry.FIELDS;
+            records[o]=9;records[o+1]=-1;records[o+2]=42;
+        }
+        NativeCollisionTelemetry.capture(records,"minecraft:overworld",40);
+        assertEquals(before+1,NativeCollisionTelemetry.nativeCapSaturatedPolls());
+        assertEquals(dropped,NativeCollisionTelemetry.dropped());
+        assertEquals(NativeCollisionTelemetry.NATIVE_EFFECT_MAX_RECORDS,
+                NativeCollisionTelemetry.drain().size());
+    }
+
 }

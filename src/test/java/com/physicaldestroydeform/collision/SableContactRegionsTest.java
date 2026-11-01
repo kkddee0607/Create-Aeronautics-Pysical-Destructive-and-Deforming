@@ -90,13 +90,15 @@ final class SableContactRegionsTest {
         assertTrue(result.regions().stream().allMatch(r->(r.a()==null)!=(r.b()==null)));
         assertTrue(result.trace().detail().contains("compactedRegions=true"));
     }
-    @Test void nonMatchingContactFrameRejected() {
+    @Test void missingPlotFrameQuarantinesOnlyPlotSide() {
         var bad=new NativeCollisionTelemetry.Contact(7,-1,42,0,0,0,0,0,0,
                 0,0,0,10,0,0,"minecraft:overworld",9);
         var result=SableContactRegions.collect(PAIR,List.of(bad),
                 (e,owner,remaining)->new SableContactRegions.Check(List.of(target(owner,1)),1));
-        assertEquals(SableContactRegions.Status.NO_VERIFIED_REGION,result.status());
-        assertEquals(1,result.rejected());
+        assertEquals(SableContactRegions.Status.PARTIAL,result.status());
+        assertEquals(0,result.rejected());
+        assertNull(result.firstA());
+        assertNotNull(result.firstB());
     }
     @Test void multipleVerifiedBlocksInOneSourceContactPreserveBothSidesWithoutInventedPairs() {
         var result=SableContactRegions.collect(PAIR,List.of(contact(1)),
@@ -127,12 +129,26 @@ final class SableContactRegionsTest {
     }
     @Test void verificationTraceExplainsUncorroboratedSource() {
         var invalid=new NativeCollisionTelemetry.Contact(7,-1,42,0,0,0,0,0,0,
-                0,0,0,15,0,0,"minecraft:overworld",9);
+                Double.NaN,0,0,15,0,0,"minecraft:overworld",9);
         var result=SableContactRegions.collect(PAIR,List.of(invalid),
                 (contact,owner,remaining)->new SableContactRegions.Check(List.of(),0));
         assertEquals(SableContactRegions.AuditFailure.UNCORROBORATED,
                 result.trace().failure());
-        assertTrue(result.trace().detail().contains("uncorroborated=1"));
+        assertTrue(result.trace().detail().contains("invalidSourceRecords=1"));
+    }
+    @Test void separatedWitnessesAreStillAuditedIndependently() {
+        var f=new NativeCollisionTelemetry.OwnerFrame(PLOT,new FrameMath.Pose(
+                new FrameMath.Vec(0,0,0),new FrameMath.Vec(0,0,0),
+                new FrameMath.Vec(1,1,1),0,0,0,1));
+        var c=new NativeCollisionTelemetry.Contact(7,-1,42,1,0,0,-1,0,0,
+                0.5,0,0,2.5,0,0,"minecraft:overworld",9,f,null);
+        var res=SableContactRegions.collect(PAIR,List.of(c),
+                (e,owner,remaining)->new SableContactRegions.Check(List.of(target(owner,1)),1));
+        assertEquals(SableContactRegions.Status.PROVED,res.status());
+        assertNotNull(res.firstA());assertNotNull(res.firstB());
+        assertEquals(0,res.rejected());
+        assertTrue(res.trace().detail().contains("witnessSeparated=1"));
+        assertTrue(res.trace().detail().contains("frameReason=WITNESS_SEPARATED_GT_0.25"));
     }
     @Test void overBudgetBlocksPartialCredit() {
         var result=SableContactRegions.collect(PAIR,List.of(contact(1)),

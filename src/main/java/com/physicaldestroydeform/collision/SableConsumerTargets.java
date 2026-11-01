@@ -27,7 +27,7 @@ public final class SableConsumerTargets {
     public static final int MAX_CANDIDATES=8;
     public static final double EPSILON=1.0/32.0;
     public enum Reason { VERIFIED, NO_NATIVE_FRAME, OWNER_MISMATCH, NO_SAMPLES,
-        INVALID_COORDINATE, CONTACT_FRAME_UNCORROBORATED, CHUNK_UNAVAILABLE, NO_SOLID_BLOCK, MULTIPLE_BLOCKS, TOO_MANY_CANDIDATES }
+        INVALID_COORDINATE, CONTACT_FRAME_UNCORROBORATED, CROSS_PHASE_UNCALIBRATED, CHUNK_UNAVAILABLE, NO_SOLID_BLOCK, MULTIPLE_BLOCKS, TOO_MANY_CANDIDATES }
     public record Result(GameImpactCredit.Target target, Reason reason, int checked, String stage) {
         public boolean verified(){return target!=null && reason==Reason.VERIFIED;}
     }
@@ -80,31 +80,28 @@ public final class SableConsumerTargets {
      * cross-record matches and exceeded the eight-candidate limit on ropes. */
     private static Result scan(MinecraftServer server,String dim,String owner,
                                List<NativeCollisionTelemetry.Contact> raw,boolean project,int maxChecks) {
-        final String stage=project?"R3_CROSS_SIDE":"R2_CORROBORATED_GAME_PROXY";
+        final String stage=project?"R3_CROSS_SIDE":"R2_SABLE_BODY_LOCAL";
+        // Rapier queues witness points across substeps but clearCollisions() supplies
+        // neither per-contact substep nor historical poses. Cross-body world
+        // projection is therefore not calibrated and must never mint Q.
         if(raw==null || raw.isEmpty())return new Result(null,Reason.NO_SAMPLES,0,stage);
+        if(project)return new Result(null,Reason.CROSS_PHASE_UNCALIBRATED,0,stage);
         Scan scan=new Scan();
         // Exact duplicate native points must not repeatedly consume the cap.
         // Never merge slightly different source positions before shape audit.
         var checkedPoints=new HashMap<AuditKey,OwnerResolver.Check>();
         for(var contact:raw) {
-            boolean a=matches(owner,contact.idA(),contact.frameA(),dim);
-            boolean b=matches(owner,contact.idB(),contact.frameB(),dim);
-            if(a==b)return new Result(null,Reason.OWNER_MISMATCH,scan.checked,stage);
-            // The two source-side effect points are compared only WITHIN this
-            // record, not across unrelated surface contacts.
-            if(!corroboratedContact(contact)) {
+            int sourceSide=sourceSide(owner,contact,dim);
+            if(sourceSide==0)return new Result(null,Reason.OWNER_MISMATCH,scan.checked,stage);
+            boolean a=sourceSide==1;
+            // Rapier local_p1/local_p2 are different witness points. Their
+            // world-space distance is never an R2 validity predicate.
+            if(!sourceRecordValid(contact)) {
                 scan.skipped++;
-                scan.missing=Reason.CONTACT_FRAME_UNCORROBORATED;
+                scan.missing=Reason.INVALID_COORDINATE;
                 continue;
             }
-            Vec point;
-            if(project) {
-                Vec world=worldPoint(contact,!a);
-                var frame=a?contact.frameA():contact.frameB();
-                int id=a?contact.idA():contact.idB();
-                try {point=id==-1?world:frame==null?null:frame.pose().toLocalPoint(world);}
-                catch(RuntimeException invalid) {point=null;}
-            } else point=candidate(contact,a);
+            Vec point=candidate(contact,a);
             if(point==null || !point.finite()) {
                 scan.skipped++;scan.missing=Reason.NO_NATIVE_FRAME;continue;
             }
@@ -145,20 +142,64 @@ public final class SableConsumerTargets {
                                       List<NativeCollisionTelemetry.Contact> raw) {
         return scan(server,dim,targetOwner,raw,true,MAX_GROUP_CHECKS);
     }
-    /** Compare the two source records in world coordinates, never by raw
-     * collider-local numerical equality. This is diagnostic, not a new target. */
+    /** Effect-phase projection is DIAGNOSTIC ONLY. Witness point separation
+     * can represent penetration, speculative contact and/or pose epoch drift;
+     * it is not the native contact's boolean validity predicate. */
     public record FrameResidual(Vec a,Vec b,Vec delta,double distance,String reason) {
-        public boolean corroborated() {return "MATCH".equals(reason);}
+        /** Legacy helper for diagnostic proximity only, never a credit gate. */
+        public boolean corroborated() {return "WITNESS_WITHIN_0.25".equals(reason);}
     }
     public static FrameResidual frameResidual(NativeCollisionTelemetry.Contact c) {
         if(c==null)return new FrameResidual(null,null,null,Double.NaN,"NULL_RECORD");
         Vec a=worldPoint(c,true),b=worldPoint(c,false);
         if(a==null || b==null || !a.finite() || !b.finite())
-            return new FrameResidual(a,b,null,Double.NaN,"MISSING_FRAME_OR_UNSUPPORTED_SCALE");
+            return new FrameResidual(a,b,null,Double.NaN,"EFFECT_POSE_UNAVAILABLE");
         Vec delta=a.minus(b);
         double distance=Math.sqrt(delta.squareLength());
         return new FrameResidual(a,b,delta,distance,
-                Double.isFinite(distance) && distance<=0.25?"MATCH":"WORLD_POINT_RESIDUAL_GT_0.25");
+                Double.isFinite(distance) && distance<=0.25
+                        ?"WITNESS_WITHIN_0.25":"WITNESS_SEPARATED_GT_0.25");
+    }
+    /** World-normal decomposition is diagnostic, not evidence of the original
+     * substep pose or signed Rapier penetration distance. */
+    public record WitnessDiagnostic(FrameResidual residual,double alongNormal,
+                                    double transverse,double normalAlignment,String reason) {}
+    public static WitnessDiagnostic witnessDiagnostic(NativeCollisionTelemetry.Contact c) {
+        FrameResidual residual=frameResidual(c);
+        if(c==null || residual.delta()==null || !Double.isFinite(residual.distance()))
+            return new WitnessDiagnostic(residual,Double.NaN,Double.NaN,Double.NaN,"NO_EFFECT_POSE");
+        Vec normalA=worldNormal(c,true),normalB=worldNormal(c,false);
+        Vec n=normalA!=null?normalA:normalB;
+        if(n==null)return new WitnessDiagnostic(residual,Double.NaN,Double.NaN,
+                Double.NaN,"NO_FINITE_NORMAL");
+        double along=Math.abs(residual.delta().dot(n));
+        double transverse=Math.sqrt(Math.max(0,residual.delta().squareLength()-along*along));
+        double alignment=normalA!=null && normalB!=null?normalA.dot(normalB):Double.NaN;
+        return new WitnessDiagnostic(residual,along,transverse,alignment,"EFFECT_PHASE_ONLY");
+    }
+    private static Vec worldNormal(NativeCollisionTelemetry.Contact c,boolean a) {
+        Vec raw=a?new Vec(c.ax(),c.ay(),c.az()):new Vec(c.bx(),c.by(),c.bz());
+        if(!raw.finite() || raw.squareLength()<1e-18)return null;
+        int id=a?c.idA():c.idB();
+        if(id==-1) {
+            try {return raw.unit();}catch(IllegalArgumentException bad){return null;}
+        }
+        var frame=a?c.frameA():c.frameB();
+        if(frame==null)return null;
+        try{return frame.pose().toWorldNormal(raw);}
+        catch(IllegalArgumentException bad){return null;}
+    }
+    /** Preserve source IDs, finite witness points and dimension. No cross-side
+     * proximity requirement: the actual R2 owner shape is checked per side. */
+    static boolean sourceRecordValid(NativeCollisionTelemetry.Contact c) {
+        return c!=null && c.idA()>=-1 && c.idB()>=-1 && c.idA()!=c.idB()
+                && (c.idA()>=0 || c.idB()>=0)
+                && c.dimension()!=null && !c.dimension().isBlank()
+                && new Vec(c.ax(),c.ay(),c.az()).finite()
+                && new Vec(c.bx(),c.by(),c.bz()).finite()
+                && new Vec(c.contactAX(),c.contactAY(),c.contactAZ()).finite()
+                && new Vec(c.contactBX(),c.contactBY(),c.contactBZ()).finite()
+                && Double.isFinite(c.rawImpactScalar()) && c.rawImpactScalar()>=0;
     }
     /** A bounded cross-side fallback may use the exact remaining group quota.
      * A limit hit returns TOO_MANY_CANDIDATES rather than a partial target. */
@@ -168,11 +209,10 @@ public final class SableConsumerTargets {
             throw new IllegalArgumentException("invalid remaining R3 budget");
         return scan(server,dim,targetOwner,raw,true,maxChecks);
     }
-    /** Same native record, two independent contact sides, effect-consumer phase.
-     * This is a necessary cross-check, not an exact solver collider-pose proof. */
+    /** Retained package-private entry for existing callers. Its meaning is
+     * source record well-formedness, NOT two witness points being identical. */
     static boolean corroboratedContact(NativeCollisionTelemetry.Contact c) {
-        if(c==null)return false;
-        return frameResidual(c).corroborated();
+        return sourceRecordValid(c);
     }
 
     /** Sable RapierPhysicsPipeline effect-particle position: pose.orientation
@@ -192,6 +232,14 @@ public final class SableConsumerTargets {
                 || Math.abs(pose.scale().z()-1)>1e-6)return null;
         try {return pose.toWorldPoint(raw.plus(pose.rotationPoint()));}
         catch(RuntimeException invalid){return null;}
+    }
+    /** 1=A, 2=B, 0=unverified. A native owner ID is not a Plot UUID;
+     * effect-phase UUID must match the already established owner identity. */
+    static int sourceSide(String owner,NativeCollisionTelemetry.Contact contact,String dim) {
+        if(contact==null || owner==null)return 0;
+        boolean a=matches(owner,contact.idA(),contact.frameA(),dim);
+        boolean b=matches(owner,contact.idB(),contact.frameB(),dim);
+        return a==b?0:a?1:2;
     }
     private static boolean matches(String owner,int id,OwnerFrame frame,String dimension) {
         if(owner==null)return false;

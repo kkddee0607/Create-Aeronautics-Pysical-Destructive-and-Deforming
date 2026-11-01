@@ -30,7 +30,8 @@ import static com.physicaldestroydeform.collision.RealFixBoundsEvidence.*;
  *
  * Source groups: original clearCollisions array observed by existing Mixin.
  * Source owners: Sable effect-phase activeSubLevels snapshots, cross-audited by pre-physics history.
- * Source targets: live block/shape audits of source-phase Sable-consumer R2/R3 candidates.
+ * Source targets: independent native Body-local owner R2 shape audits.
+ * No cross-substep world-point R3 credits without a native per-contact pose.
  * Source separation: positive gap in actual Sable world-space sublevel AABBs.
  *
  * The exact Sable consumer convention is not a general collider-pose calibration;
@@ -62,6 +63,8 @@ public final class RealFixRuntimeBridge {
         long lastSeparatedTick=-1;
         double lastPeak=Double.NaN;
         String lastVerfRegion="";
+        long lastPlotRogWitnessTick=-1;
+        long lastPlotRogEpochTick=-1;
         long lastVerfRegionTick=-1;
         String lastVerfFsm="";
         long lastVerfFsmTick=-1;
@@ -144,6 +147,7 @@ public final class RealFixRuntimeBridge {
         }
         final Map<SceneKey,ObservedTargets> targetEvidence=callbackTargets(server,callbacks);
         final Map<Stamp,OwnerSnapshot> ownerIndex=ownerSnapshots(pre);
+        final var massEpochs=new NativeContactMassEpoch(pre);
         final Map<String,Map<String,Box>> worldBounds=readServerBounds(server);
         invalidateUnloadedOwners(worldBounds);
         final Map<String,Box> knownWorldBlocks=new HashMap<>();
@@ -192,7 +196,8 @@ public final class RealFixRuntimeBridge {
                 // §21.4: inspect each native contact point once, in its own
                 // Sable consumer pose; aggregate only source-proven block keys.
                 // The whole owner/pair/tick has a strict 32-check/side budget.
-                var regions=SableContactRegions.audit(server,stamp.dimension,pair,records);
+                var massSafe=massEpochs.validate(stamp.dimension,stamp.tick,records);
+                var regions=SableContactRegions.audit(server,stamp.dimension,pair,massSafe.contacts());
                 Target a=regions.verified()?regions.firstA():null;
                 Target b=regions.verified()?regions.firstB():null;
                 if(regions.status()==SableContactRegions.Status.TOO_BROAD)multiTooBroad++;
@@ -265,13 +270,38 @@ public final class RealFixRuntimeBridge {
                             sampleContact(records),sampleConsumerPoint(records,true),
                             sampleConsumerPoint(records,false),
                             sampleFrame(records,true),sampleFrame(records,false));
-                    if(trace.detail().contains("frameReason="))
-                        log.info("[PDD-FIX-FRAME] nativeTick={} serverTick={} bodyIds={}/{} " +
-                                "pair={}/{} firstMismatchedRecord={} " +
-                                "policy=UNMATCHED_POINTS_NEVER_CREDITED mutation=OFF",
-                                stamp.tick,now,group.runtimePair().lowId(),group.runtimePair().highId(),
-                                pair.a().stableKey(),pair.b().stableKey(),trace.detail());
                     t.lastVerfRegion=regionSignature;t.lastVerfRegionTick=now;
+                }
+                if(VERF_ENABLED && massSafe.maskedFrames()>0 &&
+                        (t.lastPlotRogEpochTick<0 || now-t.lastPlotRogEpochTick>=VERF_SAMPLE_TICKS)) {
+                    log.info("[PDD-PLOTROG-EPOCH] nativeTick={} serverTick={} pair={}/{} " +
+                                    "maskedOwnerFrames={} sourceRecords={} policy=UNSTABLE_COM_SIDE_Q_ZERO mutation=OFF",
+                            stamp.tick,now,pair.a().stableKey(),pair.b().stableKey(),
+                            massSafe.maskedFrames(),records.size());
+                    t.lastPlotRogEpochTick=now;
+                }
+                // Sample witness separation independent of whether R2 approved.
+                // Effect-phase projected points may span different substeps;
+                // never turn this diagnostic into a hard contact gate.
+                if(VERF_ENABLED && (t.lastPlotRogWitnessTick<0 || now-t.lastPlotRogWitnessTick>=VERF_SAMPLE_TICKS)) {
+                    for(int i=0;i<records.size();i++) {
+                        var contact=records.get(i);
+                        var wd=SableConsumerTargets.witnessDiagnostic(contact);
+                        if("WITNESS_SEPARATED_GT_0.25".equals(wd.residual().reason())) {
+                            log.info("[PDD-PLOTROG-WITNESS] nativeTick={} serverTick={} bodyIds={}/{} " +
+                                    "sourceIndex={} sourceRecords={} ownerA={} ownerB={} " +
+                                    "worldA={} worldB={} delta={} distance={} alongNormal={} " +
+                                    "transverse={} normalAlignment={} diagnosis={} r2Status={} " +
+                                    "policy=INDEPENDENT_OWNER_LOCAL_R2_NO_DISTANCE_GATE mutation=OFF",
+                                    stamp.tick,now,contact.idA(),contact.idB(),i,records.size(),
+                                    pair.a().stableKey(),pair.b().stableKey(),
+                                    wd.residual().a(),wd.residual().b(),wd.residual().delta(),
+                                    wd.residual().distance(),wd.alongNormal(),wd.transverse(),
+                                    wd.normalAlignment(),wd.reason(),regions.status());
+                            t.lastPlotRogWitnessTick=now;
+                            break;
+                        }
+                    }
                 }
                 if(lines++<MAX_LOG_PER_TICK) log.info("[PDD-NATIVE-TARGET] dim={} tick={} ownerA={} ownerB={} methodA={} reasonA={} checkedA={} methodB={} reasonB={} checkedB={} regionCount={} rejectedPoints={} callbackHintA={} callbackHintB={} worldMutation=OFF",
                         stamp.dimension,stamp.tick,pair.a().stableKey(),pair.b().stableKey(),
@@ -413,12 +443,13 @@ public final class RealFixRuntimeBridge {
             generations.entrySet().removeIf(e->!e.getValue().present
                     && e.getValue().lastSeen>=0 && now-e.getValue().lastSeen>600);
             tracked.entrySet().removeIf(e->now>e.getValue().lastSeen && now-e.getValue().lastSeen>600);
-            log.info("[PDD-0.3.1fix] phase=SUMMARY observed={} credited={} zero={} ownerMissing={} targetMissing={} ambiguous={} trackedPairs={} r2Verified={} r2Rejected={} r3Verified={} prearmed={} r1Fallback={} regionGroups={} regionCount={} regionTooBroad={} ledgerRejected={} activeCredits={} observerErrors={} nativeDropped={} nativeMalformed={} callbackDropped={} preHistoryDropped={} generation=IDS-1.0.5-A mutation=OFF",
+            log.info("[PDD-0.3.1plotRog] phase=SUMMARY observed={} credited={} zero={} ownerMissing={} targetMissing={} ambiguous={} trackedPairs={} r2Verified={} r2Rejected={} r3Verified={} prearmed={} r1Fallback={} regionGroups={} regionCount={} regionTooBroad={} ledgerRejected={} activeCredits={} observerErrors={} nativeDropped={} nativeMalformed={} nativeCapSaturatedPolls={} callbackDropped={} preHistoryDropped={} generation=IDS-1.0.5-A mutation=OFF",
                     observed,credited,zero,missingOwner,missingTarget,ambiguousOwners,tracked.size(),
                     r2Verified,r2Rejected,r3Verified,prearmed,r1Fallback,
                     multiGroupCredits,multiRegions,multiTooBroad,ledgerRejected,regionLedger.size(),
                     NativeCollisionTelemetry.observerErrors(),
                     NativeCollisionTelemetry.dropped(),NativeCollisionTelemetry.malformed(),
+                    NativeCollisionTelemetry.nativeCapSaturatedPolls(),
                     com.physicaldestroydeform.diagnostics.SableContactQueue.dropped(),SableFrameCapture.preHistoryDropped());
         }
     }

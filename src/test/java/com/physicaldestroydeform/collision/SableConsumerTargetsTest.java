@@ -28,34 +28,43 @@ final class SableConsumerTargetsTest {
         assertEquals(new BlockPos(512,64,1024),SableConsumerTargets.cells(SableConsumerTargets.candidate(c,true)).getFirst());
         assertEquals(new BlockPos(50,70,-80),SableConsumerTargets.cells(SableConsumerTargets.candidate(c,false)).getFirst());
     }
-    @Test void twoEffectPointsNeedIndependentWorldSpaceCorroboration() {
+    @Test void twoWitnessPointsAreIndependentlyValidWithoutDistanceGate() {
         assertTrue(SableConsumerTargets.corroboratedContact(contact()));
         var differentWorldPoint=new NativeCollisionTelemetry.Contact(7,-1,42,1,0,0,-1,0,0,
                 0.375,0.5,0.25,51.375,70.5,-79.75,
                 "minecraft:overworld",33,plotFrame(),null);
-        assertFalse(SableConsumerTargets.corroboratedContact(differentWorldPoint));
+        assertTrue(SableConsumerTargets.corroboratedContact(differentWorldPoint));
+        assertEquals(1,SableConsumerTargets.sourceSide("PLOT:"+PLOT,differentWorldPoint,"minecraft:overworld"));
+        assertEquals(2,SableConsumerTargets.sourceSide("WORLD:minecraft:overworld",differentWorldPoint,"minecraft:overworld"));
         var unknownPlotFrame=new NativeCollisionTelemetry.Contact(7,-1,42,1,0,0,-1,0,0,
                 0.375,0.5,0.25,50.375,70.5,-79.75,"minecraft:overworld",33);
-        assertFalse(SableConsumerTargets.corroboratedContact(unknownPlotFrame));
+        assertTrue(SableConsumerTargets.corroboratedContact(unknownPlotFrame));
+        assertEquals(0,SableConsumerTargets.sourceSide("PLOT:"+PLOT,unknownPlotFrame,"minecraft:overworld"));
+        assertEquals(2,SableConsumerTargets.sourceSide("WORLD:minecraft:overworld",unknownPlotFrame,"minecraft:overworld"));
     }
-    @Test void frameResidualRecordsBothWorldPointsWithoutApprovingMismatch() {
+    @Test void frameResidualIsDiagnosticNotSourceValidity() {
         var original=contact();
         var matched=SableConsumerTargets.frameResidual(original);
-        assertEquals("MATCH",matched.reason());
+        assertEquals("WITNESS_WITHIN_0.25",matched.reason());
         assertEquals(0.0,matched.distance());
         var shifted=new NativeCollisionTelemetry.Contact(7,-1,42,1,0,0,-1,0,0,
                 0.375,0.5,0.25,51.375,70.5,-79.75,
                 "minecraft:overworld",33,plotFrame(),null);
         var mismatch=SableConsumerTargets.frameResidual(shifted);
-        assertEquals("WORLD_POINT_RESIDUAL_GT_0.25",mismatch.reason());
+        assertEquals("WITNESS_SEPARATED_GT_0.25",mismatch.reason());
         assertEquals(1.0,mismatch.distance());
         assertEquals(-1.0,mismatch.delta().x());
         assertFalse(mismatch.corroborated());
+        assertTrue(SableConsumerTargets.sourceRecordValid(shifted));
+        var diagnostic=SableConsumerTargets.witnessDiagnostic(shifted);
+        assertEquals(1.0,diagnostic.alongNormal(),1e-10);
+        assertEquals(0.0,diagnostic.transverse(),1e-10);
+        assertEquals(-1.0,diagnostic.normalAlignment(),1e-10);
     }
-    @Test void boundedR3RejectsWhenActualQuotaIsAlreadyZero() {
+    @Test void crossSubstepR3DoesNotMintCredit() {
         var result=SableConsumerTargets.crossProject(null,"minecraft:overworld",
                 "WORLD:minecraft:overworld",List.of(contact()),0);
-        assertEquals(SableConsumerTargets.Reason.TOO_MANY_CANDIDATES,result.reason());
+        assertEquals(SableConsumerTargets.Reason.CROSS_PHASE_UNCALIBRATED,result.reason());
         assertEquals(0,result.checked());
         assertFalse(result.verified());
     }
@@ -101,6 +110,14 @@ final class SableConsumerTargetsTest {
         var r=missing.finish("R3");
         assertFalse(r.verified());
         assertEquals(SableConsumerTargets.Reason.TOO_MANY_CANDIDATES,r.reason());
+    }
+    @Test void malformedSourceDoesNotBecomeVerifiedByAValidWorldPoint() {
+        var c=contact();
+        var invalid=new NativeCollisionTelemetry.Contact(7,-1,42,1,0,0,-1,0,0,
+                Double.NaN,0,0,c.contactBX(),c.contactBY(),c.contactBZ(),
+                "minecraft:overworld",33,plotFrame(),null);
+        assertFalse(SableConsumerTargets.sourceRecordValid(invalid));
+        assertEquals(0,SableConsumerTargets.sourceSide("PLOT:missing",contact(),"minecraft:overworld"));
     }
     @Test void missingOwnerFrameDoesNotBecomeWorldSpace() {
         var c=new NativeCollisionTelemetry.Contact(7,-1,42,1,0,0,-1,0,0,
