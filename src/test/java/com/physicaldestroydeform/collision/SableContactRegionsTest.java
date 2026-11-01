@@ -44,6 +44,52 @@ final class SableContactRegionsTest {
         assertEquals(SableContactRegions.Status.TOO_BROAD,result.status());
         assertEquals(0,result.regions().size());
     }
+    @Test void overLimitOnOneSideQuarantinesOnlyThatSide() {
+        var points=new ArrayList<NativeCollisionTelemetry.Contact>();
+        for(int i=0;i<6;i++)points.add(contact(i));
+        var result=SableContactRegions.collect(PAIR,points,
+                (record,owner,remaining)->new SableContactRegions.Check(
+                        List.of(target(owner,owner.equals(PAIR.a().stableKey())?1:(int)record.contactAX())),1));
+        assertEquals(SableContactRegions.Status.PARTIAL,result.status());
+        assertEquals(SableContactRegions.AuditFailure.TARGET_LIMIT_B,result.trace().failure());
+        assertEquals(1,result.regions().size());
+        assertNotNull(result.firstA());
+        assertNull(result.firstB());
+        assertTrue(result.trace().detail().contains("overflowB=true"));
+    }
+    @Test void partialOversizeSideNeverMintsThatSideAllocation() {
+        var points=new ArrayList<NativeCollisionTelemetry.Contact>();
+        for(int i=0;i<6;i++)points.add(contact(i));
+        var result=SableContactRegions.collect(PAIR,points,
+                (record,owner,remaining)->new SableContactRegions.Check(
+                        List.of(target(owner,owner.equals(PAIR.a().stableKey())?1:(int)record.contactAX())),1));
+        var policy=new GameImpactCredit(GameImpactCredit.Settings.provisional());
+        policy.step(new GameImpactCredit.Frame(PAIR,1,List.of(),true,false,null,null));
+        policy.step(new GameImpactCredit.Frame(PAIR,2,List.of(),true,false,null,null));
+        var decision=policy.step(new GameImpactCredit.Frame(PAIR,3,
+                List.of(new GameImpactCredit.ObservedForce(1,2,42,0)),false,true,result.firstA(),result.firstB()));
+        assertTrue(decision.credited());
+        var grant=new ContactCreditLedger().issue(PAIR,decision,
+                ContactCreditLedger.Source.SABLE_POST_EFFECT,result.regions());
+        assertEquals(ContactCreditLedger.Status.ISSUED,grant.status());
+        assertEquals(5.0,grant.allocatedA());
+        assertEquals(0.0,grant.allocatedB());
+        assertEquals(5.0,grant.unused());
+    }
+    @Test void regionCardinalityCompactsToBoundedOwnerSideRegions() {
+        var input=new ArrayList<NativeCollisionTelemetry.Contact>();
+        for(int i=0;i<17;i++)input.add(contact(i));
+        var result=SableContactRegions.collect(PAIR,input,(record,owner,remaining)-> {
+            int index=(int)record.contactAX();
+            if(index<16)return new SableContactRegions.Check(List.of(
+                    target(owner,owner.equals(PAIR.a().stableKey())?index/4:index%4)),1);
+            return new SableContactRegions.Check(List.of(target(owner,0),target(owner,1)),1);
+        });
+        assertTrue(result.verified());
+        assertEquals(8,result.regions().size());
+        assertTrue(result.regions().stream().allMatch(r->(r.a()==null)!=(r.b()==null)));
+        assertTrue(result.trace().detail().contains("compactedRegions=true"));
+    }
     @Test void nonMatchingContactFrameRejected() {
         var bad=new NativeCollisionTelemetry.Contact(7,-1,42,0,0,0,0,0,0,
                 0,0,0,10,0,0,"minecraft:overworld",9);

@@ -247,7 +247,7 @@ public final class RealFixRuntimeBridge {
                 // Diagnostic-only, sampled per pair/rejection cause so resting
                 // contact cannot flood a small server's log every physics tick.
                 var trace=regions.trace();
-                String regionSignature=regions.status()+":"+trace.failure()+":"+trace.detail();
+                String regionSignature=regions.status()+":"+trace.failure();
                 if(VERF_ENABLED && regions.status()!=SableContactRegions.Status.PROVED
                         && ( !regionSignature.equals(t.lastVerfRegion)
                         || now-t.lastVerfRegionTick>=VERF_SAMPLE_TICKS)) {
@@ -265,6 +265,12 @@ public final class RealFixRuntimeBridge {
                             sampleContact(records),sampleConsumerPoint(records,true),
                             sampleConsumerPoint(records,false),
                             sampleFrame(records,true),sampleFrame(records,false));
+                    if(trace.detail().contains("frameReason="))
+                        log.info("[PDD-FIX-FRAME] nativeTick={} serverTick={} bodyIds={}/{} " +
+                                "pair={}/{} firstMismatchedRecord={} " +
+                                "policy=UNMATCHED_POINTS_NEVER_CREDITED mutation=OFF",
+                                stamp.tick,now,group.runtimePair().lowId(),group.runtimePair().highId(),
+                                pair.a().stableKey(),pair.b().stableKey(),trace.detail());
                     t.lastVerfRegion=regionSignature;t.lastVerfRegionTick=now;
                 }
                 if(lines++<MAX_LOG_PER_TICK) log.info("[PDD-NATIVE-TARGET] dim={} tick={} ownerA={} ownerB={} methodA={} reasonA={} checkedA={} methodB={} reasonB={} checkedB={} regionCount={} rejectedPoints={} callbackHintA={} callbackHintB={} worldMutation=OFF",
@@ -407,7 +413,7 @@ public final class RealFixRuntimeBridge {
             generations.entrySet().removeIf(e->!e.getValue().present
                     && e.getValue().lastSeen>=0 && now-e.getValue().lastSeen>600);
             tracked.entrySet().removeIf(e->now>e.getValue().lastSeen && now-e.getValue().lastSeen>600);
-            log.info("[PDD-0.3.1verf] phase=SUMMARY observed={} credited={} zero={} ownerMissing={} targetMissing={} ambiguous={} trackedPairs={} r2Verified={} r2Rejected={} r3Verified={} prearmed={} r1Fallback={} regionGroups={} regionCount={} regionTooBroad={} ledgerRejected={} activeCredits={} observerErrors={} nativeDropped={} nativeMalformed={} callbackDropped={} preHistoryDropped={} generation=IDS-1.0.5-A mutation=OFF",
+            log.info("[PDD-0.3.1fix] phase=SUMMARY observed={} credited={} zero={} ownerMissing={} targetMissing={} ambiguous={} trackedPairs={} r2Verified={} r2Rejected={} r3Verified={} prearmed={} r1Fallback={} regionGroups={} regionCount={} regionTooBroad={} ledgerRejected={} activeCredits={} observerErrors={} nativeDropped={} nativeMalformed={} callbackDropped={} preHistoryDropped={} generation=IDS-1.0.5-A mutation=OFF",
                     observed,credited,zero,missingOwner,missingTarget,ambiguousOwners,tracked.size(),
                     r2Verified,r2Rejected,r3Verified,prearmed,r1Fallback,
                     multiGroupCredits,multiRegions,multiTooBroad,ledgerRejected,regionLedger.size(),

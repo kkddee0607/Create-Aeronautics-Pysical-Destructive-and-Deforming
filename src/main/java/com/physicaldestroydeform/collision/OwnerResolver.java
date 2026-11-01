@@ -13,6 +13,7 @@ import net.minecraft.world.phys.shapes.VoxelShape;
 import com.physicaldestroydeform.collision.FrameMath.Vec;
 
 import java.util.UUID;
+import java.util.HashMap;
 import java.util.Map;
 import static com.physicaldestroydeform.collision.CollisionFrame.*;
 
@@ -105,6 +106,72 @@ public final class OwnerResolver {
                     "SABLE_EFFECT_CONSUMER_ALLOCATED_GRID");
             return check(level,container,proposed,null,nativeOwnerPoint);
         } catch(RuntimeException unsafe){return Check.failed(Status.OWNER_UNRESOLVED,"NATIVE_AUDIT_ERROR");}
+    }
+
+    /**
+     * One native contact GROUP, one read-only snapshot of each owner/cell.
+     * Reuse the expensive owner/block/shape lookup but NEVER reuse a point's
+     * proximity result for another point. Caller charges only newly seen cells.
+     * Do not retain across ticks, groups, or world mutation boundaries.
+     */
+    public static final class NativeAuditBatch {
+        private final MinecraftServer server;
+        private final String dimension;
+        private final Map<CellKey, Cell> cells=new HashMap<>();
+        private record CellKey(String owner,BlockPos pos) {}
+        private record Cell(Check identity,VoxelShape shape,BlockPos shapePos) {}
+        public record Sample(Check result,boolean newCell) {}
+        public NativeAuditBatch(MinecraftServer server,String dimension) {
+            this.server=server;this.dimension=dimension;
+        }
+        public boolean cached(String owner,BlockPos pos) {
+            return cells.containsKey(new CellKey(owner,pos));
+        }
+        public int cachedCells(){return cells.size();}
+        public Sample inspect(String owner,BlockPos pos,Vec point) {
+            var key=new CellKey(owner,pos);
+            Cell evidence=cells.get(key);
+            boolean added=evidence==null;
+            if(added) {
+                // Structural identity and live BlockState are checked once.
+                Check basic=auditNative(server,dimension,owner,pos,null);
+                VoxelShape shape=null;
+                BlockPos relative=pos;
+                if(basic.verified()) {
+                    try {
+                        ServerLevel level=null;
+                        for(var candidate:server.getAllLevels())
+                            if(candidate.dimension().location().toString().equals(dimension)) {level=candidate;break;}
+                        if(level==null)throw new IllegalStateException("dimension lost");
+                        if(owner.startsWith("WORLD:")) {
+                            shape=level.getBlockState(pos).getCollisionShape(level,pos);
+                        } else {
+                            var container=SubLevelContainer.getContainer(level);
+                            UUID id=UUID.fromString(owner.substring(5));
+                            var sub=container.getSubLevel(id);
+                            if(sub==null || sub.isRemoved())
+                                throw new IllegalStateException("owner changed");
+                            var plot=sub.getPlot();
+                            BlockPos accessorPos=new BlockPos(basic.key().x(),basic.key().y(),basic.key().z());
+                            shape=plot.getEmbeddedLevelAccessor().getBlockState(accessorPos)
+                                    .getCollisionShape(plot.getEmbeddedLevelAccessor(),accessorPos);
+                        }
+                        if(shape==null || shape.isEmpty())
+                            basic=Check.failed(Status.BLOCK_UNAVAILABLE,"CACHE_SHAPE_MISSING");
+                    } catch(RuntimeException ex) {
+                        basic=Check.failed(Status.OWNER_CHANGED,"CACHE_OWNER_OR_SHAPE_CHANGED");
+                        shape=null;
+                    }
+                }
+                evidence=new Cell(basic,shape,relative);
+                cells.put(key,evidence);
+            }
+            Check structural=evidence.identity();
+            if(!structural.verified())return new Sample(structural,added);
+            if(!nearShape(evidence.shape(),point,evidence.shapePos()))
+                return new Sample(Check.failed(Status.BLOCK_MISMATCH,"CACHED_SHAPE_POINT_MISS"),added);
+            return new Sample(structural,added);
+        }
     }
 
     /** A source point must be on/in the actual collision shape of that owner

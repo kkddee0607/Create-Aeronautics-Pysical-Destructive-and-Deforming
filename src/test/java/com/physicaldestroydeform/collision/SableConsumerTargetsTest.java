@@ -38,6 +38,27 @@ final class SableConsumerTargetsTest {
                 0.375,0.5,0.25,50.375,70.5,-79.75,"minecraft:overworld",33);
         assertFalse(SableConsumerTargets.corroboratedContact(unknownPlotFrame));
     }
+    @Test void frameResidualRecordsBothWorldPointsWithoutApprovingMismatch() {
+        var original=contact();
+        var matched=SableConsumerTargets.frameResidual(original);
+        assertEquals("MATCH",matched.reason());
+        assertEquals(0.0,matched.distance());
+        var shifted=new NativeCollisionTelemetry.Contact(7,-1,42,1,0,0,-1,0,0,
+                0.375,0.5,0.25,51.375,70.5,-79.75,
+                "minecraft:overworld",33,plotFrame(),null);
+        var mismatch=SableConsumerTargets.frameResidual(shifted);
+        assertEquals("WORLD_POINT_RESIDUAL_GT_0.25",mismatch.reason());
+        assertEquals(1.0,mismatch.distance());
+        assertEquals(-1.0,mismatch.delta().x());
+        assertFalse(mismatch.corroborated());
+    }
+    @Test void boundedR3RejectsWhenActualQuotaIsAlreadyZero() {
+        var result=SableConsumerTargets.crossProject(null,"minecraft:overworld",
+                "WORLD:minecraft:overworld",List.of(contact()),0);
+        assertEquals(SableConsumerTargets.Reason.TOO_MANY_CANDIDATES,result.reason());
+        assertEquals(0,result.checked());
+        assertFalse(result.verified());
+    }
     @Test void sameContactIsCorrectWithRotatedPlotPose() {
         double c=Math.sqrt(0.5);
         var f=new NativeCollisionTelemetry.OwnerFrame(PLOT,new FrameMath.Pose(

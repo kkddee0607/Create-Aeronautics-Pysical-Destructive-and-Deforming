@@ -79,7 +79,7 @@ public final class SableConsumerTargets {
      * point. Previously mixing points from unrelated manifolds could invent
      * cross-record matches and exceeded the eight-candidate limit on ropes. */
     private static Result scan(MinecraftServer server,String dim,String owner,
-                               List<NativeCollisionTelemetry.Contact> raw,boolean project) {
+                               List<NativeCollisionTelemetry.Contact> raw,boolean project,int maxChecks) {
         final String stage=project?"R3_CROSS_SIDE":"R2_CORROBORATED_GAME_PROXY";
         if(raw==null || raw.isEmpty())return new Result(null,Reason.NO_SAMPLES,0,stage);
         Scan scan=new Scan();
@@ -120,7 +120,7 @@ public final class SableConsumerTargets {
                 var auditKey=new AuditKey(position,point);
                 var evidence=checkedPoints.get(auditKey);
                 if(evidence==null) {
-                    if(scan.checked>=MAX_GROUP_CHECKS)
+                    if(scan.checked>=maxChecks)
                         return new Result(null,Reason.TOO_MANY_CANDIDATES,scan.checked,stage);
                     evidence=OwnerResolver.auditNative(server,dim,owner,position,point);
                     checkedPoints.put(auditKey,evidence);
@@ -139,19 +139,40 @@ public final class SableConsumerTargets {
     }
     public static Result resolve(MinecraftServer server,String dim,String stableOwner,
                                  List<NativeCollisionTelemetry.Contact> raw) {
-        return scan(server,dim,stableOwner,raw,false);
+        return scan(server,dim,stableOwner,raw,false,MAX_GROUP_CHECKS);
     }
     public static Result crossProject(MinecraftServer server,String dim,String targetOwner,
                                       List<NativeCollisionTelemetry.Contact> raw) {
-        return scan(server,dim,targetOwner,raw,true);
+        return scan(server,dim,targetOwner,raw,true,MAX_GROUP_CHECKS);
+    }
+    /** Compare the two source records in world coordinates, never by raw
+     * collider-local numerical equality. This is diagnostic, not a new target. */
+    public record FrameResidual(Vec a,Vec b,Vec delta,double distance,String reason) {
+        public boolean corroborated() {return "MATCH".equals(reason);}
+    }
+    public static FrameResidual frameResidual(NativeCollisionTelemetry.Contact c) {
+        if(c==null)return new FrameResidual(null,null,null,Double.NaN,"NULL_RECORD");
+        Vec a=worldPoint(c,true),b=worldPoint(c,false);
+        if(a==null || b==null || !a.finite() || !b.finite())
+            return new FrameResidual(a,b,null,Double.NaN,"MISSING_FRAME_OR_UNSUPPORTED_SCALE");
+        Vec delta=a.minus(b);
+        double distance=Math.sqrt(delta.squareLength());
+        return new FrameResidual(a,b,delta,distance,
+                Double.isFinite(distance) && distance<=0.25?"MATCH":"WORLD_POINT_RESIDUAL_GT_0.25");
+    }
+    /** A bounded cross-side fallback may use the exact remaining group quota.
+     * A limit hit returns TOO_MANY_CANDIDATES rather than a partial target. */
+    public static Result crossProject(MinecraftServer server,String dim,String targetOwner,
+                                      List<NativeCollisionTelemetry.Contact> raw,int maxChecks) {
+        if(maxChecks<0 || maxChecks>MAX_GROUP_CHECKS)
+            throw new IllegalArgumentException("invalid remaining R3 budget");
+        return scan(server,dim,targetOwner,raw,true,maxChecks);
     }
     /** Same native record, two independent contact sides, effect-consumer phase.
      * This is a necessary cross-check, not an exact solver collider-pose proof. */
     static boolean corroboratedContact(NativeCollisionTelemetry.Contact c) {
         if(c==null)return false;
-        Vec a=worldPoint(c,true), b=worldPoint(c,false);
-        return a!=null && b!=null && a.finite() && b.finite()
-                && a.minus(b).squareLength() <= 0.25*0.25;
+        return frameResidual(c).corroborated();
     }
 
     /** Sable RapierPhysicsPipeline effect-particle position: pose.orientation

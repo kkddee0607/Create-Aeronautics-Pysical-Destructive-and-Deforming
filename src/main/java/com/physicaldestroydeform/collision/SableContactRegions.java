@@ -30,7 +30,7 @@ public final class SableContactRegions {
         }
         public Check {
             targets=List.copyOf(targets);
-            if(inspected<0 || inspected>16)throw new IllegalArgumentException("unbounded contact audit");
+            if(inspected<0 || inspected>MAX_CHECKS_PER_SIDE)throw new IllegalArgumentException("unbounded contact audit");
         }
     }
     @FunctionalInterface public interface Inspector {
@@ -73,7 +73,8 @@ public final class SableContactRegions {
                                List<NativeCollisionTelemetry.Contact> records) {
         // Repeated identical native points share shape audits, not credit.
         var cache=new HashMap<AuditKey,Check>();
-        return collect(pair,records,(contact,owner,remainingChecks)-> {
+        var nativeBatch=new OwnerResolver.NativeAuditBatch(server,dimension);
+        Result collected=collect(pair,records,(contact,owner,remainingChecks)-> {
             boolean onA=matches(contact.idA(),contact.frameA(),owner,dimension);
             boolean onB=matches(contact.idB(),contact.frameB(),owner,dimension);
             if(onA==onB)return new Check(List.of(),0,false,"UNVERIFIED","OWNER_FRAME_MISMATCH");
@@ -83,35 +84,50 @@ public final class SableContactRegions {
             var prior=cache.get(key);
             if(prior!=null)return new Check(prior.targets(),0,false,prior.method(),prior.detail());
             var positions=SableConsumerTargets.cells(point);
-            if(positions.size()>remainingChecks)
-                return new Check(List.of(),0,true,"UNVERIFIED",
-                        "R2_CELL_BUDGET planned="+positions.size()+" remaining="+remainingChecks);
             var found=new LinkedHashSet<GameImpactCredit.Target>();
-            int checked=0;
+            int checked=0,reused=0;
             for(var pos:positions){
-                var evidence=OwnerResolver.auditNative(server,dimension,owner,pos,point);
-                checked++;
+                // Only a *new owner/cell* consumes a block lookup budget.
+                // Every source point still passes the actual cached shape check.
+                if(!nativeBatch.cached(owner,pos) && checked>=remainingChecks)
+                    return new Check(List.of(),checked,true,"UNVERIFIED",
+                            "R2_UNIQUE_CELL_BUDGET requested="+positions.size()
+                            +" examinedNew="+checked+" remaining="+remainingChecks);
+                var sampled=nativeBatch.inspect(owner,pos,point);
+                if(sampled.newCell())checked++;else reused++;
+                var evidence=sampled.result();
                 if(evidence.verified()) {
                     var targetKey=evidence.key();
                     found.add(new GameImpactCredit.Target(owner,targetKey.x()+","+targetKey.y()+","+targetKey.z(),targetKey.fingerprint()));
                 }
             }
             Check result;
-            if(!found.isEmpty())result=new Check(new ArrayList<>(found),checked,false,"R2_CONTACT_REGION","R2_SHAPE_VERIFIED");
+            if(!found.isEmpty())result=new Check(new ArrayList<>(found),checked,false,"R2_CONTACT_REGION",
+                    "R2_SHAPE_VERIFIED reusedCells="+reused);
             else {
-                if(remainingChecks-checked<SableConsumerTargets.MAX_CANDIDATES)
-                    return new Check(List.of(),checked,true,"UNVERIFIED",
-                            "R3_RESERVE_BUDGET remaining="+(remainingChecks-checked)
-                            +" needed="+SableConsumerTargets.MAX_CANDIDATES);
-                var cross=SableConsumerTargets.crossProject(server,dimension,owner,List.of(contact));
+                // R3 may genuinely need only one cell, so avoid pessimistic
+                // reserving all eight candidate checks up front. An exhausted
+                // fallback is still a hard fail-closed incomplete audit.
+                var cross=SableConsumerTargets.crossProject(server,dimension,owner,List.of(contact),
+                        remainingChecks-checked);
+                if(cross.reason()==SableConsumerTargets.Reason.TOO_MANY_CANDIDATES)
+                    return new Check(List.of(),checked+cross.checked(),true,"UNVERIFIED",
+                            "R3_ACTUAL_CHECK_BUDGET attempted="+cross.checked()+" remaining="+(remainingChecks-checked));
                 result=new Check(cross.verified()?List.of(cross.target()):List.of(),
-                        Math.min(16,checked+cross.checked()),false,
+                        checked+cross.checked(),false,
                         cross.verified()?"R3_CROSS_SIDE_REGION":"UNVERIFIED",
                         cross.verified()?"R3_SHAPE_VERIFIED":"R2_R3_NO_SHAPE:"+cross.reason());
             }
             cache.put(key,result);
             return result;
         });
+        var t=collected.trace();
+        var t2=new Trace(t.failure(),t.sourceIndex(),t.processedRecords(),
+                t.remainingA(),t.remainingB(),t.requestedA(),t.requestedB(),
+                t.verifiedTargetsA(),t.verifiedTargetsB(),t.regionCount(),t.rejectedContacts(),
+                t.detail()+" auditedUniqueOwnerCells="+nativeBatch.cachedCells());
+        return new Result(collected.regions(),collected.status(),collected.checksA(),collected.checksB(),
+                collected.rejected(),collected.methodA(),collected.methodB(),t2);
     }
     private record AuditKey(String owner, FrameMath.Vec point,
                             NativeCollisionTelemetry.OwnerFrame frame) {}
@@ -128,16 +144,31 @@ public final class SableContactRegions {
         var targetsA=new LinkedHashSet<GameImpactCredit.Target>();
         var targetsB=new LinkedHashSet<GameImpactCredit.Target>();
         int checkedA=0,checkedB=0,skipped=0,processed=0,uncorroborated=0,emptyChecks=0;
+        boolean exceededA=false,exceededB=false,regionCompacted=false;
+        int overflowIndex=-1,overflowCountA=0,overflowCountB=0;
+        String firstFrameMismatch="NONE";
         String firstEmptyA="NONE",firstEmptyB="NONE";
         String methodA="UNVERIFIED",methodB="UNVERIFIED";
         for(var record:records) {
             int index=processed++;
             if(record==null || !SableConsumerTargets.corroboratedContact(record)) {
+                if(firstFrameMismatch.equals("NONE")) {
+                    var residue=SableConsumerTargets.frameResidual(record);
+                    firstFrameMismatch="nativeRecord="+index+" frameReason="+residue.reason()
+                            +" rawA="+(record==null?"NULL":("("+record.contactAX()+","+record.contactAY()+","+record.contactAZ()+")"))
+                            +" rawB="+(record==null?"NULL":("("+record.contactBX()+","+record.contactBY()+","+record.contactBZ()+")"))
+                            +" nativeFrameA="+(record==null?"NULL":record.frameA())
+                            +" nativeFrameB="+(record==null?"NULL":record.frameB())
+                            +" worldA="+residue.a()+" worldB="+residue.b()
+                            +" worldDelta="+residue.delta()+" distance="+residue.distance();
+                }
                 skipped++;uncorroborated++;continue;
             }
             int remainA=MAX_CHECKS_PER_SIDE-checkedA,remainB=MAX_CHECKS_PER_SIDE-checkedB;
-            Check a=inspector.verify(record,pair.a().stableKey(),remainA);
-            Check b=inspector.verify(record,pair.b().stableKey(),remainB);
+            Check a=exceededA?new Check(List.of(),0,false,"UNVERIFIED","TARGET_LIMIT_A_SIDE_QUARANTINED")
+                    :inspector.verify(record,pair.a().stableKey(),remainA);
+            Check b=exceededB?new Check(List.of(),0,false,"UNVERIFIED","TARGET_LIMIT_B_SIDE_QUARANTINED")
+                    :inspector.verify(record,pair.b().stableKey(),remainB);
             int askedA=a==null?0:a.inspected(),askedB=b==null?0:b.inspected();
             if(a==null||b==null || a.incomplete() || b.incomplete()) {
                 AuditFailure why=a==null||a.incomplete()?
@@ -176,38 +207,60 @@ public final class SableContactRegions {
                             "target_owner="+target.ownerKey());
                 targetsB.add(target);
             }
-            if(targetsA.size()>ContactCreditLedger.MAX_TARGETS_PER_SIDE
-                    ||targetsB.size()>ContactCreditLedger.MAX_TARGETS_PER_SIDE)
+            // If one side has >4 real targets, NEVER concentrate its Q on
+            // an arbitrary subset. Quarantine that entire side, continue
+            // auditing the opposite side, and leave the bad side's Q unused.
+            if(targetsA.size()>ContactCreditLedger.MAX_TARGETS_PER_SIDE && !exceededA) {
+                exceededA=true;overflowIndex=index;overflowCountA=targetsA.size();
+            }
+            if(targetsB.size()>ContactCreditLedger.MAX_TARGETS_PER_SIDE && !exceededB) {
+                exceededB=true;overflowIndex=index;overflowCountB=targetsB.size();
+            }
+            if(exceededA&&exceededB)
                 return traced(List.of(),Status.TOO_BROAD,checkedA,checkedB,skipped,
-                        "UNVERIFIED","UNVERIFIED",
-                        targetsA.size()>ContactCreditLedger.MAX_TARGETS_PER_SIDE?
-                                AuditFailure.TARGET_LIMIT_A:AuditFailure.TARGET_LIMIT_B,
+                        "UNVERIFIED","UNVERIFIED",AuditFailure.TARGET_LIMIT_A,
                         index,processed,remainA,remainB,askedA,askedB,targetsA.size(),targetsB.size(),regions.size(),
-                        "unique_target_limit="+ContactCreditLedger.MAX_TARGETS_PER_SIDE);
-            if(a.targets().size()==1 && b.targets().size()==1)
-                regions.add(new ContactCreditLedger.Region(a.targets().get(0),b.targets().get(0)));
-            else {
-                for(var target:a.targets())regions.add(new ContactCreditLedger.Region(target,null));
-                for(var target:b.targets())regions.add(new ContactCreditLedger.Region(null,target));
+                        "both_sides_over_limit="+ContactCreditLedger.MAX_TARGETS_PER_SIDE);
+            if(!exceededA && !exceededB && !regionCompacted) {
+                if(a.targets().size()==1 && b.targets().size()==1)
+                    regions.add(new ContactCreditLedger.Region(a.targets().get(0),b.targets().get(0)));
+                else {
+                    for(var target:a.targets())regions.add(new ContactCreditLedger.Region(target,null));
+                    for(var target:b.targets())regions.add(new ContactCreditLedger.Region(null,target));
+                }
             }
             if(a.targets().isEmpty()&&b.targets().isEmpty())skipped++;
-            if(regions.size()>ContactCreditLedger.MAX_REGIONS)
-                return traced(List.of(),Status.TOO_BROAD,checkedA,checkedB,skipped,
-                        "UNVERIFIED","UNVERIFIED",AuditFailure.REGION_LIMIT,index,processed,
-                        remainA,remainB,askedA,askedB,targetsA.size(),targetsB.size(),regions.size(),
-                        "region_limit="+ContactCreditLedger.MAX_REGIONS);
+            if(regions.size()>ContactCreditLedger.MAX_REGIONS) {
+                // Avoid inventing cross-side pairs or losing independently
+                // verified block identities. Per-side singleton regions are
+                // sufficient for the ONE common Q budget; <=4 per owner.
+                regions.clear();
+                regionCompacted=true;
+            }
         }
-        AuditFailure failure=regions.isEmpty()?
-                uncorroborated==records.size()&& !records.isEmpty()?
-                        AuditFailure.UNCORROBORATED:AuditFailure.NO_VERIFIED_REGION:AuditFailure.NONE;
+        if(exceededA || exceededB || regionCompacted) {
+            regions.clear();
+            if(!exceededA)for(var target:targetsA)regions.add(new ContactCreditLedger.Region(target,null));
+            if(!exceededB)for(var target:targetsB)regions.add(new ContactCreditLedger.Region(null,target));
+            if(exceededA)methodA="UNVERIFIED";
+            if(exceededB)methodB="UNVERIFIED";
+        }
+        AuditFailure failure=exceededA?AuditFailure.TARGET_LIMIT_A:
+                exceededB?AuditFailure.TARGET_LIMIT_B:
+                regions.isEmpty()?(uncorroborated==records.size()&& !records.isEmpty()?
+                        AuditFailure.UNCORROBORATED:AuditFailure.NO_VERIFIED_REGION):AuditFailure.NONE;
         Status status=regions.isEmpty()?Status.NO_VERIFIED_REGION:
-                skipped==0?Status.PROVED:Status.PARTIAL;
+                skipped==0 && !exceededA && !exceededB?Status.PROVED:Status.PARTIAL;
         return traced(new ArrayList<>(regions),status,checkedA,checkedB,skipped,
                 regions.isEmpty()?"UNVERIFIED":methodA,regions.isEmpty()?"UNVERIFIED":methodB,
-                failure,-1,processed,MAX_CHECKS_PER_SIDE-checkedA,MAX_CHECKS_PER_SIDE-checkedB,
+                failure,overflowIndex>=0?overflowIndex:-1,processed,MAX_CHECKS_PER_SIDE-checkedA,MAX_CHECKS_PER_SIDE-checkedB,
                 0,0,targetsA.size(),targetsB.size(),regions.size(),
                 "uncorroborated="+uncorroborated+" noShapeContactRecords="+emptyChecks+
-                " firstEmptyA="+firstEmptyA+" firstEmptyB="+firstEmptyB);
+                " firstEmptyA="+firstEmptyA+" firstEmptyB="+firstEmptyB+
+                " overflowA="+exceededA+" overflowB="+exceededB+
+                " overflowCountA="+overflowCountA+" overflowCountB="+overflowCountB+
+                " compactedRegions="+regionCompacted+
+                " firstFrameMismatch={"+firstFrameMismatch+"}");
     }
     private static Result traced(List<ContactCreditLedger.Region> regions,Status status,
                                  int checkedA,int checkedB,int skipped,String methodA,String methodB,
