@@ -167,6 +167,11 @@ public final class GameImpactCredit {
     public GameImpactCredit(Settings config) { this.config=Objects.requireNonNull(config); }
     public Settings settings() { return config; }
     public int activePairs() { return states.size(); }
+    /** Read-only state snapshot for independently proven pre-contact clearance. */
+    public Phase phase(Pair pair) {
+        State state=states.get(Objects.requireNonNull(pair));
+        return state==null?Phase.UNINITIALIZED:state.phase;
+    }
     public void clear() { states.clear(); }
 
     public Decision step(Frame frame) {

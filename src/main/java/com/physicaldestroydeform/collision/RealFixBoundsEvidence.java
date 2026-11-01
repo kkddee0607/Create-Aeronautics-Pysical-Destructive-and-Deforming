@@ -25,6 +25,16 @@ public final class RealFixBoundsEvidence {
         }
         public boolean separatedFrom(Box other) {return gap(other)>=SEPARATION_THRESHOLD;}
     }
+    /** Finite world-space swept broad-phase union for R4 diagnostics only.
+     * A bound is never evidence of an exact contact or a world block. */
+    public static Box swept(Box previous,Box current) {
+        if(current==null)return null;
+        if(previous==null)return current;
+        return new Box(Math.min(previous.minX(),current.minX()),
+                Math.min(previous.minY(),current.minY()),Math.min(previous.minZ(),current.minZ()),
+                Math.max(previous.maxX(),current.maxX()),
+                Math.max(previous.maxY(),current.maxY()),Math.max(previous.maxZ(),current.maxZ()));
+    }
     /** Validated decrease in independent broad-phase gap. Never infer direction from a force magnitude. */
     public static boolean approaching(Box aPrevious,Box bPrevious,Box aNow,Box bNow) {
         if(aPrevious==null||bPrevious==null||aNow==null||bNow==null) return false;

@@ -5,6 +5,7 @@ import net.minecraft.core.BlockPos;
 import org.junit.jupiter.api.Test;
 
 import java.util.UUID;
+import java.util.List;
 import static org.junit.jupiter.api.Assertions.*;
 
 /** §21.1-21.5: same numerical coordinates never merge a Plot with static world. */
@@ -52,6 +53,33 @@ final class SableConsumerTargetsTest {
         assertEquals(8,SableConsumerTargets.cells(new FrameMath.Vec(3,4,5)).size());
         assertEquals(1,SableConsumerTargets.cells(new FrameMath.Vec(3.5,4.5,5.5)).size());
         assertEquals(0,SableConsumerTargets.cells(new FrameMath.Vec(Double.NaN,3,3)).size());
+    }
+    @Test void recordEvidenceDeduplicatesSameTargetButRejectsTwoDifferentBlocks() {
+        var target=new GameImpactCredit.Target("PLOT:"+PLOT,"1,2,3","minecraft:stone");
+        var other=new GameImpactCredit.Target("PLOT:"+PLOT,"1,2,4","minecraft:chain");
+        var same=new SableConsumerTargets.Scan();
+        same.confirmed.add(target);
+        same.confirmed.add(target);
+        same.checked=6;
+        same.skipped=2;
+        var verified=same.finish("R2");
+        assertTrue(verified.verified());
+        assertEquals(target,verified.target());
+        assertEquals(6,verified.checked());
+        assertEquals("R2_PARTIAL",verified.stage());
+        same.confirmed.add(other);
+        var ambiguous=same.finish("R2");
+        assertEquals(SableConsumerTargets.Reason.MULTIPLE_BLOCKS,ambiguous.reason());
+        assertFalse(ambiguous.verified());
+    }
+    @Test void groupTargetAuditIsCappedWithoutEverInferringFromSampleCount() {
+        assertEquals(32,SableConsumerTargets.MAX_GROUP_CHECKS);
+        var missing=new SableConsumerTargets.Scan();
+        missing.checked=32;
+        missing.missing=SableConsumerTargets.Reason.TOO_MANY_CANDIDATES;
+        var r=missing.finish("R3");
+        assertFalse(r.verified());
+        assertEquals(SableConsumerTargets.Reason.TOO_MANY_CANDIDATES,r.reason());
     }
     @Test void missingOwnerFrameDoesNotBecomeWorldSpace() {
         var c=new NativeCollisionTelemetry.Contact(7,-1,42,1,0,0,-1,0,0,

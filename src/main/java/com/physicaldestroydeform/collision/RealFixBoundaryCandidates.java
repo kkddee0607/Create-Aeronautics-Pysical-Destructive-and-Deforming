@@ -2,6 +2,7 @@ package com.physicaldestroydeform.collision;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.LinkedHashSet;
 
 /** R4 candidate enumeration only. No candidate is promoted to a verified target. */
 public final class RealFixBoundaryCandidates {
@@ -32,6 +33,24 @@ public final class RealFixBoundaryCandidates {
         var blocks=new ArrayList<Block>(count);
         for(int a:xx)for(int b:yy)for(int c:zz)blocks.add(new Block(a,b,c));
         return new Result(Reason.CANDIDATES,blocks);
+    }
+    /** R4 diagnostic only: multiple manifold points may cover different
+     * legitimate contact regions. The bounded UNION is still provisional, and
+     * a lone voxel in it is never authoritative without independent evidence. */
+    public static Result nearContactPoints(RealFixBoundsEvidence.Box moving,
+                                           List<FrameMath.Vec> points,int remainingChecks) {
+        if(moving==null)return new Result(Reason.NO_SWEPT_BOUNDS,List.of());
+        if(points==null || points.isEmpty())return new Result(Reason.NO_SWEPT_BOUNDS,List.of());
+        var unique=new LinkedHashSet<Block>();
+        for(var point:points) {
+            if(point==null)return new Result(Reason.NONFINITE_OR_OUT_OF_WORLD,List.of());
+            Result next=nearPlanePoint(moving,point.x(),point.y(),point.z(),remainingChecks);
+            if(next.reason()!=Reason.CANDIDATES)return next;
+            unique.addAll(next.blocks());
+            if(unique.size()>Math.min(MAX_PER_OWNER,Math.max(0,remainingChecks)))
+                return new Result(Reason.TOO_BROAD,List.of());
+        }
+        return new Result(Reason.CANDIDATES,List.copyOf(unique));
     }
     private static int[] nearAxis(double value) {
         int low=(int)Math.floor(value);

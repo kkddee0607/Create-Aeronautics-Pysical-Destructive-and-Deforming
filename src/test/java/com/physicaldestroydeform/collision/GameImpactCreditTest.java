@@ -34,6 +34,23 @@ final class GameImpactCreditTest {
         assertEquals(5.0,result.allocation().sideA());
         assertEquals(5.0,result.allocation().sideB());
     }
+    @Test void previousGapRemainsArmedUntilContactAndRearmsAfterTwoSeparations() {
+        var e=new GameImpactCredit(Settings.provisional());
+        assertEquals(Phase.UNINITIALIZED,e.phase(P));
+        e.step(frame(1,List.of(),true,false,null,null));
+        e.step(frame(2,List.of(),true,false,null,null));
+        assertEquals(Phase.ARMED,e.phase(P));
+        // A verified pre-contact gap at tick 2 can authorize the first impact
+        // at tick 20, even when previousSeparated (last two ticks) is false.
+        assertTrue(e.step(frame(20,MANY,false,true,TA,TB)).credited());
+        assertEquals(Phase.ACTIVE,e.phase(P));
+        assertFalse(e.step(frame(21,MANY,false,true,TA,TB)).credited());
+        e.step(frame(22,List.of(),true,false,null,null));
+        assertEquals(Phase.COOLING,e.phase(P));
+        e.step(frame(23,List.of(),true,false,null,null));
+        assertEquals(Phase.ARMED,e.phase(P));
+        assertTrue(e.step(frame(24,MANY,false,true,TA,TB)).credited());
+    }
     @Test void noNewCreditDuringTwentySustainedTicks() {
         var e=new GameImpactCredit(Settings.provisional());
         e.step(frame(1,List.of(),true,false,TA,TB));

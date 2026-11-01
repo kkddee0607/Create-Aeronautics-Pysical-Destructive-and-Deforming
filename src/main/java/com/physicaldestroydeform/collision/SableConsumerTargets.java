@@ -7,12 +7,13 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.server.MinecraftServer;
 
 import java.util.LinkedHashSet;
-import java.util.List;
 import java.util.ArrayList;
+import java.util.List;
 import java.util.Objects;
+import java.util.HashMap;
 
 /**
- * 0.3.0 superFix: reproduce the ORIGINAL RapierPhysicsPipeline.processCollisionEffects()
+ * 0.3.0 duperFix: reproduce the ORIGINAL RapierPhysicsPipeline.processCollisionEffects()
  * block lookups (javap from Sable's nested Rapier 2.0.6 JAR).
  *
  * Sable uses BlockPos.set(localPoint + logicalPose.rotationPoint) for plots,
@@ -59,107 +60,90 @@ public final class SableConsumerTargets {
         if(frac>1-EPSILON)return new int[]{cell,cell+1};
         return new int[]{cell};
     }
-    /** Raw source ordinal is neither a manifold ID nor proof of distinct hits. */
+    /** Candidate checks are bounded over the whole owner/pair/tick. Multiple
+     * native contacts are not interchangeable manifold IDs (§21.3, §22.3). */
+    static final int MAX_GROUP_CHECKS=32;
+    private record AuditKey(BlockPos cell, Vec sourcePoint) {}
+    static final class Scan {
+        final LinkedHashSet<GameImpactCredit.Target> confirmed=new LinkedHashSet<>();
+        int checked, corroborated, skipped;
+        Reason missing=Reason.NO_SOLID_BLOCK;
+        Result finish(String stage) {
+            if(confirmed.size()>1)return new Result(null,Reason.MULTIPLE_BLOCKS,checked,stage);
+            if(confirmed.size()==1)return new Result(confirmed.iterator().next(),Reason.VERIFIED,checked,
+                    skipped>0?stage+"_PARTIAL":stage);
+            return new Result(null,missing,checked,stage);
+        }
+    }
+    /** A record's candidate cells are audited ONLY against that same record's
+     * point. Previously mixing points from unrelated manifolds could invent
+     * cross-record matches and exceeded the eight-candidate limit on ropes. */
+    private static Result scan(MinecraftServer server,String dim,String owner,
+                               List<NativeCollisionTelemetry.Contact> raw,boolean project) {
+        final String stage=project?"R3_CROSS_SIDE":"R2_CORROBORATED_GAME_PROXY";
+        if(raw==null || raw.isEmpty())return new Result(null,Reason.NO_SAMPLES,0,stage);
+        Scan scan=new Scan();
+        // Exact duplicate native points must not repeatedly consume the cap.
+        // Never merge slightly different source positions before shape audit.
+        var checkedPoints=new HashMap<AuditKey,OwnerResolver.Check>();
+        for(var contact:raw) {
+            boolean a=matches(owner,contact.idA(),contact.frameA(),dim);
+            boolean b=matches(owner,contact.idB(),contact.frameB(),dim);
+            if(a==b)return new Result(null,Reason.OWNER_MISMATCH,scan.checked,stage);
+            // The two source-side effect points are compared only WITHIN this
+            // record, not across unrelated surface contacts.
+            if(!corroboratedContact(contact)) {
+                scan.skipped++;
+                scan.missing=Reason.CONTACT_FRAME_UNCORROBORATED;
+                continue;
+            }
+            Vec point;
+            if(project) {
+                Vec world=worldPoint(contact,!a);
+                var frame=a?contact.frameA():contact.frameB();
+                int id=a?contact.idA():contact.idB();
+                try {point=id==-1?world:frame==null?null:frame.pose().toLocalPoint(world);}
+                catch(RuntimeException invalid) {point=null;}
+            } else point=candidate(contact,a);
+            if(point==null || !point.finite()) {
+                scan.skipped++;scan.missing=Reason.NO_NATIVE_FRAME;continue;
+            }
+            List<BlockPos> positions=cells(point);
+            if(positions.isEmpty()) {
+                scan.skipped++;scan.missing=Reason.INVALID_COORDINATE;continue;
+            }
+            // No record may contribute more than eight face/edge/corner cells.
+            // The global group check bound also prevents O(records*candidates)
+            // work for a large contact manifold; incomplete scans cannot approve.
+            scan.corroborated++;
+            for(var position:positions) {
+                var auditKey=new AuditKey(position,point);
+                var evidence=checkedPoints.get(auditKey);
+                if(evidence==null) {
+                    if(scan.checked>=MAX_GROUP_CHECKS)
+                        return new Result(null,Reason.TOO_MANY_CANDIDATES,scan.checked,stage);
+                    evidence=OwnerResolver.auditNative(server,dim,owner,position,point);
+                    checkedPoints.put(auditKey,evidence);
+                    scan.checked++;
+                }
+                if(!evidence.verified())continue;
+                var key=evidence.key();
+                scan.confirmed.add(new GameImpactCredit.Target(owner,
+                        key.x()+","+key.y()+","+key.z(),key.fingerprint()));
+                if(scan.confirmed.size()>1)
+                    return new Result(null,Reason.MULTIPLE_BLOCKS,scan.checked,stage);
+            }
+        }
+        if(scan.corroborated==0 && scan.skipped==0)scan.missing=Reason.NO_SAMPLES;
+        return scan.finish(stage);
+    }
     public static Result resolve(MinecraftServer server,String dim,String stableOwner,
                                  List<NativeCollisionTelemetry.Contact> raw) {
-        if(raw==null || raw.isEmpty())return new Result(null,Reason.NO_SAMPLES,0,"R2");
-        var positions=new LinkedHashSet<BlockPos>();
-        var points=new ArrayList<Vec>();
-        boolean sawMissingFrame=false;
-        for(var c:raw) {
-            boolean a=matches(stableOwner,c.idA(),c.frameA(),dim);
-            boolean b=matches(stableOwner,c.idB(),c.frameB(),dim);
-            if(a==b) return new Result(null,Reason.OWNER_MISMATCH,positions.size(),"R2");
-            // The source-consumer voxel convention is not, by itself, a
-            // calibrated collider-local transform. At minimum both independent
-            // same-record Sable effect points must agree in world space before
-            // this provisional game target can be credited (§21.1/21.3).
-            if(!corroboratedContact(c))
-                return new Result(null,Reason.CONTACT_FRAME_UNCORROBORATED,
-                        positions.size(),"R2_CONTACT_FRAME");
-            Vec p=candidate(c,a);
-            if(p==null) {sawMissingFrame=true;continue;}
-            // For the static sentinel, Sable's particle path uses raw local
-            // coordinates as world coordinates but does NOT fetch a static
-            // BlockState. Require the paired plot contact to corroborate the
-            // actual world frame before a static voxel may be VERIFIED.
-            if((a?c.idA():c.idB())==-1) {
-                Vec otherWorld=worldPoint(c,!a);
-                if(otherWorld==null || otherWorld.minus(p).squareLength()>0.25*0.25)
-                    return new Result(null,Reason.INVALID_COORDINATE,positions.size(),"R2_STATIC_FRAME_UNCORROBORATED");
-            }
-            points.add(p);
-            var cells=cells(p);
-            if(cells.isEmpty())return new Result(null,Reason.INVALID_COORDINATE,positions.size(),"R2");
-            positions.addAll(cells);
-            if(positions.size()>MAX_CANDIDATES)
-                return new Result(null,Reason.TOO_MANY_CANDIDATES,positions.size(),"R2");
-        }
-        if(sawMissingFrame) return new Result(null,Reason.NO_NATIVE_FRAME,positions.size(),"R2");
-        var targets=new LinkedHashSet<GameImpactCredit.Target>();
-        for(var pos:positions) {
-            OwnerResolver.Check ch=null;
-            for(var point:points) {
-                var current=OwnerResolver.auditNative(server,dim,stableOwner,pos,point);
-                if(current.verified()){ch=current;break;}
-            }
-            if(ch!=null && ch.verified()) {
-                var k=ch.key();
-                targets.add(new GameImpactCredit.Target(stableOwner,k.x()+","+k.y()+","+k.z(),k.fingerprint()));
-            }
-        }
-        if(targets.isEmpty())return new Result(null,Reason.NO_SOLID_BLOCK,positions.size(),"R2");
-        if(targets.size()!=1)return new Result(null,Reason.MULTIPLE_BLOCKS,positions.size(),"R2");
-        return new Result(targets.iterator().next(),Reason.VERIFIED,positions.size(),"R2_CORROBORATED_GAME_PROXY");
+        return scan(server,dim,stableOwner,raw,false);
     }
-    /** R3: independent cross-side projection using Sable's exact effect-phase
-     * logical pose. This is only an owner-local voxel candidate, never a
-     * solver impulse or an asserted manifold frame. */
     public static Result crossProject(MinecraftServer server,String dim,String targetOwner,
                                       List<NativeCollisionTelemetry.Contact> raw) {
-        if(raw==null || raw.isEmpty())return new Result(null,Reason.NO_SAMPLES,0,"R3");
-        var positions=new LinkedHashSet<BlockPos>();
-        var projectedPoints=new ArrayList<Vec>();
-        for(var c:raw) {
-            boolean targetA=matches(targetOwner,c.idA(),c.frameA(),dim);
-            boolean targetB=matches(targetOwner,c.idB(),c.frameB(),dim);
-            if(targetA==targetB)return new Result(null,Reason.OWNER_MISMATCH,positions.size(),"R3");
-            // The independent other-side local point is mapped to the world
-            // using precisely the same pose used by Sable for hit particles.
-            Vec other=worldPoint(c,!targetA);
-            if(other==null)return new Result(null,Reason.NO_NATIVE_FRAME,positions.size(),"R3");
-            var targetFrame=targetA?c.frameA():c.frameB();
-            int id=targetA?c.idA():c.idB();
-            Vec ownerLocal;
-            try {ownerLocal=id==-1?other:targetFrame==null?null:targetFrame.pose().toLocalPoint(other);}
-            catch(RuntimeException invalid) {ownerLocal=null;}
-            if(ownerLocal==null)return new Result(null,Reason.NO_NATIVE_FRAME,positions.size(),"R3");
-            // Cross-projection must agree with native's own independent
-            // same-record world point. A large disagreement forbids R3.
-            Vec nativeTarget=worldPoint(c,targetA);
-            if(nativeTarget==null || other.minus(nativeTarget).squareLength()>0.25*0.25)
-                return new Result(null,Reason.INVALID_COORDINATE,positions.size(),"R3");
-            projectedPoints.add(ownerLocal);
-            positions.addAll(cells(ownerLocal));
-            if(positions.size()>MAX_CANDIDATES)
-                return new Result(null,Reason.TOO_MANY_CANDIDATES,positions.size(),"R3");
-        }
-        var valid=new LinkedHashSet<GameImpactCredit.Target>();
-        for(var pos:positions) {
-            OwnerResolver.Check check=null;
-            for(var point:projectedPoints) {
-                var current=OwnerResolver.auditNative(server,dim,targetOwner,pos,point);
-                if(current.verified()){check=current;break;}
-            }
-            if(check!=null && check.verified()) {
-                var key=check.key();
-                valid.add(new GameImpactCredit.Target(targetOwner,
-                        key.x()+","+key.y()+","+key.z(),key.fingerprint()));
-            }
-        }
-        if(valid.isEmpty())return new Result(null,Reason.NO_SOLID_BLOCK,positions.size(),"R3");
-        if(valid.size()!=1)return new Result(null,Reason.MULTIPLE_BLOCKS,positions.size(),"R3");
-        return new Result(valid.iterator().next(),Reason.VERIFIED,positions.size(),"R3_CROSS_SIDE");
+        return scan(server,dim,targetOwner,raw,true);
     }
     /** Same native record, two independent contact sides, effect-consumer phase.
      * This is a necessary cross-check, not an exact solver collider-pose proof. */

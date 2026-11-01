@@ -28,12 +28,12 @@ public final class GameImpactDispatch {
         public boolean successful() { return budget != null && budget.credited(); }
         public String logLine() {
             String source = observation.runtimePair().lowId()+":"+observation.runtimePair().highId();
-            if(budget==null) return "[PDD-EPISODE] version=0.3.0superFix source=POST_EFFECT " +
+            if(budget==null) return "[PDD-EPISODE] version=0.3.0duperFix source=POST_EFFECT " +
                     "dimension="+observation.dimension()+" tick="+observation.tick()+
                     " runtimeIds="+source+" records="+observation.originalRecordCount()+
                     " peak="+observation.forcePeak()+" quality=OWNER_UNRESOLVED Q=0"+
                     " worldMutation=OFF reason="+rejectReason;
-            return "[PDD-EPISODE] version=0.3.0superFix source=POST_EFFECT " +
+            return "[PDD-EPISODE] version=0.3.0duperFix source=POST_EFFECT " +
                    "dimension="+observation.dimension()+" tick="+observation.tick()+
                    " runtimeIds="+source+" records="+observation.originalRecordCount()+
                    " peak="+budget.peakForce()+" state="+budget.phase()+
