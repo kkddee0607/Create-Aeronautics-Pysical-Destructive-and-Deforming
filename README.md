@@ -1,25 +1,35 @@
-# PDD 0.3.1 — Physical Destruction and Deforming
+# PDD 0.3.0duperFix — Physical Destruction and Deforming
 
-**Target:** Minecraft Java 1.21.1 · NeoForge 21.1.x · Java 21 · Create 6.0.10 · Create Aeronautics 1.3.2 · Sable 2.0.6.
+Target: Minecraft Java 1.21.1, NeoForge 21.1.228, Create 6.0.10, Create Aeronautics 1.3.2, Sable 2.0.6, Java 21.
 
-**Normative design:** `docs/PDD-1.0.5-Integrated-Design-Specification.md` (1.0.5-A); release 0.3.1 is governed by §§14.1, 21–23 and 26–28. **Source baseline:** GitHub `main` at `ef5b14623b39c1ccf7a49c0812b5fbcd5202aeb0` (`0.3.0duperFix`). Historic versions and their evidence are preserved in `docs/verification/`.
+Normative specification: `docs/PDD-1.0.5-Integrated-Design-Specification.md` (revision 1.0.5-A, especially §§14, 21–23, 26–28). Baseline GitHub `main` SHA: `ed5f206ed06883ce90de85ae847f3211489a31b0`.
 
-## What 0.3.1 implements
+## Development scope
 
-- Original Sable `clearCollisions(J)[D` is observed without changing the original source array or Sable callback/return contract. No synthetic null callback is installed.
-- Native effect force is a **game force proxy**, neither impulse nor joules; its group maximum, **not the sum of native points**, feeds the capped `Q_game = min(64, 0.25 * max(0, F_peak - 2))` policy.
-- Server-thread contact regions use owner-specific, non-air, loaded block/shape checks on corroborated native per-record contact frames. Duplicate reports of a block deduplicate; distinct verified contact blocks remain distinct. Up to four targets per side, 32 inspections per side per group, 16 regions, and bounded R4 diagnostic exploration.
-- `GameImpactCredit` remains the only pair-episode **grant authority**. Validated approach/separation, owner generation and server run delimit episodes. The new `ContactCreditLedger` reserves and splits that **one** group Q across verified target blocks (default 50/50 A/B); unverified portions are recorded as *unused*, never allocated to guessed blocks. Native point ordinals do not become synthetic solver IDs.
-- `PDD-LEDGER`, `PDD-EPISODE`, `PDD-TARGET` and `PDD-0.3.1` logs report generation, evidence and reservation. Ledgers have bounded capacity and TTL; owner disappearance/replacement invalidates their histories.
-- **`worldMutation=OFF`:** 0.3.1 does **not** apply world damage, deform, split, or destroy blocks. R4 is diagnostic-only. Legacy source and tests are preserved; the project does not claim solver-grade manifold/impulse access.
+- Sable `clearCollisions(J)[D` post-effect array observed once without changing its reference, contents or original consumer.
+- Original *non-null* special Sable callbacks remain delegated once with the identical return or thrown exception. `null` callbacks remain `null`.
+- Native 15-double samples are validated, bounded and grouped by dimension, observed tick, owner pair and maximum `F_raw` **without pointwise sums**. `F_raw` is not joules/impulse.
+- Post-effect Sable `activeSubLevels` mapping snapshots the exact owner UUID and logical pose at source time. Native R2 consumer-grid candidates and R3 cross-side projections use owner-specific loaded-block/shape checks, never static-world coordinates for Plot storage. R4 is bounded, provisional diagnostics only. Sable-consumer compatibility is not equivalent to a fully calibrated Rapier collider pose; runtime acceptance still needs in-game proof.
+- Minimal four-phase one-credit game episode and strictly positive separation/closing evidence; no automatic rearm on missing callbacks or time alone.
+- Provisional Q formula: `min(64, 0.25 * max(0, F_peak - 2))`; uncertain side Q is reserved, not fabricated. Normal world mutation remains OFF in this version.
+- Structured `PDD-OBS`, `PDD-TARGET`, `PDD-EPISODE`, and `PDD-DUPERFIX` server logs, bounded hot-path diagnostics.
 
-## Build & validation status
+## Validation status
 
-This ZIP is an **Apply-compatible complete non-protected source candidate**. Java 21 stub-assisted compiler and selected checks passed; the official NeoForge Gradle compilation/JUnit, GitHub Actions and Minecraft validation have **not** been executed here. See `docs/verification/0.3.1.md` for concrete status, risks, and two-session game test instructions. Actual compilation or in-game success must not be inferred from local stubs.
+This is a **source package** and is not evidence of Gradle, GitHub Actions or in-game success. See `docs/verification/0.3.0duperFix.md` for the exact outcome matrix and game test protocol. A validation-blocked candidate must not be misrepresented as a verified release.
 
-## Apply ZIP workflow
+## How to use the full-source Apply ZIP
 
-1. Remove old `incoming/*.zip` from the GitHub repository and upload this ZIP as its single incoming archive.
-2. The existing `Apply PDD ZIP` workflow will sync all non-protected project files from the ZIP root. It preserves `.github`, `gradle`, `gradlew`, `gradlew.bat`, `incoming` and `.git` from GitHub.
-3. Run the preserved Gradle Build and JUnit/Callback Contract workflows. Only after successful build, install the built JAR in the Minecraft `mods/` folder; **do not** copy the source ZIP into `mods/`.
-4. Test B1 against A1/A2/B2/B3 using the acceptance criteria in the verification report; submit the full latest.log for any failure.
+Upload the single full-source ZIP to `incoming/` of the GitHub repository after removing the pre-existing `incoming/*.zip`; the existing Apply action will synchronize all **non-protected** project files. The protected `.github/`, `gradle/`, and `gradlew*` files remain from the repository. Inspect the Apply commit and then run the preserved Build and Callback Contract workflows.
+
+Do not directly extract this ZIP into `mods/`. After Build success, use the generated JAR in the Minecraft `mods/` folder and test it with matching dependency versions.
+
+## 0.3.0duperFix independent recheck (IDS 1.0.5-A)
+
+The original source was independently reviewed against the full 1.0.5-A contract. The R2 consumer candidate now requires corroboration between both native effect world points; pre-contact world/Plot bounding boxes are aligned to canonical owner order; R2/R3 counters are separated. This version is **not officially Gradle-built or in-game verified**. See `docs/verification/0.3.0duperFix-recheck.md` for exact test grades, binary evidence, and the two-session verification protocol. Existing Apply protected files and workflow files remain untouched.
+
+## 0.3.0duperFix — IDS 1.0.5-A incident-ledger and contact-target refinement
+
+Updated after the B1→A1/A2 and B1→B2 in-game tests. R2/R3 audit each corroborated native contact record in its own owner-local frame, deduplicating exact point checks without multiplying Q; distinct verified blocks remain ambiguous. R4 tracks a bounded union of contact-local swept-boundary cells but never upgrades provisional geometry to damage authority. FSM diagnostics now distinguish older positively observed separation in an ARMED pair from recent gap and current AABB closing. Group Q remains capped at 64, callback behavior and worldMutation=OFF remain unchanged.
+
+**Build status:** source-only candidate. Standalone Java 21 type checking and 26 stub-assisted assertion scenarios passed, NOT Gradle/JUnit or in-game validation. See `docs/verification/0.3.0duperFix.md`.

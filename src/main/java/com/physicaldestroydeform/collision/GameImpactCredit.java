@@ -15,24 +15,17 @@ import java.util.Objects;
  * No Minecraft/Sable mutable object crosses this boundary.</p>
  */
 public final class GameImpactCredit {
-    public static final String POLICY_REVISION = "PDD-IDS-1.0.5-A/0.3.1";
+    public static final String POLICY_REVISION = "PDD-IDS-1.0.5-A/0.3.0";
 
     public record Settings(double forceEnter, double forceFloor, double forceGain,
                            double maxGroupQ, int separatedFrames, int maxEntries,
-                           long maxIdleTicks, double risingRatio, int quietFrames) {
-        /** Preserve existing callers and the 0.3.0 policy construction contract. */
-        public Settings(double forceEnter,double forceFloor,double forceGain,
-                        double maxGroupQ,int separatedFrames,int maxEntries,long maxIdleTicks) {
-            this(forceEnter,forceFloor,forceGain,maxGroupQ,separatedFrames,
-                    maxEntries,maxIdleTicks,1.8,2);
-        }
+                           long maxIdleTicks) {
         public Settings {
             if (!Double.isFinite(forceEnter) || forceEnter < 0 ||
                 !Double.isFinite(forceFloor) || forceFloor < 0 ||
                 !Double.isFinite(forceGain) || forceGain < 0 ||
                 !Double.isFinite(maxGroupQ) || maxGroupQ < 0 ||
-                separatedFrames < 2 || maxEntries < 1 || maxIdleTicks < 1 ||
-                !Double.isFinite(risingRatio) || risingRatio < 1 || quietFrames < 2)
+                separatedFrames < 2 || maxEntries < 1 || maxIdleTicks < 1)
                 throw new IllegalArgumentException("invalid provisional credit settings");
         }
         public static Settings provisional() { return new Settings(2, 2, 0.25, 64, 2, 4096, 600); }
@@ -44,9 +37,7 @@ public final class GameImpactCredit {
                 numeric("forceGain",d.forceGain()),numeric("maxGroupQ",d.maxGroupQ()),
                 Math.max(2,whole("separatedFrames",d.separatedFrames())),
                 whole("maxEntries",d.maxEntries()),
-                positiveTicks("maxIdleTicks",d.maxIdleTicks()),
-                Math.max(1,numeric("risingRatio",d.risingRatio())),
-                Math.max(2,whole("quietFrames",d.quietFrames())));
+                positiveTicks("maxIdleTicks",d.maxIdleTicks()));
         }
         private static double numeric(String name,double fallback) {
             String text=System.getProperty("pdd.realfix."+name);
@@ -126,8 +117,7 @@ public final class GameImpactCredit {
     }
     public record Decision(Phase phase, Reason reason, double peakForce,
                            double issuedQ, Allocation allocation,
-                           long episode, long episodeGeneration, long authorizationTick,
-                           long tick, String policyRevision) {
+                           long episode, long tick, String policyRevision) {
         public boolean credited() { return reason == Reason.APPROVED && issuedQ > 0; }
     }
     /**
@@ -169,8 +159,6 @@ public final class GameImpactCredit {
         int separatedSamples;
         long tick=-1;
         long episode;
-        long episodeGeneration;
-        long authorizationTick=-1;
         boolean pendingApproach;
         int burstFrames;
     }
@@ -184,86 +172,62 @@ public final class GameImpactCredit {
         State state=states.get(Objects.requireNonNull(pair));
         return state==null?Phase.UNINITIALIZED:state.phase;
     }
-    /** Episode generation increments on contact after rearm even when Q stays zero. */
-    public long episodeGeneration(Pair pair) {
-        State s=states.get(Objects.requireNonNull(pair));
-        return s==null?0:s.episodeGeneration;
-    }
     public void clear() { states.clear(); }
-    /** Recycled native bodies or removed plots cannot retain the old episode. */
-    public void invalidateOwner(String stableOwner) {
-        Objects.requireNonNull(stableOwner);
-        states.keySet().removeIf(p -> p.a().stableKey().equals(stableOwner)
-                || p.b().stableKey().equals(stableOwner));
-    }
-    /** Optional verified surface re-approach gate, not a force-only shortcut. */
-    public boolean risingEdge(double baseline,double current,int quietFrames,
-                              boolean separatelyVerifiedRegionApproach) {
-        return separatelyVerifiedRegionApproach && quietFrames>=config.quietFrames()
-                && Double.isFinite(baseline) && baseline>0
-                && Double.isFinite(current) && current>=config.forceEnter()
-                && current>=baseline*config.risingRatio();
-    }
 
     public Decision step(Frame frame) {
         Objects.requireNonNull(frame);
         State s=states.get(frame.pair());
         if (s == null) {
-            if (states.size() >= config.maxEntries()) return decision(new State(),
-                    Reason.STATE_CAPACITY_EXCEEDED,frame,0);
+            if (states.size() >= config.maxEntries()) return decision(Phase.UNINITIALIZED,
+                    Reason.STATE_CAPACITY_EXCEEDED,frame,0,0);
             s=new State(); states.put(frame.pair(),s);
         }
-        if (frame.tick() <= s.tick) return decision(s,Reason.STALE_FRAME,frame,0);
+        if (frame.tick() <= s.tick) return decision(s.phase,Reason.STALE_FRAME,frame,0,s.episode);
         s.tick=frame.tick();
         if (frame.positivelySeparated()) {
             if (s.phase == Phase.ACTIVE) { s.phase=Phase.COOLING; s.separatedSamples=1; s.pendingApproach=false; }
             else {s.separatedSamples++; if(s.separatedSamples >= config.separatedFrames()) s.phase=Phase.ARMED; }
-            return decision(s,Reason.SEPARATION_WARMUP,frame,0);
+            return decision(s.phase,Reason.SEPARATION_WARMUP,frame,0,s.episode);
         }
         if (frame.records().isEmpty()) {
             // Silence is NEVER an assertion that two objects separated.
             // It also cannot extend a pending first-impact burst indefinitely.
             s.pendingApproach=false;
-            return decision(s,Reason.UNKNOWN_SEPARATION,frame,0);
+            return decision(s.phase,Reason.UNKNOWN_SEPARATION,frame,0,s.episode);
         }
         if (s.phase == Phase.COOLING || s.phase == Phase.UNINITIALIZED) {
             s.phase=Phase.ACTIVE; s.separatedSamples=0; s.pendingApproach=false;
-            s.authorizationTick=-1;
-            s.episodeGeneration++;
-            return decision(s,Reason.INITIAL_CONTACT_UNKNOWN,frame,0);
+            return decision(s.phase,Reason.INITIAL_CONTACT_UNKNOWN,frame,0,s.episode);
         }
         if (s.phase == Phase.ARMED) {
             s.phase=Phase.ACTIVE; s.separatedSamples=0;
             s.pendingApproach=frame.verifiedApproach();
-            s.authorizationTick=s.pendingApproach?frame.tick():-1;
-            s.episodeGeneration++;
             s.burstFrames=0;
         } else if (s.phase != Phase.ACTIVE || !s.pendingApproach || s.burstFrames >= 2) {
-            return decision(s,Reason.DUPLICATE_EPISODE,frame,0);
+            return decision(s.phase,Reason.DUPLICATE_EPISODE,frame,0,s.episode);
         }
         s.burstFrames++;
-        if (!s.pendingApproach) return decision(s,Reason.APPROACH_UNVERIFIED,frame,0);
+        if (!s.pendingApproach) return decision(s.phase,Reason.APPROACH_UNVERIFIED,frame,0,s.episode);
         if (frame.targetA() == null && frame.targetB() == null)
-            return decision(s,Reason.TARGET_UNVERIFIED,frame,0);
+            return decision(s.phase,Reason.TARGET_UNVERIFIED,frame,0,s.episode);
         final double q=config.candidate(frame.forcePeak());
-        if (q <= 0) return decision(s,Reason.BELOW_THRESHOLD,frame,0);
+        if (q <= 0) return decision(s.phase,Reason.BELOW_THRESHOLD,frame,0,s.episode);
         s.pendingApproach=false; // one-credit, including the burst's following frames
         s.episode++;
-        return decision(s,Reason.APPROVED,frame,q);
+        return decision(s.phase,Reason.APPROVED,frame,q,s.episode);
     }
 
     public void prune(long tick) {
         states.entrySet().removeIf(e -> tick > e.getValue().tick &&
                 tick - e.getValue().tick > config.maxIdleTicks());
     }
-    private static Decision decision(State s,Reason reason,Frame frame,double q) {
+    private static Decision decision(Phase phase,Reason reason,Frame frame,double q,long episode) {
         final double a=frame.targetA()==null?0:q*0.5;
         final double b=frame.targetB()==null?0:q*0.5;
         // Two targets resolving to exactly the same owned block do not double credit it.
         final double bShare=frame.targetA()!=null && frame.targetA().equals(frame.targetB())?0:b;
-        return new Decision(s.phase,reason,frame.forcePeak(),q,
-                new Allocation(a,bShare,q-a-bShare),s.episode,s.episodeGeneration,
-                s.authorizationTick,frame.tick(),POLICY_REVISION);
+        return new Decision(phase,reason,frame.forcePeak(),q,
+                new Allocation(a,bShare,q-a-bShare),episode,frame.tick(),POLICY_REVISION);
     }
 
     /**

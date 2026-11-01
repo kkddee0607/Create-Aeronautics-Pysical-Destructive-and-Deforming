@@ -111,41 +111,4 @@ final class GameImpactCreditTest {
                 new OwnerLocalTargetCandidates.Evidence(owner,pos,"minecraft:stone",true,true,true,false);
         assertTrue(resolver.resolve(input,inspector).verified());
     }
-    @Test void invalidateOwnerGenerationCannotReuseOldArmedState() {
-        var e=new GameImpactCredit(Settings.provisional());
-        e.step(frame(1,List.of(),true,false,TA,TB));
-        e.step(frame(2,List.of(),true,false,TA,TB));
-        assertEquals(Phase.ARMED,e.phase(P));
-        e.invalidateOwner(P.a().stableKey());
-        assertEquals(Phase.UNINITIALIZED,e.phase(P));
-        assertEquals(Reason.INITIAL_CONTACT_UNKNOWN,e.step(frame(3,MANY,false,true,TA,TB)).reason());
-    }
-    @Test void risingEdgeNeedsQuietEvidenceAndIndependentGeometry() {
-        var e=new GameImpactCredit(Settings.provisional());
-        assertEquals(1.8,e.settings().risingRatio());
-        assertEquals(2,e.settings().quietFrames());
-        assertFalse(e.risingEdge(10,30,2,false));
-        assertFalse(e.risingEdge(10,12,2,true));
-        assertFalse(e.risingEdge(10,30,1,true));
-        assertTrue(e.risingEdge(10,18,2,true));
-    }
-    @Test void activeApprovalUsesEarlierArmedEvidenceWithinTwoFrameBurst() {
-        var e=new GameImpactCredit(Settings.provisional());
-        e.step(frame(1,List.of(),true,false,null,null));
-        e.step(frame(2,List.of(),true,false,null,null));
-        var first=e.step(frame(3,MANY,false,true,null,null));
-        assertEquals(Reason.TARGET_UNVERIFIED,first.reason());
-        assertEquals(Phase.ACTIVE,first.phase());
-        assertEquals(1,first.episodeGeneration());
-        var delayed=e.step(frame(4,MANY,false,false,TA,TB));
-        assertTrue(delayed.credited());
-        assertEquals(3,delayed.authorizationTick());
-        assertEquals(1,delayed.episodeGeneration());
-        assertFalse(e.step(frame(5,MANY,false,true,TA,TB)).credited());
-        e.step(frame(6,List.of(),true,false,null,null));
-        e.step(frame(7,List.of(),true,false,null,null));
-        var repeat=e.step(frame(8,MANY,false,true,TA,TB));
-        assertTrue(repeat.credited());
-        assertEquals(2,repeat.episodeGeneration());
-    }
 }
