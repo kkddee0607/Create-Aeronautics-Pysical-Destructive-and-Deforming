@@ -74,6 +74,19 @@ final class GameImpactCreditTest {
         assertEquals(Phase.ARMED,e.phase(P));
         assertTrue(e.step(frame(24,MANY,false,true,TA,TB)).credited());
     }
+    @Test void unprovedGapInterruptsTwoRequiredSeparationSamples() {
+        var e=new GameImpactCredit(Settings.provisional());
+        e.step(frame(1,MANY,false,true,TA,TB));
+        assertEquals(Phase.ACTIVE,e.phase(P));
+        e.step(frame(2,List.of(),true,false,TA,TB));
+        assertEquals(Phase.COOLING,e.phase(P));
+        e.invalidateSeparationStreak(P);
+        assertEquals(0,e.evidence(P).separatedSamples());
+        e.step(frame(4,List.of(),true,false,TA,TB));
+        assertEquals(Phase.COOLING,e.phase(P));
+        e.step(frame(5,List.of(),true,false,TA,TB));
+        assertEquals(Phase.ARMED,e.phase(P));
+    }
     @Test void noNewCreditDuringTwentySustainedTicks() {
         var e=new GameImpactCredit(Settings.provisional());
         e.step(frame(1,List.of(),true,false,TA,TB));

@@ -48,6 +48,7 @@ public final class RealFixRuntimeBridge {
     private String runId=UUID.randomUUID().toString();
     private final GameImpactCredit credit=new GameImpactCredit(Settings.fromSystemProperties());
     private final ContactCreditLedger regionLedger=new ContactCreditLedger();
+    private final WorldClearanceVerifier worldClearance=new WorldClearanceVerifier();
     private final Map<Pair,Tracked> tracked=new HashMap<>();
     private final Map<String,Generation> generations=new HashMap<>();
     private long credited,observed,zero,missingOwner,ambiguousOwners,missingTarget;
@@ -71,6 +72,8 @@ public final class RealFixRuntimeBridge {
         long lastVerfFsmTick=-1;
         String lastVerfR4="";
         long lastVerfR4Tick=-1;
+        String lastClearanceStatus="";
+        long lastClearanceStatusTick=-1;
     }
     private static final class Generation {
         int runtimeId;
@@ -120,7 +123,7 @@ public final class RealFixRuntimeBridge {
     }
 
     public void clear() {
-        credit.clear();regionLedger.clear();tracked.clear();generations.clear();
+        credit.clear();regionLedger.clear();worldClearance.clear();tracked.clear();generations.clear();
         runId=UUID.randomUUID().toString();
         lastDropped=lastMalformed=lastCallbackDropped=lastPreHistoryDropped=0;
         r2Audits=r2SkippedDuplicate=r2ShapeChecks=0;
@@ -159,6 +162,7 @@ public final class RealFixRuntimeBridge {
         // Clearance is safety-critical. R4 is diagnostic-only: separate
         // bounded budgets prevent R4 from starving positive separation proof.
         int[] remainingClearanceChecks={RealFixBoundaryCandidates.MAX_PER_TICK};
+        int[] remainingAtomicConfirmChecks={WorldClearanceVerifier.MAX_CONFIRM_PER_TICK};
         int[] remainingR4Checks={Math.min(128,RealFixBoundaryCandidates.MAX_PER_TICK)};
         final Set<Pair> contacted=new HashSet<>();
         for(var stampEntry:raw.entrySet().stream()
@@ -196,6 +200,8 @@ public final class RealFixRuntimeBridge {
                     continue;
                 }
                 Pair pair=owners.pair();
+                // Observed native contact invalidates any incomplete clearance scan.
+                worldClearance.contact(pair);
                 SceneKey scene=new SceneKey(stamp.dimension,stamp.tick,pair.a().stableKey(),pair.b().stableKey());
                 ObservedTargets candidate=targetEvidence.get(scene);
                 // §21.4: inspect each native contact point once, in its own
@@ -426,18 +432,27 @@ public final class RealFixRuntimeBridge {
             }
         }
         // Bounded state update: missing native effects NEVER imply separation.
-        // Only actual disjoint 3D world AABBs may rearm an already known pair.
+        // Plot/Plot uses disjoint AABBs; Plot/World requires an atomic verified empty region.
         for(var entry:tracked.entrySet()) {
             Pair p=entry.getKey(); Tracked t=entry.getValue();
             if(contacted.contains(p) || t.lastProcessed==now) continue;
+            // Avoid repeated full World proofs once ARMED; Plot/Plot behavior remains intact.
+            if(credit.phase(p)==Phase.ARMED &&
+                    (p.a().stableKey().startsWith("WORLD:")||p.b().stableKey().startsWith("WORLD:")))
+                continue;
             Box a=box(server,p.a().stableKey(),t.a,p.dimension(),worldBounds,knownWorldBlocks);
             Box b=box(server,p.b().stableKey(),t.b,p.dimension(),worldBounds,knownWorldBlocks);
             boolean worldSide=p.a().stableKey().startsWith("WORLD:")
                     || p.b().stableKey().startsWith("WORLD:");
             Box plotBox=p.a().stableKey().startsWith("PLOT:")?a:b;
+            WorldClearanceVerifier.Result clearance=worldSide
+                    ? inspectWorldClearance(server,p,plotBox,now,remainingClearanceChecks,remainingAtomicConfirmChecks)
+                    : null;
+            logClearance(log,t,now,p,clearance);
+            if(worldSide && (clearance==null || !clearance.proved()))
+                credit.invalidateSeparationStreak(p);
             boolean definitelySeparate=RealFixBoundsEvidence.separatedForRearm(
-                    worldSide,a,b,worldSide && plotBox!=null
-                        && confirmedWorldClearance(server,p.dimension(),plotBox,remainingClearanceChecks));
+                    worldSide,a,b,clearance!=null && clearance.proved());
             t.previousA=a;t.previousB=b;t.lastProcessed=now;
             if(definitelySeparate) {
                 t.lastPositiveSeparation=true;
@@ -445,6 +460,7 @@ public final class RealFixRuntimeBridge {
                 try {
                     var before=credit.evidence(p);
                     var d=credit.step(new Frame(p,now,List.of(),true,false,t.a,t.b));
+                    if(d.phase()==Phase.ARMED)worldClearance.contact(p);
                     if(VERF_ENABLED && before.phase()!=d.phase())
                         log.info("[PDD-VERF-SEPARATION] serverTick={} pair={}/{} source={} " +
                                 "stateBefore={} stateAfter={} separatedBefore={} separatedAfter={} " +
@@ -460,14 +476,15 @@ public final class RealFixRuntimeBridge {
         // Pre-contact state construction (§22). Silence alone never proves
         // separation: plot-plot uses real Sable world AABBs; plot-world uses a
         // complete, loaded, bounded world-collider clearance inspection.
-        prearmIndependentPairs(server,now,worldBounds,contacted,remainingClearanceChecks,log);
+        prearmIndependentPairs(server,now,worldBounds,contacted,remainingClearanceChecks,remainingAtomicConfirmChecks,log);
         if(now%100==0) {
             credit.prune(now);
             regionLedger.prune(now);
+            worldClearance.prune(now);
             generations.entrySet().removeIf(e->!e.getValue().present
                     && e.getValue().lastSeen>=0 && now-e.getValue().lastSeen>600);
             tracked.entrySet().removeIf(e->now>e.getValue().lastSeen && now-e.getValue().lastSeen>600);
-            log.info("[PDD-0.3.1realFix] phase=SUMMARY observed={} credited={} zero={} ownerMissing={} targetMissing={} ambiguous={} trackedPairs={} r2Verified={} r2Rejected={} r3Verified={} prearmed={} r1Fallback={} regionGroups={} regionCount={} regionTooBroad={} ledgerRejected={} activeCredits={} observerErrors={} nativeDropped={} nativeMalformed={} nativeCapSaturatedPolls={} r2Audits={} r2SkippedDuplicate={} r2ActualShapeChecks={} callbackDropped={} preHistoryDropped={} generation=IDS-1.0.5-A mutation=OFF",
+            log.info("[PDD-0.3.1QFix] phase=SUMMARY observed={} credited={} zero={} ownerMissing={} targetMissing={} ambiguous={} trackedPairs={} r2Verified={} r2Rejected={} r3Verified={} prearmed={} r1Fallback={} regionGroups={} regionCount={} regionTooBroad={} ledgerRejected={} activeCredits={} observerErrors={} nativeDropped={} nativeMalformed={} nativeCapSaturatedPolls={} r2Audits={} r2SkippedDuplicate={} r2ActualShapeChecks={} callbackDropped={} preHistoryDropped={} generation=IDS-1.0.5-A mutation=OFF",
                     observed,credited,zero,missingOwner,missingTarget,ambiguousOwners,tracked.size(),
                     r2Verified,r2Rejected,r3Verified,prearmed,r1Fallback,
                     multiGroupCredits,multiRegions,multiTooBroad,ledgerRejected,regionLedger.size(),
@@ -579,6 +596,7 @@ public final class RealFixRuntimeBridge {
     }
     private void invalidateOwner(String owner) {
         // Old owner-generation credits must never authorize a recycled body ID.
+        worldClearance.invalidateOwner(owner);
         tracked.keySet().removeIf(pair->pair.a().stableKey().equals(owner)
                 || pair.b().stableKey().equals(owner));
         credit.invalidateOwner(owner);
@@ -602,15 +620,17 @@ public final class RealFixRuntimeBridge {
         }
         return result;
     }
-    /** Bounded verified precontact clearance. Will not load a chunk or scan a big ship. */
+    /** Fair, budgeted precontact clearance. Never loads a chunk or guesses a collider. */
     private void prearmIndependentPairs(MinecraftServer server,long now,
                                        Map<String,Map<String,Box>> bounds,Set<Pair> contacted,
-                                       int[] remaining,Logger log) {
+                                       int[] remaining,int[] confirmationRemaining,Logger log) {
         int attempted=0;
         for(var dimEntry:bounds.entrySet()) {
             String dim=dimEntry.getKey();
             var entries=new ArrayList<>(dimEntry.getValue().entrySet());
             entries.sort(Map.Entry.comparingByKey());
+            // Rotate work order so a busy/large ship cannot starve later plots.
+            if(!entries.isEmpty()) java.util.Collections.rotate(entries,(int)(now%entries.size()));
             for(int i=0;i<entries.size() && attempted<128;i++) {
                 var first=entries.get(i);Box firstBox=first.getValue();
                 if(firstBox==null)continue;
@@ -627,10 +647,15 @@ public final class RealFixRuntimeBridge {
                 }
                 if(attempted>=128)break;
                 attempted++;
-                if(confirmedWorldClearance(server,dim,firstBox,remaining)) {
-                    Pair pair=Pair.canonical(runId,dim,new Owner("WORLD:"+dim,1),
-                            new Owner(first.getKey(),currentGeneration(dim,first.getKey())));
-                    seedSeparation(pair,now,contacted,"WORLD:"+dim,null,firstBox,log);
+                Pair worldPair=Pair.canonical(runId,dim,new Owner("WORLD:"+dim,1),
+                        new Owner(first.getKey(),currentGeneration(dim,first.getKey())));
+                if(!contacted.contains(worldPair) && credit.phase(worldPair)!=Phase.ARMED &&
+                        (tracked.get(worldPair)==null || tracked.get(worldPair).lastProcessed!=now)) {
+                    var clearance=inspectWorldClearance(server,worldPair,firstBox,now,remaining,confirmationRemaining);
+                    Tracked trackedPair=tracked.get(worldPair);
+                    if(trackedPair!=null)logClearance(log,trackedPair,now,worldPair,clearance);
+                    if(clearance.proved())
+                        seedSeparation(worldPair,now,contacted,"WORLD:"+dim,null,firstBox,log);
                 }
             }
         }
@@ -656,6 +681,7 @@ public final class RealFixRuntimeBridge {
             var prior=credit.evidence(pair);
             var d=credit.step(new Frame(pair,now,List.of(),true,false,null,null));
             if(d.reason()==GameImpactCredit.Reason.STALE_FRAME)return;
+            if(d.phase()==Phase.ARMED)worldClearance.contact(pair);
             if(VERF_ENABLED && prior.phase()!=d.phase())
                 log.info("[PDD-VERF-SEPARATION] serverTick={} pair={}/{} source=PRECONTACT_CLEARANCE " +
                         "stateBefore={} stateAfter={} separatedBefore={} separatedAfter={} " +
@@ -670,31 +696,44 @@ public final class RealFixRuntimeBridge {
             prearmed++;
         } catch(RuntimeException invalid){ /* fail closed */ }
     }
-    private static boolean confirmedWorldClearance(MinecraftServer server,String dim,Box box,
-                                                   int[] remaining) {
-        // This is a finite empty-region proof only; returning false proves nothing.
-        var candidates=RealFixBoundaryCandidates.nearOverlap(new Box(
-                box.minX()-0.25,box.minY()-0.25,box.minZ()-0.25,
-                box.maxX()+0.25,box.maxY()+0.25,box.maxZ()+0.25),remaining[0]);
-        if(candidates.reason()!=RealFixBoundaryCandidates.Reason.CANDIDATES)return false;
+    private WorldClearanceVerifier.Result inspectWorldClearance(MinecraftServer server,Pair pair,
+                                                          Box plotBox,long now,int[] remaining,int[] confirmationRemaining) {
+        if(plotBox==null)
+            return new WorldClearanceVerifier.Result(WorldClearanceVerifier.Status.UNAVAILABLE,
+                    0,0,"PLOT_BOUNDS_UNAVAILABLE");
         for(ServerLevel level:server.getAllLevels()) {
-            if(!level.dimension().location().toString().equals(dim))continue;
+            if(!level.dimension().location().toString().equals(pair.dimension()))continue;
             var container=SubLevelContainer.getContainer(level);
-            if(container==null)return false;
-            for(var block:candidates.blocks()) {
-                if(--remaining[0]<0)return false;
-                BlockPos pos=new BlockPos(block.x(),block.y(),block.z());
-                if(!level.hasChunkAt(pos))return false;
+            if(container==null){worldClearance.contact(pair);return new WorldClearanceVerifier.Result(
+                    WorldClearanceVerifier.Status.UNAVAILABLE,0,0,"NO_SABLE_CONTAINER");}
+            return worldClearance.inspect(pair,plotBox,now,remaining,confirmationRemaining,(x,y,z)->{
+                BlockPos pos=new BlockPos(x,y,z);
                 try {
+                    if(!level.hasChunkAt(pos))return WorldClearanceVerifier.Cell.UNAVAILABLE;
                     var chunk=new ChunkPos(pos);
-                    if(container.inBounds(chunk)||container.getPlot(chunk)!=null)return false;
+                    if(container.inBounds(chunk)||container.getPlot(chunk)!=null)
+                        return WorldClearanceVerifier.Cell.UNAVAILABLE;
                     var state=level.getBlockState(pos);
-                    if(!state.isAir() && !state.getCollisionShape(level,pos).isEmpty())return false;
-                } catch(RuntimeException invalid) {return false;}
-            }
-            return true;
+                    return !state.isAir()&&!state.getCollisionShape(level,pos).isEmpty()
+                            ? WorldClearanceVerifier.Cell.COLLIDER:WorldClearanceVerifier.Cell.EMPTY;
+                } catch(RuntimeException invalid) {return WorldClearanceVerifier.Cell.UNAVAILABLE;}
+            });
         }
-        return false;
+        worldClearance.contact(pair);
+        return new WorldClearanceVerifier.Result(WorldClearanceVerifier.Status.UNAVAILABLE,
+                0,0,"DIMENSION_UNAVAILABLE");
+    }
+    private static void logClearance(Logger log,Tracked tracked,long now,Pair pair,
+                                      WorldClearanceVerifier.Result result) {
+        if(tracked==null || result==null || !VERF_ENABLED)return;
+        String signature=result.status()+":"+result.reason();
+        if(!signature.equals(tracked.lastClearanceStatus)
+                || now-tracked.lastClearanceStatusTick>=VERF_SAMPLE_TICKS) {
+            log.info("[PDD-WORLD-CLEARANCE] serverTick={} pair={}/{} status={} checked={} total={} " +
+                    "reason={} mutation=OFF",now,pair.a().stableKey(),pair.b().stableKey(),
+                    result.status(),result.checked(),result.total(),result.reason());
+            tracked.lastClearanceStatus=signature;tracked.lastClearanceStatusTick=now;
+        }
     }
     private record R4Probe(String status,int points,int candidateCells,int failedPoint,String detail) { }
     private static String sampleContact(List<NativeCollisionTelemetry.Contact> records) {

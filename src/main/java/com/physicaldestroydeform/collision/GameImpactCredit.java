@@ -203,6 +203,12 @@ public final class GameImpactCredit {
                 :new EvidenceSnapshot(s.phase,s.tick,s.separatedSamples,s.pendingApproach,
                         s.burstFrames,s.episode,s.episodeGeneration,s.authorizationTick);
     }
+    /** An unproved intervening frame breaks the consecutive-clearance streak. */
+    public void invalidateSeparationStreak(Pair pair) {
+        State s=states.get(Objects.requireNonNull(pair));
+        if(s!=null && (s.phase==Phase.COOLING || s.phase==Phase.UNINITIALIZED))
+            s.separatedSamples=0;
+    }
     public void clear() { states.clear(); }
     /** Recycled native bodies or removed plots cannot retain the old episode. */
     public void invalidateOwner(String stableOwner) {
