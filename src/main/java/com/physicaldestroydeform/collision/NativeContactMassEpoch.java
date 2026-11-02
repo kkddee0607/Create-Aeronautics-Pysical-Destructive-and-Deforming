@@ -81,7 +81,7 @@ public final class NativeContactMassEpoch {
                     c.ax(),c.ay(),c.az(),c.bx(),c.by(),c.bz(),
                     c.contactAX(),c.contactAY(),c.contactAZ(),
                     c.contactBX(),c.contactBY(),c.contactBZ(),
-                    c.dimension(),c.serverTick(),a,b));
+                    c.dimension(),c.serverTick(),a,b,c.capSaturated()));
         }
         return new Result(result,masked);
     }

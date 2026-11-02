@@ -53,6 +53,18 @@ final class NativeContactMassEpochTest {
                 .validate("minecraft:overworld",33,List.of(contact(513)));
         assertEquals(1,result.maskedFrames());
     }
+    @Test void maskedOriginPreservesNativePollSaturationMarker() {
+        var original=contact(513);
+        var tagged=new NativeCollisionTelemetry.Contact(original.idA(),original.idB(),original.rawImpactScalar(),
+                original.ax(),original.ay(),original.az(),original.bx(),original.by(),original.bz(),
+                original.contactAX(),original.contactAY(),original.contactAZ(),
+                original.contactBX(),original.contactBY(),original.contactBZ(),
+                original.dimension(),original.serverTick(),original.frameA(),original.frameB(),true);
+        var result=new NativeContactMassEpoch(List.of(snapshot(512),snapshot(513)))
+                .validate("minecraft:overworld",33,List.of(tagged));
+        assertEquals(1,result.maskedFrames());
+        assertTrue(result.contacts().getFirst().capSaturated());
+    }
     @Test void missingSnapshotCannotBeMistakenForStableOrigin() {
         var result=new NativeContactMassEpoch(List.of())
                 .validate("minecraft:overworld",33,List.of(contact(512)));

@@ -53,6 +53,7 @@ public final class RealFixRuntimeBridge {
     private long credited,observed,zero,missingOwner,ambiguousOwners,missingTarget;
     private long r2Verified, r2Rejected, r3Verified, prearmed, r1Fallback;
     private long multiGroupCredits, multiRegions, ledgerRejected, multiTooBroad;
+    private long r2Audits,r2SkippedDuplicate,r2ShapeChecks;
     private long lastDropped,lastMalformed,lastCallbackDropped,lastPreHistoryDropped;
     private static final class Tracked {
         Target a,b;
@@ -122,6 +123,7 @@ public final class RealFixRuntimeBridge {
         credit.clear();regionLedger.clear();tracked.clear();generations.clear();
         runId=UUID.randomUUID().toString();
         lastDropped=lastMalformed=lastCallbackDropped=lastPreHistoryDropped=0;
+        r2Audits=r2SkippedDuplicate=r2ShapeChecks=0;
     }
 
     /** Called only from ServerTickEvent.Post. Never mutate any world or native buffer. */
@@ -154,7 +156,10 @@ public final class RealFixRuntimeBridge {
         // Pre-solver snapshots may be from multiple substeps. A runtime pair is
         // accepted only when every matching snapshot maps to the same stable pair.
         int lines=0;
-        int[] remainingR4Checks={RealFixBoundaryCandidates.MAX_PER_TICK};
+        // Clearance is safety-critical. R4 is diagnostic-only: separate
+        // bounded budgets prevent R4 from starving positive separation proof.
+        int[] remainingClearanceChecks={RealFixBoundaryCandidates.MAX_PER_TICK};
+        int[] remainingR4Checks={Math.min(128,RealFixBoundaryCandidates.MAX_PER_TICK)};
         final Set<Pair> contacted=new HashSet<>();
         for(var stampEntry:raw.entrySet().stream()
                 .sorted(Comparator.comparing((Map.Entry<Stamp,List<NativeCollisionTelemetry.Contact>> x)->x.getKey().dimension)
@@ -196,15 +201,26 @@ public final class RealFixRuntimeBridge {
                 // §21.4: inspect each native contact point once, in its own
                 // Sable consumer pose; aggregate only source-proven block keys.
                 // The whole owner/pair/tick has a strict 32-check/side budget.
-                var massSafe=massEpochs.validate(stamp.dimension,stamp.tick,records);
-                var regions=SableContactRegions.audit(server,stamp.dimension,pair,massSafe.contacts());
+                var beforeAudit=credit.evidence(pair);
+                // An exhausted ACTIVE episode cannot mint Q. Still observe
+                // native records and advance FSM, but skip expensive shape I/O.
+                boolean auditEligible=beforeAudit.phase()!=Phase.ACTIVE
+                        || beforeAudit.hasUnspentAuthorization();
+                var massSafe=auditEligible?massEpochs.validate(stamp.dimension,stamp.tick,records):null;
+                var regions=auditEligible?SableContactRegions.audit(server,stamp.dimension,pair,massSafe.contacts())
+                        :SableContactRegions.skippedDuplicate();
+                if(auditEligible){r2Audits++;r2ShapeChecks+=regions.checksA()+regions.checksB();}
+                else r2SkippedDuplicate++;
+                boolean saturatedPoll=records.stream().anyMatch(NativeCollisionTelemetry.Contact::capSaturated);
                 Target a=regions.verified()?regions.firstA():null;
                 Target b=regions.verified()?regions.firstB():null;
                 if(regions.status()==SableContactRegions.Status.TOO_BROAD)multiTooBroad++;
                 String methodA=a==null?"UNVERIFIED":regions.methodA();
                 String methodB=b==null?"UNVERIFIED":regions.methodB();
-                if(methodA.contains("R2"))r2Verified++;else r2Rejected++;
-                if(methodB.contains("R2"))r2Verified++;else r2Rejected++;
+                if(auditEligible) {
+                    if(methodA.contains("R2"))r2Verified++;else r2Rejected++;
+                    if(methodB.contains("R2"))r2Verified++;else r2Rejected++;
+                }
                 if(methodA.contains("R3"))r3Verified++;
                 if(methodB.contains("R3"))r3Verified++;
                 // An existing non-null callback may identify a block owner, but
@@ -248,7 +264,7 @@ public final class RealFixRuntimeBridge {
                 t.previousA=boxA;t.previousB=boxB;
                 t.lastSeen=now;t.lastProcessed=now;
                 contacted.add(pair);
-                if(a==null&&b==null)missingTarget++;
+                if(auditEligible && a==null&&b==null)missingTarget++;
                 // Diagnostic-only, sampled per pair/rejection cause so resting
                 // contact cannot flood a small server's log every physics tick.
                 var trace=regions.trace();
@@ -272,7 +288,7 @@ public final class RealFixRuntimeBridge {
                             sampleFrame(records,true),sampleFrame(records,false));
                     t.lastVerfRegion=regionSignature;t.lastVerfRegionTick=now;
                 }
-                if(VERF_ENABLED && massSafe.maskedFrames()>0 &&
+                if(VERF_ENABLED && massSafe!=null && massSafe.maskedFrames()>0 &&
                         (t.lastPlotRogEpochTick<0 || now-t.lastPlotRogEpochTick>=VERF_SAMPLE_TICKS)) {
                     log.info("[PDD-PLOTROG-EPOCH] nativeTick={} serverTick={} pair={}/{} " +
                                     "maskedOwnerFrames={} sourceRecords={} policy=UNSTABLE_COM_SIDE_Q_ZERO mutation=OFF",
@@ -283,7 +299,7 @@ public final class RealFixRuntimeBridge {
                 // Sample witness separation independent of whether R2 approved.
                 // Effect-phase projected points may span different substeps;
                 // never turn this diagnostic into a hard contact gate.
-                if(VERF_ENABLED && (t.lastPlotRogWitnessTick<0 || now-t.lastPlotRogWitnessTick>=VERF_SAMPLE_TICKS)) {
+                if(VERF_ENABLED && auditEligible && (t.lastPlotRogWitnessTick<0 || now-t.lastPlotRogWitnessTick>=VERF_SAMPLE_TICKS)) {
                     for(int i=0;i<records.size();i++) {
                         var contact=records.get(i);
                         var wd=SableConsumerTargets.witnessDiagnostic(contact);
@@ -303,20 +319,20 @@ public final class RealFixRuntimeBridge {
                         }
                     }
                 }
-                if(lines++<MAX_LOG_PER_TICK) log.info("[PDD-NATIVE-TARGET] dim={} tick={} ownerA={} ownerB={} methodA={} reasonA={} checkedA={} methodB={} reasonB={} checkedB={} regionCount={} rejectedPoints={} callbackHintA={} callbackHintB={} worldMutation=OFF",
+                if(lines++<MAX_LOG_PER_TICK) log.info("[PDD-NATIVE-TARGET] dim={} tick={} ownerA={} ownerB={} methodA={} reasonA={} checkedA={} methodB={} reasonB={} checkedB={} regionCount={} rejectedPoints={} callbackHintA={} callbackHintB={} sourceCapSaturated={} worldMutation=OFF",
                         stamp.dimension,stamp.tick,pair.a().stableKey(),pair.b().stableKey(),
                         methodA,regions.status(),regions.checksA(),methodB,regions.status(),regions.checksB(),
-                        regions.regions().size(),regions.rejected(),r1a!=null,r1b!=null);
+                        regions.regions().size(),regions.rejected(),r1a!=null,r1b!=null,saturatedPoll);
                 // R4 shadow audit. This only describes plausible loaded world
                 // blocks; WITHOUT in-game ground truth it can never mint credit.
-                if(pair.a().stableKey().startsWith("WORLD:") && a==null) {
+                if(auditEligible && pair.a().stableKey().startsWith("WORLD:") && a==null) {
                     int before=remainingR4Checks[0];
                     R4Probe probe=probeWorldR4(server,stamp.dimension,sweptB,records,remainingR4Checks);
                     if(lines++<MAX_LOG_PER_TICK)log.info("[PDD-TARGET] source=R4_SWEPT_PROVISIONAL dimension={} tick={} worldCandidate={} credited=false",stamp.dimension,stamp.tick,probe.status());
                     if(!probe.status().startsWith("PROVISIONAL_ONLY"))
                         logVerfR4(log,t,now,stamp.tick,pair,probe,records.size(),before,remainingR4Checks[0],sweptB);
                 }
-                if(pair.b().stableKey().startsWith("WORLD:") && b==null) {
+                if(auditEligible && pair.b().stableKey().startsWith("WORLD:") && b==null) {
                     int before=remainingR4Checks[0];
                     R4Probe probe=probeWorldR4(server,stamp.dimension,sweptA,records,remainingR4Checks);
                     if(lines++<MAX_LOG_PER_TICK)log.info("[PDD-TARGET] source=R4_SWEPT_PROVISIONAL dimension={} tick={} worldCandidate={} credited=false",stamp.dimension,stamp.tick,probe.status());
@@ -378,18 +394,19 @@ public final class RealFixRuntimeBridge {
                         if(grant!=null)ledgerRejected++;
                     }
                     if(grant!=null && lines++<MAX_LOG_PER_TICK)
-                        log.info("[PDD-LEDGER] dimension={} tick={} episodeGeneration={} source={} status={} regions={} checksA={} checksB={} rejectedPoints={} Q={} allocatedA={} allocatedB={} unused={} aTargets={} bTargets={} ownerEpochA={} ownerEpochB={} mutation=OFF",
+                        log.info("[PDD-LEDGER] dimension={} tick={} episodeGeneration={} source={} status={} regions={} checksA={} checksB={} rejectedPoints={} Q={} allocatedA={} allocatedB={} unused={} aTargets={} bTargets={} ownerEpochA={} ownerEpochB={} sourceCapSaturated={} mutation=OFF",
                                 stamp.dimension,stamp.tick,grant.id().episodeGeneration(),grant.source(),grant.status(),
                                 grant.observedRegions(),regions.checksA(),regions.checksB(),regions.rejected(),
                                 grant.issuedQ(),grant.allocatedA(),grant.allocatedB(),grant.unused(),
-                                grant.a(),grant.b(),pair.a().generation(),pair.b().generation());
-                    if(lines++<MAX_LOG_PER_TICK) log.info("[PDD-TARGET] dimension={} tick={} ownerA={} ownerAGeneration={} ownerB={} ownerBGeneration={} targetA={} fingerprintA={} targetB={} fingerprintB={} frameMethodA={} frameMethodB={} shapeAudit=OWNER_SHAPE_CHECKED quality={} reason={} approachByAabb={} armedFromGap={} recentGap={} worldMutation=OFF",
+                                grant.a(),grant.b(),pair.a().generation(),pair.b().generation(),saturatedPoll);
+                    if(lines++<MAX_LOG_PER_TICK) log.info("[PDD-TARGET] dimension={} tick={} ownerA={} ownerAGeneration={} ownerB={} ownerBGeneration={} targetA={} fingerprintA={} targetB={} fingerprintB={} frameMethodA={} frameMethodB={} shapeAudit={} quality={} reason={} approachByAabb={} armedFromGap={} recentGap={} worldMutation=OFF",
                             stamp.dimension,stamp.tick,pair.a().stableKey(),pair.a().generation(),pair.b().stableKey(),pair.b().generation(),
                             a==null?"UNVERIFIED":a.localBlock(),a==null?"UNVERIFIED":a.fingerprint(),
                             b==null?"UNVERIFIED":b.localBlock(),b==null?"UNVERIFIED":b.fingerprint(),
                             methodA,methodB,
-                            a==null&&b==null?"SOURCE_UNVERIFIED":"POST_EFFECT_CORROBORATED_GAME_PROXY",
-                            a==null&&b==null?"TARGET_UNVERIFIED":"SABLE_NATIVE_CONSUMER_MAPPED",
+                            auditEligible?"OWNER_SHAPE_CHECKED":"SKIPPED_DUPLICATE",
+                            !auditEligible?"NOT_AUDITED_DUPLICATE":a==null&&b==null?"SOURCE_UNVERIFIED":"POST_EFFECT_CORROBORATED_GAME_PROXY",
+                            !auditEligible?"NO_Q_AUTHORIZATION":a==null&&b==null?"TARGET_UNVERIFIED":"SABLE_NATIVE_CONSUMER_MAPPED",
                             aabbClosing,armedFromGap,previousSeparated);
                     if(lines++<MAX_LOG_PER_TICK)log.info("[PDD-EPISODE] dimension={} tick={} bodyIds={}/{} records={} peak={} previousSeparated={} separationEvidenceTick={} phaseBefore={} armedFromGap={} aabbClosing={} forceRise={} state={} reason={} creditCount={} episodeGeneration={} authorizationTick={} Q={} shareA={} shareB={} unused={} regionQuality={} groupCause={} source=POST_EFFECT_GAME_POLICY worldMutation=OFF",
                             stamp.dimension,stamp.tick,group.runtimePair().lowId(),group.runtimePair().highId(),
@@ -415,7 +432,12 @@ public final class RealFixRuntimeBridge {
             if(contacted.contains(p) || t.lastProcessed==now) continue;
             Box a=box(server,p.a().stableKey(),t.a,p.dimension(),worldBounds,knownWorldBlocks);
             Box b=box(server,p.b().stableKey(),t.b,p.dimension(),worldBounds,knownWorldBlocks);
-            boolean definitelySeparate=a!=null&&b!=null&&a.separatedFrom(b);
+            boolean worldSide=p.a().stableKey().startsWith("WORLD:")
+                    || p.b().stableKey().startsWith("WORLD:");
+            Box plotBox=p.a().stableKey().startsWith("PLOT:")?a:b;
+            boolean definitelySeparate=RealFixBoundsEvidence.separatedForRearm(
+                    worldSide,a,b,worldSide && plotBox!=null
+                        && confirmedWorldClearance(server,p.dimension(),plotBox,remainingClearanceChecks));
             t.previousA=a;t.previousB=b;t.lastProcessed=now;
             if(definitelySeparate) {
                 t.lastPositiveSeparation=true;
@@ -424,11 +446,13 @@ public final class RealFixRuntimeBridge {
                     var before=credit.evidence(p);
                     var d=credit.step(new Frame(p,now,List.of(),true,false,t.a,t.b));
                     if(VERF_ENABLED && before.phase()!=d.phase())
-                        log.info("[PDD-VERF-SEPARATION] serverTick={} pair={}/{} source=OBSERVED_AABB_GAP " +
+                        log.info("[PDD-VERF-SEPARATION] serverTick={} pair={}/{} source={} " +
                                 "stateBefore={} stateAfter={} separatedBefore={} separatedAfter={} " +
                                 "aabbGap={} sourceVerified=true mutation=OFF",
-                                now,p.a().stableKey(),p.b().stableKey(),before.phase(),d.phase(),
-                                before.separatedSamples(),credit.evidence(p).separatedSamples(),verifiedGap(a,b));
+                                now,p.a().stableKey(),p.b().stableKey(),
+                                worldSide?"VERIFIED_WORLD_CLEARANCE":"OBSERVED_AABB_GAP",before.phase(),d.phase(),
+                                before.separatedSamples(),credit.evidence(p).separatedSamples(),
+                                worldSide?"VERIFIED_EMPTY_REGION":verifiedGap(a,b));
                 }
                 catch(RuntimeException ignored) { /* invalid snapshot: Q=0 */ }
             }
@@ -436,20 +460,20 @@ public final class RealFixRuntimeBridge {
         // Pre-contact state construction (§22). Silence alone never proves
         // separation: plot-plot uses real Sable world AABBs; plot-world uses a
         // complete, loaded, bounded world-collider clearance inspection.
-        prearmIndependentPairs(server,now,worldBounds,contacted,remainingR4Checks,log);
+        prearmIndependentPairs(server,now,worldBounds,contacted,remainingClearanceChecks,log);
         if(now%100==0) {
             credit.prune(now);
             regionLedger.prune(now);
             generations.entrySet().removeIf(e->!e.getValue().present
                     && e.getValue().lastSeen>=0 && now-e.getValue().lastSeen>600);
             tracked.entrySet().removeIf(e->now>e.getValue().lastSeen && now-e.getValue().lastSeen>600);
-            log.info("[PDD-0.3.1plotRog] phase=SUMMARY observed={} credited={} zero={} ownerMissing={} targetMissing={} ambiguous={} trackedPairs={} r2Verified={} r2Rejected={} r3Verified={} prearmed={} r1Fallback={} regionGroups={} regionCount={} regionTooBroad={} ledgerRejected={} activeCredits={} observerErrors={} nativeDropped={} nativeMalformed={} nativeCapSaturatedPolls={} callbackDropped={} preHistoryDropped={} generation=IDS-1.0.5-A mutation=OFF",
+            log.info("[PDD-0.3.1realFix] phase=SUMMARY observed={} credited={} zero={} ownerMissing={} targetMissing={} ambiguous={} trackedPairs={} r2Verified={} r2Rejected={} r3Verified={} prearmed={} r1Fallback={} regionGroups={} regionCount={} regionTooBroad={} ledgerRejected={} activeCredits={} observerErrors={} nativeDropped={} nativeMalformed={} nativeCapSaturatedPolls={} r2Audits={} r2SkippedDuplicate={} r2ActualShapeChecks={} callbackDropped={} preHistoryDropped={} generation=IDS-1.0.5-A mutation=OFF",
                     observed,credited,zero,missingOwner,missingTarget,ambiguousOwners,tracked.size(),
                     r2Verified,r2Rejected,r3Verified,prearmed,r1Fallback,
                     multiGroupCredits,multiRegions,multiTooBroad,ledgerRejected,regionLedger.size(),
                     NativeCollisionTelemetry.observerErrors(),
                     NativeCollisionTelemetry.dropped(),NativeCollisionTelemetry.malformed(),
-                    NativeCollisionTelemetry.nativeCapSaturatedPolls(),
+                    NativeCollisionTelemetry.nativeCapSaturatedPolls(),r2Audits,r2SkippedDuplicate,r2ShapeChecks,
                     com.physicaldestroydeform.diagnostics.SableContactQueue.dropped(),SableFrameCapture.preHistoryDropped());
         }
     }

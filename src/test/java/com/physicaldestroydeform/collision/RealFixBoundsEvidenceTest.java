@@ -19,4 +19,12 @@ final class RealFixBoundsEvidenceTest {
         assertThrows(IllegalArgumentException.class,()->new Box(0,0,0,Double.NaN,1,1));
         assertThrows(IllegalArgumentException.class,()->new Box(1,0,0,0,1,1));
     }
+    @Test void worldSeparationRequiresIndependentClearanceProof() {
+        var a=RealFixBoundsEvidence.Box.block(0,0,0);
+        var staleWorldBlock=RealFixBoundsEvidence.Box.block(20,0,0);
+        assertTrue(RealFixBoundsEvidence.separatedForRearm(false,a,staleWorldBlock,false));
+        assertFalse(RealFixBoundsEvidence.separatedForRearm(true,a,staleWorldBlock,false));
+        assertTrue(RealFixBoundsEvidence.separatedForRearm(true,a,staleWorldBlock,true));
+        assertFalse(RealFixBoundsEvidence.separatedForRearm(true,null,staleWorldBlock,false));
+    }
 }

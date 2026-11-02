@@ -75,7 +75,8 @@ public final class NativeCollisionTelemetry {
                     nativeData[offset+9], nativeData[offset+10], nativeData[offset+11],
                     nativeData[offset+12], nativeData[offset+13], nativeData[offset+14],
                     dimension,serverTick,
-                    frame(frameReader,(int)nativeData[offset]),frame(frameReader,(int)nativeData[offset+1])));
+                    frame(frameReader,(int)nativeData[offset]),frame(frameReader,(int)nativeData[offset+1]),
+                    n==NATIVE_EFFECT_MAX_RECORDS));
         }
     }
     private static OwnerFrame frame(IntFunction<OwnerFrame> reader,int id) {
@@ -106,7 +107,17 @@ public final class NativeCollisionTelemetry {
             double ax, double ay, double az, double bx, double by, double bz,
             double contactAX, double contactAY, double contactAZ,
             double contactBX, double contactBY, double contactBZ,
-            String dimension,long serverTick,OwnerFrame frameA,OwnerFrame frameB) {
+            String dimension,long serverTick,OwnerFrame frameA,OwnerFrame frameB,
+            boolean capSaturated) {
+        public Contact(int idA,int idB,double rawImpactScalar,
+                       double ax,double ay,double az,double bx,double by,double bz,
+                       double contactAX,double contactAY,double contactAZ,
+                       double contactBX,double contactBY,double contactBZ,
+                       String dimension,long serverTick,OwnerFrame frameA,OwnerFrame frameB) {
+            this(idA,idB,rawImpactScalar,ax,ay,az,bx,by,bz,
+                    contactAX,contactAY,contactAZ,contactBX,contactBY,contactBZ,
+                    dimension,serverTick,frameA,frameB,false);
+        }
         public Contact(int idA,int idB,double rawImpactScalar,
                        double ax,double ay,double az,double bx,double by,double bz,
                        double contactAX,double contactAY,double contactAZ,

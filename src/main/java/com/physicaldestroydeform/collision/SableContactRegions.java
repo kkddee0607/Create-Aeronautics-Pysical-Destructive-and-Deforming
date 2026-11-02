@@ -16,7 +16,7 @@ import java.util.HashMap;
 public final class SableContactRegions {
     private SableContactRegions() {}
     public static final int MAX_CHECKS_PER_SIDE=32;
-    public enum Status { PROVED, PARTIAL, NO_VERIFIED_REGION, TOO_BROAD }
+    public enum Status { PROVED, PARTIAL, NO_VERIFIED_REGION, TOO_BROAD, SKIPPED_DUPLICATE }
     public record Check(List<GameImpactCredit.Target> targets,int inspected,boolean incomplete,
                         String method,String detail) {
         public Check(List<GameImpactCredit.Target> targets,int inspected,boolean incomplete,String method) {
@@ -66,6 +66,14 @@ public final class SableContactRegions {
         public GameImpactCredit.Target firstB() {
             return regions.stream().map(ContactCreditLedger.Region::b).filter(Objects::nonNull).findFirst().orElse(null);
         }
+    }
+    /** No shape check is required to advance an already exhausted ACTIVE episode.
+     * This is NOT a negative or rejected target audit. */
+    public static Result skippedDuplicate() {
+        return new Result(List.of(),Status.SKIPPED_DUPLICATE,0,0,0,
+                "NOT_AUDITED_DUPLICATE","NOT_AUDITED_DUPLICATE",
+                new Trace(AuditFailure.NONE,-1,0,MAX_CHECKS_PER_SIDE,
+                        MAX_CHECKS_PER_SIDE,0,0,0,0,0,0,"AUDIT_SKIPPED_NO_Q_AUTHORIZATION"));
     }
     /** Runtime inspector: Sable-consumer local R2 shape cells; independent R3
      * only when R2 finds no block. Multiple real contact cells are preserved. */
@@ -133,6 +141,8 @@ public final class SableContactRegions {
         var targetsB=new LinkedHashSet<GameImpactCredit.Target>();
         int checkedA=0,checkedB=0,skipped=0,processed=0,uncorroborated=0,emptyChecks=0;
         boolean exceededA=false,exceededB=false,regionCompacted=false;
+        boolean incompleteEverA=false,incompleteEverB=false;
+        String incompleteDetailA="NONE",incompleteDetailB="NONE";
         int overflowIndex=-1,overflowCountA=0,overflowCountB=0;
         String firstFrameMismatch="NONE";
         int witnessSeparated=0,worldProjectionUnavailable=0;
@@ -167,16 +177,26 @@ public final class SableContactRegions {
                             ?new Check(List.of(),0,false,"UNVERIFIED","OWNER_FRAME_MISMATCH_B")
                             :inspector.verify(record,pair.b().stableKey(),remainB);
             int askedA=a==null?0:a.inspected(),askedB=b==null?0:b.inspected();
-            if(a==null||b==null || a.incomplete() || b.incomplete()) {
-                AuditFailure why=a==null||a.incomplete()?
-                        (b==null||b.incomplete()?AuditFailure.SIDE_A_AND_B_INCOMPLETE:AuditFailure.SIDE_A_INCOMPLETE)
-                        :AuditFailure.SIDE_B_INCOMPLETE;
-                return traced(List.of(),Status.TOO_BROAD,checkedA,checkedB,skipped,
-                        "UNVERIFIED","UNVERIFIED",why,index,processed,remainA,remainB,
-                        askedA,askedB,targetsA.size(),targetsB.size(),regions.size(),
-                        "a="+(a==null?"NULL":a.detail())+" b="+(b==null?"NULL":b.detail()));
+            // Source validity is checked above. If the local audit cannot
+            // complete for one owner, quarantine ONLY that owner; the other
+            // owner's confirmed cells still belong to the same source event.
+            boolean incompleteA=a==null||a.incomplete();
+            boolean incompleteB=b==null||b.incomplete();
+            if(incompleteA) {
+                incompleteEverA=true;
+                if(incompleteDetailA.equals("NONE"))incompleteDetailA=a==null?"NULL":a.detail();
+                if(!exceededA){exceededA=true;overflowIndex=index;}
+            }
+            if(incompleteB) {
+                incompleteEverB=true;
+                if(incompleteDetailB.equals("NONE"))incompleteDetailB=b==null?"NULL":b.detail();
+                if(!exceededB){exceededB=true;overflowIndex=index;}
             }
             checkedA+=askedA; checkedB+=askedB;
+            if(incompleteA || incompleteB) {
+                if(incompleteA) a=new Check(List.of(),0,false,"UNVERIFIED","SIDE_A_INCOMPLETE");
+                if(incompleteB) b=new Check(List.of(),0,false,"UNVERIFIED","SIDE_B_INCOMPLETE");
+            }
             if(checkedA>MAX_CHECKS_PER_SIDE || checkedB>MAX_CHECKS_PER_SIDE)
                 return traced(List.of(),Status.TOO_BROAD,checkedA,checkedB,skipped,
                         "UNVERIFIED","UNVERIFIED",
@@ -204,7 +224,7 @@ public final class SableContactRegions {
                             "target_owner="+target.ownerKey());
                 targetsB.add(target);
             }
-            // If one side has >4 real targets, NEVER concentrate its Q on
+            // If one side exceeds the bounded target budget, NEVER concentrate its Q on
             // an arbitrary subset. Quarantine that entire side, continue
             // auditing the opposite side, and leave the bad side's Q unused.
             if(targetsA.size()>ContactCreditLedger.MAX_TARGETS_PER_SIDE && !exceededA) {
@@ -215,9 +235,13 @@ public final class SableContactRegions {
             }
             if(exceededA&&exceededB)
                 return traced(List.of(),Status.TOO_BROAD,checkedA,checkedB,skipped,
-                        "UNVERIFIED","UNVERIFIED",AuditFailure.TARGET_LIMIT_A,
+                        "UNVERIFIED","UNVERIFIED",
+                        incompleteEverA&&incompleteEverB ? AuditFailure.SIDE_A_AND_B_INCOMPLETE :
+                                incompleteEverA ? AuditFailure.SIDE_A_INCOMPLETE :
+                                incompleteEverB ? AuditFailure.SIDE_B_INCOMPLETE : AuditFailure.TARGET_LIMIT_A,
                         index,processed,remainA,remainB,askedA,askedB,targetsA.size(),targetsB.size(),regions.size(),
-                        "both_sides_over_limit="+ContactCreditLedger.MAX_TARGETS_PER_SIDE);
+                        "both_sides_unverifiable capacity="+ContactCreditLedger.MAX_TARGETS_PER_SIDE
+                                +" incompleteA="+incompleteDetailA+" incompleteB="+incompleteDetailB);
             if(!exceededA && !exceededB && !regionCompacted) {
                 if(a.targets().size()==1 && b.targets().size()==1)
                     regions.add(new ContactCreditLedger.Region(a.targets().get(0),b.targets().get(0)));
@@ -230,7 +254,7 @@ public final class SableContactRegions {
             if(regions.size()>ContactCreditLedger.MAX_REGIONS) {
                 // Avoid inventing cross-side pairs or losing independently
                 // verified block identities. Per-side singleton regions are
-                // sufficient for the ONE common Q budget; <=4 per owner.
+                // sufficient for the ONE common Q budget; <=32 per owner.
                 regions.clear();
                 regionCompacted=true;
             }
@@ -242,8 +266,8 @@ public final class SableContactRegions {
             if(exceededA)methodA="UNVERIFIED";
             if(exceededB)methodB="UNVERIFIED";
         }
-        AuditFailure failure=exceededA?AuditFailure.TARGET_LIMIT_A:
-                exceededB?AuditFailure.TARGET_LIMIT_B:
+        AuditFailure failure=exceededA?(incompleteEverA?AuditFailure.SIDE_A_INCOMPLETE:AuditFailure.TARGET_LIMIT_A):
+                exceededB?(incompleteEverB?AuditFailure.SIDE_B_INCOMPLETE:AuditFailure.TARGET_LIMIT_B):
                 regions.isEmpty()?(uncorroborated==records.size()&& !records.isEmpty()?
                         AuditFailure.UNCORROBORATED:AuditFailure.NO_VERIFIED_REGION):AuditFailure.NONE;
         // A valid one-sided Q reservation is PARTIAL, even if every record
@@ -261,6 +285,7 @@ public final class SableContactRegions {
                 " worldProjectionUnavailable="+worldProjectionUnavailable+
                 " noShapeContactRecords="+emptyChecks+
                 " firstEmptyA="+firstEmptyA+" firstEmptyB="+firstEmptyB+
+                " incompleteA="+incompleteDetailA+" incompleteB="+incompleteDetailB+
                 " overflowA="+exceededA+" overflowB="+exceededB+
                 " overflowCountA="+overflowCountA+" overflowCountB="+overflowCountB+
                 " compactedRegions="+regionCompacted+

@@ -5,6 +5,12 @@ import java.util.Objects;
 /** Independent world-space broad-phase evidence; overlap never proves contact. */
 public final class RealFixBoundsEvidence {
     private RealFixBoundsEvidence() { }
+    /** World is not represented by the previously hit single block AABB.
+     * Only a complete bounded world-clearance proof can rearm Plot/World. */
+    public static boolean separatedForRearm(boolean hasWorldOwner,Box a,Box b,boolean verifiedWorldClearance) {
+        return hasWorldOwner?verifiedWorldClearance:a!=null && b!=null && a.separatedFrom(b);
+    }
+
     public static final double SEPARATION_THRESHOLD = 0.25;
     public static final double APPROACH_DELTA = 1.0 / 32.0;
 

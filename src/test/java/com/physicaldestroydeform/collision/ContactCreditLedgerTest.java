@@ -67,12 +67,26 @@ final class ContactCreditLedgerTest {
         assertEquals(0.0,grant.allocatedB());
         assertEquals(5.0,grant.unused());
     }
-    @Test void fifthTargetFailsClosedWithoutMintingBudget() {
+    @Test void fiveToThirtyTwoTargetsShareFixedSideBudget() {
+        for(int count:new int[]{5,8,16,32}) {
+            var ledger=new ContactCreditLedger();
+            var regions=new ArrayList<ContactCreditLedger.Region>();
+            for(int i=0;i<count;i++)regions.add(new ContactCreditLedger.Region(a(i),b(i)));
+            var grant=ledger.issue(PAIR,approved(3,PAIR,a(0),b(0)),
+                    ContactCreditLedger.Source.SABLE_POST_EFFECT,regions);
+            assertEquals(ContactCreditLedger.Status.ISSUED,grant.status());
+            assertEquals(count,grant.a().size()); assertEquals(count,grant.b().size());
+            assertEquals(10.0,grant.accounted(),1e-9);
+            assertEquals(5.0,grant.allocatedA(),1e-9);
+            assertEquals(5.0,grant.allocatedB(),1e-9);
+        }
+    }
+    @Test void thirtyThreeTargetsFailClosedWithoutMintingBudget() {
         var ledger=new ContactCreditLedger();
-        var five=new ArrayList<ContactCreditLedger.Region>();
-        for(int i=0;i<5;i++)five.add(new ContactCreditLedger.Region(a(i),null));
+        var regions=new ArrayList<ContactCreditLedger.Region>();
+        for(int i=0;i<33;i++)regions.add(new ContactCreditLedger.Region(a(i),null));
         var grant=ledger.issue(PAIR,approved(3,PAIR,a(0),null),
-                ContactCreditLedger.Source.SABLE_POST_EFFECT,five);
+                ContactCreditLedger.Source.SABLE_POST_EFFECT,regions);
         assertEquals(ContactCreditLedger.Status.INVALID_TARGET_SET,grant.status());
         assertEquals(0.0,grant.issuedQ());assertEquals(0,ledger.size());
     }
