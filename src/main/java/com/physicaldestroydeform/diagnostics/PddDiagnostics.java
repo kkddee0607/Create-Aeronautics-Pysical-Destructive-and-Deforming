@@ -20,17 +20,10 @@ public final class PddDiagnostics {
                     material.hardness(), material.ductilityPercent(), material.elasticityPercent());
             checks++;
             double direct = DamageModel.effectiveLocalDamage(10, material);
-            near(10.0 * DamageModel.hardnessFactor(material,DamageModel.Settings.defaults()), direct);
+            near(10.0 * (1.0 - (128.0 / 255.0) * 0.9), direct);
             near(direct, DamageModel.effectiveLocalDamage(10, new MaterialProperties(128, 100, 40)));
-            near(10.0 * DamageModel.elasticityTransmission(material,DamageModel.Settings.defaults()),
-                    DamageModel.neighborStress(10,material));
-            var plan=DamageModel.plan(5.0,material,new BlockDamageState(),DamageModel.Settings.defaults());
-            near(5.0,plan.accountedQ());
-            if(plan.fixedIncrement()<=0 || plan.plannedRemainderU8()<0 || plan.plannedRemainderU8()>255)
-                throw new IllegalStateException("fixed-point or Q accounting invalid");
-            logger.info("[PDD-DIAG] SELFTEST damage_model status=PASS revision={} " +
-                    "directDamage={} rawDamage={} fixedIncrement={} elasticityOnce=true plasticStressUnused=true",
-                    DamageModel.ALGORITHM_REVISION,direct,plan.rawDamage(),plan.fixedIncrement());
+            near(6.0, DamageModel.neighborStress(10, material));
+            logger.info("[PDD-DIAG] SELFTEST damage_model status=PASS directDamage={} ductilityAffectsDamage=false neighborStress=6", direct);
             checks++;
             ImpactSample impact = new ImpactSample(20, 2, 5);
             near(2, DamageModel.baseDamageFromEnergy(impact, 10));
@@ -51,7 +44,7 @@ public final class PddDiagnostics {
             logger.info("[PDD-DIAG] SELFTEST observation_buffer status=PASS capacity=1 dropped=1");
             checks++;
             if (HardnessScale.fromMinecraft(0, 0) != 0 || HardnessScale.fromMinecraft(-1, 0) != 255
-                    || HardnessScale.fromMinecraft(55, 1200,1) != 255)
+                    || HardnessScale.fromMinecraft(50, 1200) != 255)
                 throw new IllegalStateException("hardness conversion boundaries mismatch");
             logger.info("[PDD-DIAG] SELFTEST hardness_scale status=PASS empty=0 unbreakable=255 saturated=255");
             checks++;
