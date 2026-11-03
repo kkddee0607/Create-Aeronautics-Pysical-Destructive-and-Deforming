@@ -123,10 +123,15 @@ public final class SableContactRegions {
             return result;
         });
         var t=collected.trace();
+        var stats=nativeBatch.stats();
         var t2=new Trace(t.failure(),t.sourceIndex(),t.processedRecords(),
                 t.remainingA(),t.remainingB(),t.requestedA(),t.requestedB(),
                 t.verifiedTargetsA(),t.verifiedTargetsB(),t.regionCount(),t.rejectedContacts(),
-                t.detail()+" auditedUniqueOwnerCells="+nativeBatch.cachedCells());
+                t.detail()+" auditedUniqueOwnerCells="+stats.newCells()
+                        +" reusedCellReads="+stats.reusedCells()
+                        +" shapePointTests="+stats.pointTests()
+                        +" testedShapeBoxes="+stats.testedBoxes()
+                        +" cellBudgetPerSide="+MAX_CHECKS_PER_SIDE);
         return new Result(collected.regions(),collected.status(),collected.checksA(),collected.checksB(),
                 collected.rejected(),collected.methodA(),collected.methodB(),t2);
     }

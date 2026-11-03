@@ -10,6 +10,8 @@ import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.shapes.VoxelShape;
+import net.minecraft.world.phys.AABB;
+import java.util.List;
 import com.physicaldestroydeform.collision.FrameMath.Vec;
 
 import java.util.UUID;
@@ -85,6 +87,11 @@ public final class OwnerResolver {
      * Re-reads the actual owner/accessor after the physics step; never loads chunks. */
     public static Check auditNative(MinecraftServer server,String dimension,String stableOwner,BlockPos allocatedPos,
                                     Vec nativeOwnerPoint) {
+        return auditNative(server,dimension,stableOwner,allocatedPos,nativeOwnerPoint,null);
+    }
+    private static final class ShapeCapture { VoxelShape value; }
+    private static Check auditNative(MinecraftServer server,String dimension,String stableOwner,BlockPos allocatedPos,
+                                     Vec nativeOwnerPoint,ShapeCapture capture) {
         if(server==null || dimension==null || stableOwner==null || allocatedPos==null)
             return Check.failed(Status.OWNER_UNRESOLVED,"BAD_NATIVE_OWNER_INPUT");
         try {
@@ -104,7 +111,7 @@ public final class OwnerResolver {
             var proposed=new BlockTarget(space,dimension,plotId,
                     allocatedPos.getX(),allocatedPos.getY(),allocatedPos.getZ(),true,
                     "SABLE_EFFECT_CONSUMER_ALLOCATED_GRID");
-            return check(level,container,proposed,null,nativeOwnerPoint);
+            return check(level,container,proposed,null,nativeOwnerPoint,capture);
         } catch(RuntimeException unsafe){return Check.failed(Status.OWNER_UNRESOLVED,"NATIVE_AUDIT_ERROR");}
     }
 
@@ -119,8 +126,11 @@ public final class OwnerResolver {
         private final String dimension;
         private final Map<CellKey, Cell> cells=new HashMap<>();
         private record CellKey(String owner,BlockPos pos) {}
-        private record Cell(Check identity,VoxelShape shape,BlockPos shapePos) {}
+        // Immutable geometry lists: no repeated VoxelShape.toAabbs allocations per witness.
+        private record Cell(Check identity,List<AABB> boxes,BlockPos shapePos) {}
         public record Sample(Check result,boolean newCell) {}
+        public record Stats(int newCells,long reusedCells,long pointTests,long testedBoxes) {}
+        private long reusedCells,pointTests,testedBoxes;
         public NativeAuditBatch(MinecraftServer server,String dimension) {
             this.server=server;this.dimension=dimension;
         }
@@ -128,47 +138,29 @@ public final class OwnerResolver {
             return cells.containsKey(new CellKey(owner,pos));
         }
         public int cachedCells(){return cells.size();}
+        public Stats stats(){return new Stats(cells.size(),reusedCells,pointTests,testedBoxes);}
         public Sample inspect(String owner,BlockPos pos,Vec point) {
             var key=new CellKey(owner,pos);
             Cell evidence=cells.get(key);
             boolean added=evidence==null;
             if(added) {
-                // Structural identity and live BlockState are checked once.
-                Check basic=auditNative(server,dimension,owner,pos,null);
-                VoxelShape shape=null;
-                BlockPos relative=pos;
+                // Single owner/block/shape snapshot. Never share across source groups.
+                var captured=new ShapeCapture();
+                Check basic=auditNative(server,dimension,owner,pos,null,captured);
+                List<AABB> boxes=List.of();
                 if(basic.verified()) {
-                    try {
-                        ServerLevel level=null;
-                        for(var candidate:server.getAllLevels())
-                            if(candidate.dimension().location().toString().equals(dimension)) {level=candidate;break;}
-                        if(level==null)throw new IllegalStateException("dimension lost");
-                        if(owner.startsWith("WORLD:")) {
-                            shape=level.getBlockState(pos).getCollisionShape(level,pos);
-                        } else {
-                            var container=SubLevelContainer.getContainer(level);
-                            UUID id=UUID.fromString(owner.substring(5));
-                            var sub=container.getSubLevel(id);
-                            if(sub==null || sub.isRemoved())
-                                throw new IllegalStateException("owner changed");
-                            var plot=sub.getPlot();
-                            BlockPos accessorPos=new BlockPos(basic.key().x(),basic.key().y(),basic.key().z());
-                            shape=plot.getEmbeddedLevelAccessor().getBlockState(accessorPos)
-                                    .getCollisionShape(plot.getEmbeddedLevelAccessor(),accessorPos);
-                        }
-                        if(shape==null || shape.isEmpty())
-                            basic=Check.failed(Status.BLOCK_UNAVAILABLE,"CACHE_SHAPE_MISSING");
-                    } catch(RuntimeException ex) {
-                        basic=Check.failed(Status.OWNER_CHANGED,"CACHE_OWNER_OR_SHAPE_CHANGED");
-                        shape=null;
-                    }
+                    if(captured.value==null || captured.value.isEmpty())
+                        basic=Check.failed(Status.BLOCK_UNAVAILABLE,"CACHE_SHAPE_MISSING");
+                    else boxes=List.copyOf(captured.value.toAabbs());
                 }
-                evidence=new Cell(basic,shape,relative);
+                evidence=new Cell(basic,boxes,pos);
                 cells.put(key,evidence);
-            }
+            } else reusedCells++;
             Check structural=evidence.identity();
             if(!structural.verified())return new Sample(structural,added);
-            if(!nearShape(evidence.shape(),point,evidence.shapePos()))
+            pointTests++;
+            testedBoxes+=evidence.boxes().size();
+            if(!nearAabbs(evidence.boxes(),point,evidence.shapePos()))
                 return new Sample(Check.failed(Status.BLOCK_MISMATCH,"CACHED_SHAPE_POINT_MISS"),added);
             return new Sample(structural,added);
         }
@@ -178,9 +170,14 @@ public final class OwnerResolver {
      * block, not merely inside some populated neighboring block. */
     private static boolean nearShape(VoxelShape shape,Vec point,BlockPos block) {
         if(shape==null || shape.isEmpty() || point==null || !point.finite())return false;
+        return nearAabbs(shape.toAabbs(),point,block);
+    }
+    // Package-visible for geometry regression tests. No owner inference or credit here.
+    static boolean nearAabbs(List<AABB> boxes,Vec point,BlockPos block) {
+        if(boxes==null || boxes.isEmpty() || point==null || !point.finite())return false;
         double x=point.x()-block.getX(),y=point.y()-block.getY(),z=point.z()-block.getZ();
         final double eps2=(1.0/32)*(1.0/32);
-        for(var box:shape.toAabbs()) {
+        for(var box:boxes) {
             double dx=Math.max(0,Math.max(box.minX-x,x-box.maxX));
             double dy=Math.max(0,Math.max(box.minY-y,y-box.maxY));
             double dz=Math.max(0,Math.max(box.minZ-z,z-box.maxZ));
@@ -200,6 +197,10 @@ public final class OwnerResolver {
     }
     private static Check check(ServerLevel level, dev.ryanhcode.sable.api.sublevel.ServerSubLevelContainer container,
                                BlockTarget proposed, String expectedBlockId,Vec localContact) {
+        return check(level,container,proposed,expectedBlockId,localContact,null);
+    }
+    private static Check check(ServerLevel level, dev.ryanhcode.sable.api.sublevel.ServerSubLevelContainer container,
+                                BlockTarget proposed, String expectedBlockId,Vec localContact,ShapeCapture capture) {
         if(proposed==null) return Check.failed(Status.NO_TARGET,"OTHER_NOT_PRESENT");
         if(!proposed.valid() || container==null || proposed.space()==Space.UNKNOWN)
             return Check.failed(Status.OWNER_UNRESOLVED, proposed.provenance());
@@ -231,6 +232,7 @@ public final class OwnerResolver {
                 if(state!=null) {
                     var shape=state.getCollisionShape(actualPlot.getEmbeddedLevelAccessor(),relative);
                     if(shape.isEmpty())return Check.failed(Status.BLOCK_UNAVAILABLE,"PLOT_SHAPE_EMPTY");
+                    if(capture!=null)capture.value=shape;
                     if(localContact!=null && !nearShape(shape,localContact,pos))
                         return Check.failed(Status.BLOCK_MISMATCH,"PLOT_SHAPE_MISS");
                 }
@@ -244,6 +246,7 @@ public final class OwnerResolver {
                 if(state!=null) {
                     var shape=state.getCollisionShape(level,pos);
                     if(shape.isEmpty())return Check.failed(Status.BLOCK_UNAVAILABLE,"WORLD_SHAPE_EMPTY");
+                    if(capture!=null)capture.value=shape;
                     if(localContact!=null && !nearShape(shape,localContact,pos))
                         return Check.failed(Status.BLOCK_MISMATCH,"WORLD_SHAPE_MISS");
                 }

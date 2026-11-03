@@ -49,12 +49,14 @@ public final class RealFixRuntimeBridge {
     private final GameImpactCredit credit=new GameImpactCredit(Settings.fromSystemProperties());
     private final ContactCreditLedger regionLedger=new ContactCreditLedger();
     private final WorldClearanceVerifier worldClearance=new WorldClearanceVerifier();
+    private final ForceCalibration forceCalibration=new ForceCalibration();
     private final Map<Pair,Tracked> tracked=new HashMap<>();
     private final Map<String,Generation> generations=new HashMap<>();
     private long credited,observed,zero,missingOwner,ambiguousOwners,missingTarget;
     private long r2Verified, r2Rejected, r3Verified, prearmed, r1Fallback;
     private long multiGroupCredits, multiRegions, ledgerRejected, multiTooBroad;
     private long r2Audits,r2SkippedDuplicate,r2ShapeChecks;
+    private long clearanceCalls,clearanceCellReads,clearanceElapsedNanos,clearanceProved;
     private long lastDropped,lastMalformed,lastCallbackDropped,lastPreHistoryDropped;
     private static final class Tracked {
         Target a,b;
@@ -127,6 +129,8 @@ public final class RealFixRuntimeBridge {
         runId=UUID.randomUUID().toString();
         lastDropped=lastMalformed=lastCallbackDropped=lastPreHistoryDropped=0;
         r2Audits=r2SkippedDuplicate=r2ShapeChecks=0;
+        clearanceCalls=clearanceCellReads=clearanceElapsedNanos=clearanceProved=0;
+        forceCalibration.clear();
     }
 
     /** Called only from ServerTickEvent.Post. Never mutate any world or native buffer. */
@@ -393,6 +397,8 @@ public final class RealFixRuntimeBridge {
                     boolean granted=grant!=null && grant.credited();
                     if(granted) {
                         credited++;
+                        // Only the first approved frame of each actually issued grant.
+                        forceCalibration.record(result.peakForce(),credit.settings());
                         multiGroupCredits++;
                         multiRegions+=grant.observedRegions();
                     } else {
@@ -484,7 +490,7 @@ public final class RealFixRuntimeBridge {
             generations.entrySet().removeIf(e->!e.getValue().present
                     && e.getValue().lastSeen>=0 && now-e.getValue().lastSeen>600);
             tracked.entrySet().removeIf(e->now>e.getValue().lastSeen && now-e.getValue().lastSeen>600);
-            log.info("[PDD-0.3.1QFix] phase=SUMMARY observed={} credited={} zero={} ownerMissing={} targetMissing={} ambiguous={} trackedPairs={} r2Verified={} r2Rejected={} r3Verified={} prearmed={} r1Fallback={} regionGroups={} regionCount={} regionTooBroad={} ledgerRejected={} activeCredits={} observerErrors={} nativeDropped={} nativeMalformed={} nativeCapSaturatedPolls={} r2Audits={} r2SkippedDuplicate={} r2ActualShapeChecks={} callbackDropped={} preHistoryDropped={} generation=IDS-1.0.5-A mutation=OFF",
+            log.info("[PDD-0.3.1superFix] phase=SUMMARY observed={} credited={} zero={} ownerMissing={} targetMissing={} ambiguous={} trackedPairs={} r2Verified={} r2Rejected={} r3Verified={} prearmed={} r1Fallback={} regionGroups={} regionCount={} regionTooBroad={} ledgerRejected={} activeCredits={} observerErrors={} nativeDropped={} nativeMalformed={} nativeCapSaturatedPolls={} r2Audits={} r2SkippedDuplicate={} r2ActualShapeChecks={} callbackDropped={} preHistoryDropped={} generation=IDS-1.0.6 mutation=OFF",
                     observed,credited,zero,missingOwner,missingTarget,ambiguousOwners,tracked.size(),
                     r2Verified,r2Rejected,r3Verified,prearmed,r1Fallback,
                     multiGroupCredits,multiRegions,multiTooBroad,ledgerRejected,regionLedger.size(),
@@ -492,6 +498,20 @@ public final class RealFixRuntimeBridge {
                     NativeCollisionTelemetry.dropped(),NativeCollisionTelemetry.malformed(),
                     NativeCollisionTelemetry.nativeCapSaturatedPolls(),r2Audits,r2SkippedDuplicate,r2ShapeChecks,
                     com.physicaldestroydeform.diagnostics.SableContactQueue.dropped(),SableFrameCapture.preHistoryDropped());
+            if(VERF_ENABLED) {
+                var evidence=forceCalibration.snapshot();
+                var settings=credit.settings();
+                log.info("[PDD-SUPERFIX-CAL] approved={} saturated={} minPeak={} maxPeak={} minRawQ={} maxRawQ={} " +
+                        "forceBuckets=[0:16,16:64,64:256,256:1024,1024:4096,4096:16384,16384:65536,65536:inf] counts={} " +
+                        "forceFloor={} forceGain={} maxGroupQ={} mutation=OFF",
+                        evidence.approved(),evidence.saturated(),evidence.minPeak(),evidence.maxPeak(),
+                        evidence.minRawQ(),evidence.maxRawQ(),evidence.forceBuckets(),
+                        settings.forceFloor(),settings.forceGain(),settings.maxGroupQ());
+                log.info("[PDD-SUPERFIX-CLEARANCE-PROF] calls={} cellReads={} elapsedNanos={} proved={} " +
+                        "maxCells={} confirmPerTick={} mutation=OFF",
+                        clearanceCalls,clearanceCellReads,clearanceElapsedNanos,clearanceProved,
+                        WorldClearanceVerifier.MAX_CELLS,WorldClearanceVerifier.MAX_CONFIRM_PER_TICK);
+            }
         }
     }
 
@@ -706,7 +726,10 @@ public final class RealFixRuntimeBridge {
             var container=SubLevelContainer.getContainer(level);
             if(container==null){worldClearance.contact(pair);return new WorldClearanceVerifier.Result(
                     WorldClearanceVerifier.Status.UNAVAILABLE,0,0,"NO_SABLE_CONTAINER");}
-            return worldClearance.inspect(pair,plotBox,now,remaining,confirmationRemaining,(x,y,z)->{
+            long startNanos=VERF_ENABLED?System.nanoTime():0;
+            int[] cellsRead={0};
+            var result=worldClearance.inspect(pair,plotBox,now,remaining,confirmationRemaining,(x,y,z)->{
+                cellsRead[0]++;
                 BlockPos pos=new BlockPos(x,y,z);
                 try {
                     if(!level.hasChunkAt(pos))return WorldClearanceVerifier.Cell.UNAVAILABLE;
@@ -718,6 +741,13 @@ public final class RealFixRuntimeBridge {
                             ? WorldClearanceVerifier.Cell.COLLIDER:WorldClearanceVerifier.Cell.EMPTY;
                 } catch(RuntimeException invalid) {return WorldClearanceVerifier.Cell.UNAVAILABLE;}
             });
+            if(VERF_ENABLED) {
+                clearanceCalls++;
+                clearanceCellReads+=cellsRead[0];
+                clearanceElapsedNanos+=Math.max(0L,System.nanoTime()-startNanos);
+                if(result.proved())clearanceProved++;
+            }
+            return result;
         }
         worldClearance.contact(pair);
         return new WorldClearanceVerifier.Result(WorldClearanceVerifier.Status.UNAVAILABLE,

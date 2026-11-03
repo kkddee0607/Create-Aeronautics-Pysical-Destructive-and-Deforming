@@ -3,6 +3,8 @@ package com.physicaldestroydeform.collision;
 import org.junit.jupiter.api.Test;
 import net.minecraft.core.BlockPos;
 import java.util.UUID;
+import java.util.List;
+import net.minecraft.world.phys.AABB;
 import static com.physicaldestroydeform.collision.OwnerResolver.*;
 import static com.physicaldestroydeform.collision.CollisionFrame.Space.*;
 import static org.junit.jupiter.api.Assertions.*;
@@ -36,5 +38,21 @@ class OwnerResolverTest {
         assertThrows(IllegalArgumentException.class,()->new TargetKey("x",STATIC_WORLD,UUID.randomUUID(),1,2,3,"x"));
         assertThrows(IllegalArgumentException.class,()->new TargetKey("x",STATIC_WORLD,null,1,2,3,""));
         assertFalse(new Check(Status.OWNER_UNRESOLVED,null,"unresolved").verified());
+    }
+
+    @Test void cachedVoxelGeometryStillChecksEachIndependentWitness() {
+        BlockPos cell=new BlockPos(10,64,-4);
+        var boxes=List.of(new AABB(0,0,0,0.25,1,1),new AABB(0.75,0,0,1,1,1));
+        assertTrue(OwnerResolver.nearAabbs(boxes,new FrameMath.Vec(10.10,64.5,-3.5),cell));
+        assertTrue(OwnerResolver.nearAabbs(boxes,new FrameMath.Vec(10.90,64.5,-3.5),cell));
+        assertFalse(OwnerResolver.nearAabbs(boxes,new FrameMath.Vec(10.50,64.5,-3.5),cell));
+    }
+    @Test void cachedShapeToleranceAndInvalidWitnessPreserveR2Veto() {
+        BlockPos cell=new BlockPos(10,64,-4);
+        var boxes=List.of(new AABB(0,0,0,1,1,1));
+        assertTrue(OwnerResolver.nearAabbs(boxes,new FrameMath.Vec(9.97,64.5,-3.5),cell));
+        assertFalse(OwnerResolver.nearAabbs(boxes,new FrameMath.Vec(9.90,64.5,-3.5),cell));
+        assertFalse(OwnerResolver.nearAabbs(boxes,new FrameMath.Vec(Double.NaN,64,-4),cell));
+        assertFalse(OwnerResolver.nearAabbs(List.of(),new FrameMath.Vec(10.5,64.5,-3.5),cell));
     }
 }

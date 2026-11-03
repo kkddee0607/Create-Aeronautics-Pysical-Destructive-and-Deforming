@@ -10,14 +10,14 @@ import java.util.Objects;
 import java.util.Set;
 
 /**
- * IDS 1.0.5-A §22.4: one read-only debit ledger for a verified pair episode.
+ * IDS 1.0.6 §22.4: one read-only debit ledger for a verified pair episode.
  * Native contact point ordinals are never solver contact IDs or credit IDs.
  * A single source force event may reach several independently audited blocks,
  * but its Q is issued once, then split among bounded verified targets per side.
  */
 public final class ContactCreditLedger {
-    public static final String ALGORITHM_REVISION = "PDD-IDS-1.0.5-A/0.3.1realFix";
-    // Never exceed the 32 distinct source-shape checks allowed per owner.
+    public static final String ALGORITHM_REVISION = "PDD-IDS-1.0.6/0.3.1superFix";
+    // Never allocate one side to more than 32 independently verified owner-local targets.
     public static final int MAX_TARGETS_PER_SIDE = 32;
     public static final int MAX_REGIONS = 2 * MAX_TARGETS_PER_SIDE;
     public static final int MAX_ENTRIES = 4096;
