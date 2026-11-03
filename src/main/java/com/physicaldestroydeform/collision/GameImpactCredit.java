@@ -15,7 +15,7 @@ import java.util.Objects;
  * No Minecraft/Sable mutable object crosses this boundary.</p>
  */
 public final class GameImpactCredit {
-    public static final String POLICY_REVISION = "PDD-IDS-1.0.6/0.3.1duperFix";
+    public static final String POLICY_REVISION = "PDD-IDS-1.0.6/0.4.0";
 
     public record Settings(double forceEnter, double forceFloor, double forceGain,
                            double maxGroupQ, int separatedFrames, int maxEntries,
@@ -35,7 +35,7 @@ public final class GameImpactCredit {
                 !Double.isFinite(risingRatio) || risingRatio < 1 || quietFrames < 2)
                 throw new IllegalArgumentException("invalid provisional credit settings");
         }
-        /** 0.3.1duperFix developer calibration: six first-approved 2026-11-03
+        /** 0.4.0 developer calibration: six first-approved 2026-11-03
          * peaks span 3,849..52,421; old gain .25 saturated all at Q=64.
          * Game proxy only, not a physics impulse/energy estimate. */
         public static Settings provisional() { return new Settings(2, 2, 0.001, 64, 2, 4096, 600); }

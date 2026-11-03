@@ -16,7 +16,7 @@ import java.util.Set;
  * but its Q is issued once, then split among bounded verified targets per side.
  */
 public final class ContactCreditLedger {
-    public static final String ALGORITHM_REVISION = "PDD-IDS-1.0.6/0.3.1duperFix";
+    public static final String ALGORITHM_REVISION = "PDD-IDS-1.0.6/0.4.0";
     // Never allocate one side to more than 32 independently verified owner-local targets.
     public static final int MAX_TARGETS_PER_SIDE = 32;
     public static final int MAX_REGIONS = 2 * MAX_TARGETS_PER_SIDE;
@@ -56,7 +56,7 @@ public final class ContactCreditLedger {
         public double accounted() {return allocatedA()+allocatedB()+unused;}
         /** All issued Q is sealed into reserved shares or unused on issue. */
         public double availableQ() {return 0;}
-        /** No world damage or commitment exists in PDD 0.3.1. */
+        /** 0.4.0 material plans are predictions, not committed world damage. */
         public double spent() {return 0;}
         public boolean credited() {return status==Status.ISSUED && issuedQ>0;}
     }

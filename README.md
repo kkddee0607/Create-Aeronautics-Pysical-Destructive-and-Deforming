@@ -1,6 +1,18 @@
-# PDD 0.3.1duperFix — Physical Destruction and Deforming
+# PDD 0.4.0 — Physical Destruction and Deforming
 
-## Release 0.3.1duperFix (IDS 1.0.6)
+## Release 0.4.0 (IDS 1.0.6)
+
+**GitHub baseline:** `main` `bb064c58381bac8bafae3da36fd591567acc3fb2` (2026-11-03). Original 134 Apply-eligible source files verified against their Git blob SHA values. Read the [0.4.0 implementation and test report](docs/verification/0.4.0.md) for exact feature gates.
+
+**Complete 0.4.0 planning core:** H/T/D/E material profiles and immutable generation snapshots; explicit vanilla anchors and priority overrides, registered-block/recipe and relevant BlockState inference; hardness/elasticity curves, first-pass Direct/Plastic/Stress budget accounting, fixed-point 1/256 damage remainder; verified Credit-to-target material planning; optional verified directional evidence; sparse owner-local key, value and CRC-checked versioned serializer. The original duperFix Q/owner/rearm FSM and Sable post-effect observer stay unchanged.
+
+**No block mutation:** 0.4.0 calculates and logs `PREVIEW_ONLY` plans, never actual damage, stress propagation, deformation, destruction, client visuals, drops or storage writes. These are explicitly later-version features under IDS 1.0.6. The repo's existing protected Apply/Actions files remain in GitHub and are not included in the Apply ZIP.
+
+**Example overrides:** [pdd-materials.example.json](pdd-materials.example.json) defines H, T, D, E, `yieldThreshold`, exact per-BlockState selectors, and optional `unbreakable=true`. Place the user copy under `config/pdd-materials.json`. Disabled Plastic/Stress branches are accounted as unused, not added to Direct.
+
+---
+
+## Historical release 0.3.1duperFix (IDS 1.0.6)
 
 **GitHub source:** `main` at `9563c2c16052a8b42e29b62bc5067bfacb09e085`, November 3, 2026. Source is the existing superFix full Apply-eligible ZIP, with Java/Gradle and IDS blob hashes matched to GitHub main. Do not infer source from a JAR.
 

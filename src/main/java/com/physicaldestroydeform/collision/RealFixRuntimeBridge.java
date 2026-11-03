@@ -1,6 +1,9 @@
 package com.physicaldestroydeform.collision;
 
 import com.physicaldestroydeform.diagnostics.NativeCollisionTelemetry;
+import com.physicaldestroydeform.material.MaterialPlanner;
+import com.physicaldestroydeform.material.MaterialRegistry;
+import com.physicaldestroydeform.DamageModel;
 import com.physicaldestroydeform.diagnostics.RawObservation;
 import dev.ryanhcode.sable.api.sublevel.SubLevelContainer;
 import dev.ryanhcode.sable.sublevel.ServerSubLevel;
@@ -55,6 +58,7 @@ public final class RealFixRuntimeBridge {
     private long credited,observed,zero,missingOwner,ambiguousOwners,missingTarget;
     private long r2Verified, r2Rejected, r3Verified, prearmed, r1Fallback;
     private long multiGroupCredits, multiRegions, ledgerRejected, multiTooBroad;
+    private long materialPlanned, materialMissing, materialRejected;
     private long r2Audits,r2SkippedDuplicate,r2ShapeChecks;
     private long clearanceCalls,clearanceCellReads,clearanceElapsedNanos,clearanceProved;
     private long lastDropped,lastMalformed,lastCallbackDropped,lastPreHistoryDropped;
@@ -131,6 +135,7 @@ public final class RealFixRuntimeBridge {
         r2Audits=r2SkippedDuplicate=r2ShapeChecks=0;
         clearanceCalls=clearanceCellReads=clearanceElapsedNanos=clearanceProved=0;
         forceCalibration.clear();
+        materialPlanned=materialMissing=materialRejected=0;
     }
 
     /** Called only from ServerTickEvent.Post. Never mutate any world or native buffer. */
@@ -163,6 +168,7 @@ public final class RealFixRuntimeBridge {
         // Pre-solver snapshots may be from multiple substeps. A runtime pair is
         // accepted only when every matching snapshot maps to the same stable pair.
         int lines=0;
+        int materialLines=0;
         // Clearance is safety-critical. R4 is diagnostic-only: separate
         // bounded budgets prevent R4 from starving positive separation proof.
         int[] remainingClearanceChecks={RealFixBoundaryCandidates.MAX_PER_TICK};
@@ -401,6 +407,48 @@ public final class RealFixRuntimeBridge {
                         forceCalibration.record(result.peakForce(),credit.settings());
                         multiGroupCredits++;
                         multiRegions+=grant.observedRegions();
+                        // IDS 1.0.6 §24.1: consume issued immutable shares for a *pure preview*.
+                        // Do not allocate a new Q, alter Sable, or persist predicted damage.
+                        try {
+                            var materials=MaterialRegistry.snapshot();
+                            var planReport=MaterialPlanner.plan(grant,materials.generation(),
+                                    materials::resolveFingerprint,DamageModel.Settings.defaults());
+                            materialPlanned+=planReport.plans().size();
+                            if(planReport.missingMaterialQ()>0)materialMissing++;
+                            double difference=Math.abs(planReport.accountedQ()-grant.issuedQ());
+                            if(difference>1.0e-7)
+                                throw new IllegalStateException("material Q reconciliation failed " + difference);
+                            if(materialLines++<24)log.info("[PDD-MATERIAL-PLAN] credit={} " +
+                                    "revision={} materialGeneration={} verifiedTargets={} missingMaterialQ={} " +
+                                    "reservedQ={} absorbedQ={} directQ={} unusedPlannedQ={} " +
+                                    "fixedIncrement={} direction=UNKNOWN stress=INACTIVE plastic=INACTIVE " +
+                                    "state=PREVIEW_ONLY committedDamage=0 mutation=OFF",
+                                    planReport.creditId(),DamageModel.ALGORITHM_REVISION,
+                                    planReport.materialGeneration(),planReport.plans().size(),
+                                    planReport.missingMaterialQ(),grant.issuedQ(),planReport.absorbedQ(),
+                                    planReport.directQ(),planReport.unusedPlannedQ(),
+                                    planReport.fixedIncrementTotal());
+                            // Show a bounded number of exact owner-local plans, never a world scan.
+                            for(int i=0;i<Math.min(8,planReport.plans().size()) && materialLines++<24;i++) {
+                                var targetPlan=planReport.plans().get(i);
+                                var m=targetPlan.material();var planned=targetPlan.plan();
+                                log.info("[PDD-MATERIAL-TARGET] key={} H={} T={} D={} E={} unbreakable={} " +
+                                                "Q={} absorbed={} direct={} plasticUnused={} stressUnused={} " +
+                                                "rawDamage={} incrementFixed={} predictedDamage={} remainder={} " +
+                                                "thresholdReached={} plasticPreview={} direction=UNKNOWN " +
+                                                "applied=false reason=PLAN_ONLY mutation=OFF",
+                                        targetPlan.key(),m.hardness(),m.threshold(),m.ductilityPercent(),
+                                        m.elasticityPercent(),m.unbreakable(),planned.incomingQ(),
+                                        planned.absorbedQ(),planned.directQ(),planned.plasticQ(),planned.stressQ(),
+                                        planned.rawDamage(),planned.fixedIncrement(),planned.plannedDamageU8(),
+                                        planned.plannedRemainderU8(),planned.thresholdReached(),
+                                        planned.plannedPlasticIncrement());
+                            }
+                        } catch (RuntimeException invalidMaterialPlan) {
+                            materialRejected++;
+                            log.warn("[PDD-MATERIAL-PLAN] reason=PLAN_REJECTED " +
+                                    "credit={} Q={} applied=false mutation=OFF",grant.id(),grant.issuedQ(),invalidMaterialPlan);
+                        }
                     } else {
                         zero++;
                         if(grant!=null)ledgerRejected++;
@@ -493,7 +541,7 @@ public final class RealFixRuntimeBridge {
             // had a contact. Expiring on lastSeen (-1) discards its verified
             // clearance/AABB evidence while GameImpactCredit stays ARMED.
             tracked.entrySet().removeIf(e->trackedIdleExpired(now,e.getValue().lastProcessed));
-            log.info("[PDD-0.3.1duperFix] phase=SUMMARY observed={} credited={} zero={} ownerMissing={} targetMissing={} ambiguous={} trackedPairs={} r2Verified={} r2Rejected={} r3Verified={} prearmed={} r1Fallback={} regionGroups={} regionCount={} regionTooBroad={} ledgerRejected={} activeCredits={} observerErrors={} nativeDropped={} nativeMalformed={} nativeCapSaturatedPolls={} r2Audits={} r2SkippedDuplicate={} r2ActualShapeChecks={} callbackDropped={} preHistoryDropped={} generation=IDS-1.0.6 mutation=OFF",
+            log.info("[PDD-0.4.0] phase=SUMMARY observed={} credited={} zero={} ownerMissing={} targetMissing={} ambiguous={} trackedPairs={} r2Verified={} r2Rejected={} r3Verified={} prearmed={} r1Fallback={} regionGroups={} regionCount={} regionTooBroad={} ledgerRejected={} activeCredits={} observerErrors={} nativeDropped={} nativeMalformed={} nativeCapSaturatedPolls={} r2Audits={} r2SkippedDuplicate={} r2ActualShapeChecks={} callbackDropped={} preHistoryDropped={} generation=IDS-1.0.6 mutation=OFF",
                     observed,credited,zero,missingOwner,missingTarget,ambiguousOwners,tracked.size(),
                     r2Verified,r2Rejected,r3Verified,prearmed,r1Fallback,
                     multiGroupCredits,multiRegions,multiTooBroad,ledgerRejected,regionLedger.size(),
@@ -501,6 +549,9 @@ public final class RealFixRuntimeBridge {
                     NativeCollisionTelemetry.dropped(),NativeCollisionTelemetry.malformed(),
                     NativeCollisionTelemetry.nativeCapSaturatedPolls(),r2Audits,r2SkippedDuplicate,r2ShapeChecks,
                     com.physicaldestroydeform.diagnostics.SableContactQueue.dropped(),SableFrameCapture.preHistoryDropped());
+            log.info("[PDD-MATERIAL-PLAN] phase=SUMMARY targetsPlanned={} missingMaterialEvents={} " +
+                    "planRejected={} mode=PREVIEW_ONLY storedEntries=0 applied=0 mutation=OFF",
+                    materialPlanned,materialMissing,materialRejected);
             if(VERF_ENABLED) {
                 var evidence=forceCalibration.snapshot();
                 var settings=credit.settings();

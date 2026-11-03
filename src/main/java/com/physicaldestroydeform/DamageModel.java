@@ -1,34 +1,100 @@
 package com.physicaldestroydeform;
 
-/** Prototype calculations only: never used for world damage in 0.2.12. */
+import java.util.Objects;
+
+/** IDS 1.0.6 §24.1 game-Q planning only. No block mutation or committed damage. */
 public final class DamageModel {
-    public static final double MAX_REDUCTION_PER_PROPERTY = 0.90;
+    public static final String ALGORITHM_REVISION = "PDD-IDS-1.0.6/0.4.0";
+    public static final double DIRECT_SHARE = 0.60;
+    public static final double PLASTIC_SHARE = 0.15;
+    public static final double STRESS_SHARE = 0.25;
     private DamageModel() {}
-    public static double effectiveLocalDamage(double impactDamage, MaterialProperties material) {
-        if (material == null) throw new IllegalArgumentException("material must not be null");
-        if (!Double.isFinite(impactDamage) || impactDamage <= 0) return 0;
-        double hardnessReduction = material.hardnessNormalized() * MAX_REDUCTION_PER_PROPERTY;
-        return impactDamage * (1.0 - hardnessReduction);
+
+    public record Settings(double minHardnessFactor, double hardnessExponent,
+                           double minElasticFactor, double elasticExponent,
+                           double damageGain, double deformationGain) {
+        public Settings {
+            if (!Double.isFinite(minHardnessFactor) || minHardnessFactor<=0 || minHardnessFactor>1
+                    || !Double.isFinite(hardnessExponent) || hardnessExponent<=0
+                    || !Double.isFinite(minElasticFactor) || minElasticFactor<=0 || minElasticFactor>1
+                    || !Double.isFinite(elasticExponent) || elasticExponent<=0
+                    || !Double.isFinite(damageGain) || damageGain<=0
+                    || !Double.isFinite(deformationGain) || deformationGain<=0)
+                throw new IllegalArgumentException("invalid PDD material damage policy");
+        }
+        public static Settings defaults() {return new Settings(0.08,1.5,0.15,1.5,1,1);}
     }
-    public static double neighborStress(double residualStress, MaterialProperties material) {
-        if (material == null) throw new IllegalArgumentException("material must not be null");
-        if (!Double.isFinite(residualStress) || residualStress <= 0) return 0;
-        return residualStress * (1.0 - material.elasticity());
+    public enum Status { PLANNED_NOT_APPLIED, UNBREAKABLE_UNUSED, ZERO_Q }
+    public record Plan(Status status, double incomingQ, double absorbedQ, double activeQ,
+                       double directQ, double plasticQ, double stressQ, double unusedPlannedQ,
+                       double rawDamage, long fixedIncrement, int plannedDamageU8,
+                       int plannedRemainderU8, int plannedPlasticIncrement,
+                       boolean thresholdReached, String algorithmRevision) {
+        public double accountedQ() {return absorbedQ+directQ+unusedPlannedQ;}
+    }
+
+    public static double hardnessFactor(MaterialProperties material, Settings cfg) {
+        Objects.requireNonNull(material); Objects.requireNonNull(cfg);
+        return cfg.minHardnessFactor() + (1-cfg.minHardnessFactor())
+                * Math.pow(1-material.hardnessNormalized(),cfg.hardnessExponent());
+    }
+    public static double elasticityTransmission(MaterialProperties material, Settings cfg) {
+        Objects.requireNonNull(material); Objects.requireNonNull(cfg);
+        return cfg.minElasticFactor() + (1-cfg.minElasticFactor())
+                * Math.pow(1-material.elasticity(),cfg.elasticExponent());
+    }
+    /** Immutable prediction. Plastic/stress are *reserved then unused*, not added to direct. */
+    public static Plan plan(double incomingQ, MaterialProperties material, BlockDamageState previous,
+                            Settings cfg) {
+        if (!Double.isFinite(incomingQ) || incomingQ<0) throw new IllegalArgumentException("invalid source Q");
+        Objects.requireNonNull(material); Objects.requireNonNull(previous); Objects.requireNonNull(cfg);
+        if (incomingQ==0 || material.unbreakable()) {
+            return new Plan(material.unbreakable()?Status.UNBREAKABLE_UNUSED:Status.ZERO_Q,
+                    incomingQ,0,0,0,0,0,incomingQ,0,0,previous.damage(),previous.remainder(),0,
+                    false,ALGORITHM_REVISION);
+        }
+        double active=incomingQ*elasticityTransmission(material,cfg);
+        double absorbed=incomingQ-active;
+        double direct=active*DIRECT_SHARE;
+        double plastic=active*PLASTIC_SHARE;
+        double stress=Math.max(0,active-direct-plastic);
+        double rawDamage=direct*cfg.damageGain()*hardnessFactor(material,cfg);
+        if (!Double.isFinite(rawDamage) || rawDamage<0)
+            throw new IllegalArgumentException("invalid calculated damage");
+        long increment=(long)Math.floor(Math.min(65535.0,rawDamage*BlockDamageState.FIXED_SCALE));
+        BlockDamageState projected=previous.copy();
+        projected.addFixedDamage(increment);
+        int cap=Math.max(0,material.plasticCapacity()-previous.deformation());
+        int plasticIncrement=(int)Math.min(cap,Math.floor(Math.max(0,plastic-material.yieldThreshold())
+                * cfg.deformationGain()));
+        return new Plan(Status.PLANNED_NOT_APPLIED,incomingQ,absorbed,active,direct,plastic,stress,
+                plastic+stress,rawDamage,increment,projected.damage(),projected.remainder(),
+                plasticIncrement,projected.damage()>=material.threshold(),ALGORITHM_REVISION);
+    }
+
+    /** Pure helper retained for earlier code. This is direct hardness resistance, not a new source Q. */
+    public static double effectiveLocalDamage(double directQ, MaterialProperties material) {
+        if (!Double.isFinite(directQ) || directQ<=0) return 0;
+        return directQ*hardnessFactor(material,Settings.defaults());
+    }
+    /** E at a *new* neighbor's admission only; never apply twice to the same node. */
+    public static double neighborStress(double incoming, MaterialProperties newNode) {
+        if (!Double.isFinite(incoming) || incoming<=0) return 0;
+        return incoming*elasticityTransmission(newNode,Settings.defaults());
     }
     public static double baseDamageFromEnergy(ImpactSample impact, double energyPerDamageUnit) {
-        if (impact == null) throw new IllegalArgumentException("impact must not be null");
-        if (!Double.isFinite(energyPerDamageUnit) || energyPerDamageUnit <= 0.0)
-            throw new IllegalArgumentException("energyPerDamageUnit must be finite and > 0");
-        if (!impact.hasUsableImpact()) return 0.0;
-        return impact.impactEnergy() / energyPerDamageUnit;
+        if (impact==null || !Double.isFinite(energyPerDamageUnit) || energyPerDamageUnit<=0)
+            throw new IllegalArgumentException("invalid energy input");
+        return impact.hasUsableImpact()?impact.impactEnergy()/energyPerDamageUnit:0;
     }
+    /** No per-impact ceil: sub-unit damage is carried by BlockDamageState.remainder. */
     public static int quantizeDamage(double damage) {
-        if (!Double.isFinite(damage) || damage <= 0) return 0;
-        return (int) Math.min(255, Math.ceil(damage));
+        if (!Double.isFinite(damage) || damage<=0) return 0;
+        return (int)Math.min(255,Math.floor(damage));
     }
-    public static int damageIncrement(double effectiveDamage, double damageScale) {
-        if (!Double.isFinite(effectiveDamage) || effectiveDamage <= 0
-                || !Double.isFinite(damageScale) || damageScale <= 0) return 0;
-        return quantizeDamage(effectiveDamage * damageScale);
+    public static int damageIncrement(double effectiveDamage,double damageScale) {
+        if (!Double.isFinite(effectiveDamage) || effectiveDamage<=0 ||
+                !Double.isFinite(damageScale) || damageScale<=0) return 0;
+        return quantizeDamage(effectiveDamage*damageScale);
     }
 }
