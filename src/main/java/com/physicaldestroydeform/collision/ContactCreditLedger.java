@@ -16,7 +16,7 @@ import java.util.Set;
  * but its Q is issued once, then split among bounded verified targets per side.
  */
 public final class ContactCreditLedger {
-    public static final String ALGORITHM_REVISION = "PDD-IDS-1.0.6/0.3.1superFix";
+    public static final String ALGORITHM_REVISION = "PDD-IDS-1.0.6/0.3.1duperFix";
     // Never allocate one side to more than 32 independently verified owner-local targets.
     public static final int MAX_TARGETS_PER_SIDE = 32;
     public static final int MAX_REGIONS = 2 * MAX_TARGETS_PER_SIDE;

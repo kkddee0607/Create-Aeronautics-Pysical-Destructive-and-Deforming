@@ -20,7 +20,7 @@ final class GameImpactCreditTest {
         return new Frame(P,tick,observed,separation,approach,a,b);
     }
     @Test void verificationSnapshotIsReadOnlyAndShowsPendingEvidenceConsumption() {
-        var engine=new GameImpactCredit(Settings.provisional());
+        var engine=new GameImpactCredit(new GameImpactCredit.Settings(2,2,0.25,64,2,4096,600));
         assertEquals(Phase.UNINITIALIZED,engine.evidence(P).phase());
         engine.step(frame(1,List.of(),true,false,TA,TB));
         engine.step(frame(2,List.of(),true,false,TA,TB));
@@ -42,14 +42,19 @@ final class GameImpactCreditTest {
         assertEquals(Reason.DUPLICATE_EPISODE,
                 engine.step(frame(5,MANY,false,true,TA,TB)).reason());
     }
-    @Test void defaultPolicyIsBoundedAndDocumented() {
-        assertEquals(10.0,Settings.provisional().candidate(42));
-        assertEquals(0.0,Settings.provisional().candidate(1.8));
-        assertEquals(64.0,Settings.provisional().candidate(100000));
+    @Test void defaultPolicyIsBoundedAndSeparatesMeasuredImpactStrengths() {
+        var d=Settings.provisional();
+        assertEquals(0.001,d.forceGain(),1e-12);
+        assertEquals(0.0,d.candidate(1.8));
+        assertEquals(3.84728271484375,d.candidate(3849.28271484375),1e-9);
+        assertEquals(30.17988671875,d.candidate(30181.88671875),1e-9);
+        assertEquals(52.41902,d.candidate(52421.02),1e-9);
+        assertEquals(64.0,d.candidate(100000));
+        assertTrue(d.candidate(3849.28271484375)<d.candidate(30181.88671875));
     }
     @Test void duplicateForcePointsProduceOneGroupPeak() {
         assertEquals(42.0,GameImpactCredit.peak(MANY));
-        var e=new GameImpactCredit(Settings.provisional());
+        var e=new GameImpactCredit(new GameImpactCredit.Settings(2,2,0.25,64,2,4096,600));
         e.step(frame(1,List.of(),true,false,TA,TB));
         e.step(frame(2,List.of(),true,false,TA,TB));
         var result=e.step(frame(3,MANY,false,true,TA,TB));
@@ -58,7 +63,7 @@ final class GameImpactCreditTest {
         assertEquals(5.0,result.allocation().sideB());
     }
     @Test void previousGapRemainsArmedUntilContactAndRearmsAfterTwoSeparations() {
-        var e=new GameImpactCredit(Settings.provisional());
+        var e=new GameImpactCredit(new GameImpactCredit.Settings(2,2,0.25,64,2,4096,600));
         assertEquals(Phase.UNINITIALIZED,e.phase(P));
         e.step(frame(1,List.of(),true,false,null,null));
         e.step(frame(2,List.of(),true,false,null,null));
@@ -75,7 +80,7 @@ final class GameImpactCreditTest {
         assertTrue(e.step(frame(24,MANY,false,true,TA,TB)).credited());
     }
     @Test void unprovedGapInterruptsTwoRequiredSeparationSamples() {
-        var e=new GameImpactCredit(Settings.provisional());
+        var e=new GameImpactCredit(new GameImpactCredit.Settings(2,2,0.25,64,2,4096,600));
         e.step(frame(1,MANY,false,true,TA,TB));
         assertEquals(Phase.ACTIVE,e.phase(P));
         e.step(frame(2,List.of(),true,false,TA,TB));
@@ -88,14 +93,14 @@ final class GameImpactCreditTest {
         assertEquals(Phase.ARMED,e.phase(P));
     }
     @Test void noNewCreditDuringTwentySustainedTicks() {
-        var e=new GameImpactCredit(Settings.provisional());
+        var e=new GameImpactCredit(new GameImpactCredit.Settings(2,2,0.25,64,2,4096,600));
         e.step(frame(1,List.of(),true,false,TA,TB));
         e.step(frame(2,List.of(),true,false,TA,TB));
         assertTrue(e.step(frame(3,MANY,false,true,TA,TB)).credited());
         for(int t=4;t<=24;t++)assertFalse(e.step(frame(t,MANY,false,true,TA,TB)).credited());
     }
     @Test void silenceDoesNotProveSeparation() {
-        var e=new GameImpactCredit(Settings.provisional());
+        var e=new GameImpactCredit(new GameImpactCredit.Settings(2,2,0.25,64,2,4096,600));
         e.step(frame(1,MANY,false,true,TA,TB));
         assertEquals(Reason.UNKNOWN_SEPARATION,
                 e.step(frame(2,List.of(),false,false,TA,TB)).reason());
@@ -103,7 +108,7 @@ final class GameImpactCreditTest {
                 e.step(frame(3,MANY,false,true,TA,TB)).reason());
     }
     @Test void requiresVerifiedApproachAndAtLeastOneRealTarget() {
-        var e=new GameImpactCredit(Settings.provisional());
+        var e=new GameImpactCredit(new GameImpactCredit.Settings(2,2,0.25,64,2,4096,600));
         e.step(frame(1,List.of(),true,false,TA,TB));
         e.step(frame(2,List.of(),true,false,TA,TB));
         assertEquals(Reason.APPROACH_UNVERIFIED,
@@ -114,7 +119,7 @@ final class GameImpactCreditTest {
                 e.step(frame(6,MANY,false,true,null,null)).reason());
     }
     @Test void oneVerifiedSideReservesHalf() {
-        var e=new GameImpactCredit(Settings.provisional());
+        var e=new GameImpactCredit(new GameImpactCredit.Settings(2,2,0.25,64,2,4096,600));
         e.step(frame(1,List.of(),true,false,TA,TB));
         e.step(frame(2,List.of(),true,false,TA,TB));
         var c=e.step(frame(3,MANY,false,true,TA,null));
@@ -148,7 +153,7 @@ final class GameImpactCreditTest {
         assertTrue(resolver.resolve(input,inspector).verified());
     }
     @Test void invalidateOwnerGenerationCannotReuseOldArmedState() {
-        var e=new GameImpactCredit(Settings.provisional());
+        var e=new GameImpactCredit(new GameImpactCredit.Settings(2,2,0.25,64,2,4096,600));
         e.step(frame(1,List.of(),true,false,TA,TB));
         e.step(frame(2,List.of(),true,false,TA,TB));
         assertEquals(Phase.ARMED,e.phase(P));
@@ -157,7 +162,7 @@ final class GameImpactCreditTest {
         assertEquals(Reason.INITIAL_CONTACT_UNKNOWN,e.step(frame(3,MANY,false,true,TA,TB)).reason());
     }
     @Test void risingEdgeNeedsQuietEvidenceAndIndependentGeometry() {
-        var e=new GameImpactCredit(Settings.provisional());
+        var e=new GameImpactCredit(new GameImpactCredit.Settings(2,2,0.25,64,2,4096,600));
         assertEquals(1.8,e.settings().risingRatio());
         assertEquals(2,e.settings().quietFrames());
         assertFalse(e.risingEdge(10,30,2,false));
@@ -166,7 +171,7 @@ final class GameImpactCreditTest {
         assertTrue(e.risingEdge(10,18,2,true));
     }
     @Test void activeApprovalUsesEarlierArmedEvidenceWithinTwoFrameBurst() {
-        var e=new GameImpactCredit(Settings.provisional());
+        var e=new GameImpactCredit(new GameImpactCredit.Settings(2,2,0.25,64,2,4096,600));
         e.step(frame(1,List.of(),true,false,null,null));
         e.step(frame(2,List.of(),true,false,null,null));
         var first=e.step(frame(3,MANY,false,true,null,null));

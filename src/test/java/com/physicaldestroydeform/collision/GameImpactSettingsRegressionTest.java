@@ -4,6 +4,20 @@ import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
 
 class GameImpactSettingsRegressionTest {
+    @Test void duperFixDeveloperGainIsBoundedAndOperatorOverridable() {
+        String prior=System.getProperty("pdd.realfix.forceGain");
+        try {
+            System.clearProperty("pdd.realfix.forceGain");
+            assertEquals(0.001,GameImpactCredit.Settings.fromSystemProperties().forceGain(),1e-12);
+            System.setProperty("pdd.realfix.forceGain","0.25");
+            assertEquals(0.25,GameImpactCredit.Settings.fromSystemProperties().forceGain(),1e-12);
+            System.setProperty("pdd.realfix.forceGain","NaN");
+            assertEquals(0.001,GameImpactCredit.Settings.fromSystemProperties().forceGain(),1e-12);
+        } finally {
+            if(prior==null)System.clearProperty("pdd.realfix.forceGain");
+            else System.setProperty("pdd.realfix.forceGain",prior);
+        }
+    }
     @Test void oneSeparatedFrameCannotBypassPhysicalRearm() {
         String old = System.getProperty("pdd.realfix.separatedFrames");
         try {

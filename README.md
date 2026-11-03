@@ -1,19 +1,14 @@
-# PDD 0.3.1superFix — Physical Destruction and Deforming
+# PDD 0.3.1duperFix — Physical Destruction and Deforming
 
-## 0.3.1superFix notes (IDS 1.0.6)
+## Release 0.3.1duperFix (IDS 1.0.6)
 
-Built from GitHub main `473dbdd58286cda5a84941b3bcc5eb60ec711c81`. The source keeps the QFix per-side **32 unique cell audit bound**, 32 verified targets, 64 total regions, Q=64 maximum, single-episode credit, and two independent full-world clearance proofs. These safety limits are not changed on unverified performance assumptions.
+**GitHub source:** `main` at `9563c2c16052a8b42e29b62bc5067bfacb09e085`, November 3, 2026. Source is the existing superFix full Apply-eligible ZIP, with Java/Gradle and IDS blob hashes matched to GitHub main. Do not infer source from a JAR.
 
-Changes: native R2 target auditing now reuses the *same authoritative BlockState/shape read* for geometry evidence instead of re-querying it; caches each cell's collision AABBs and rechecks each independent witness point. Telemetry reports unique cells, reused cells, witness tests and candidate AABBs; force calibration reports approved first-frame peaks, raw Q and saturation distribution without retuning the original Q; clearance profiling reports read counts and elapsed time without changing the atomic proof contract. All world mutation remains OFF.
+**Root fixes:** pre-contact Plot/Plot tracking expiry now uses `lastProcessed` instead of `lastSeen=-1`, preserving proven separation evidence for contact after 600+ ticks. Runtime developer-provisional `forceGain` is now `0.001` instead of `0.25`, preserving the Q=64 cap and linear first-approved force model but avoiding early saturation for observed forces ~3,849–52,421. Original `GameImpactCredit` FSM and `ContactCreditLedger` are unchanged except revision identifiers. No new physics API call or dependency.
 
-The original sections below describe the inherited QFix behavior. See [superFix verification](docs/verification/0.3.1superFix.md) and [IDS 1.0.6](docs/PDD-1.0.6-Integrated-Design-Specification.md).
+**Runtime:** MC Java 1.21.1, NeoForge 21.1.x, Create 6.0.10, Create Aeronautics 1.3.2, Sable 2.0.6. Read-only: `worldMutation=OFF`.
 
-
-**Runtime:** Minecraft Java 1.21.1 · NeoForge 21.1.x · Java 21 · Create 6.0.10 · Create Aeronautics 1.3.2 · Sable 2.0.6.
-
-**Development baseline:** GitHub `main` commit `473dbdd58286cda5a84941b3bcc5eb60ec711c81` (`0.3.1QFix`). The source ZIP's Git blob SHA `22bb5a8e83191d7bd2348aedef54f62d1225d51a` matches the actual uploaded ZIP. The 129 Apply-eligible original files are preserved. Apply Action retains `.github`, `incoming`, `gradle`, `gradlew`, and `gradlew.bat` at GitHub and does not overwrite them.
-
-**Design:** [IDS 1.0.6](docs/PDD-1.0.6-Integrated-Design-Specification.md), the earlier [IDS 1.0.5-A](docs/PDD-1.0.5-Integrated-Design-Specification.md) (historical), [Sable 2.0.6 Plot-coordinate reverse engineering](docs/research/PDD-Sable-2.0.6-Plot-Coordinate-Forensics.md), [plotRog resolution decision](docs/research/PDD-0.3.1plotRog-Resolution-Decision-Report.md). This build changes provisional development multi-target policy 4→32 per side and region cap 16→64; documents version-specific deviation, not a change to earlier historical specifications.
+**Design:** [IDS 1.0.6](docs/PDD-1.0.6-Integrated-Design-Specification.md). The gain change is a version-specific `DEV_PROVISIONAL` policy revision under §23; previous defaults remain visible in historical docs and explicit legacy tests. [DuperFix report and two-session game test](docs/verification/0.3.1duperFix.md); [superFix history](docs/verification/0.3.1superFix.md).
 
 ## 0.3.1QFix changes
 
@@ -34,6 +29,6 @@ The original sections below describe the inherited QFix behavior. See [superFix 
 
 ## Verification and installation
 
-**superFix AI verification:** Java 21 independent compilation of `GameImpactCredit`, `ContactCreditLedger`, `ForceCalibration` succeeded. A separate `assert` runner passed preserved Q/ledger/rearm checks; the three new calibration JUnit methods passed with a **test-only** JUnit-style stub runner. Neither is an official JUnit/Gradle test. A superFix NeoForge Gradle build, GitHub Actions and gameplay are **NOT RUN**. Handoff: [superFix verification report](docs/verification/0.3.1superFix.md); historical [QFix report](docs/verification/0.3.1QFix.md).
+Code and tests changed; see [0.3.1duperFix verification](docs/verification/0.3.1duperFix.md) for actual execution labels, limits, and test procedure. Previous superFix tests are retained; historical 0.25 gain comparisons use explicit legacy Settings.
 
-**Apply:** upload exactly one **complete source ZIP** into GitHub `incoming/`, run/observe existing **Apply PDD ZIP**, then Gradle Build and JUnit/Callback Contract Actions. Install **only the resulting compiled JAR**, not this ZIP, in the game `mods/` directory. Retest B1 against A1/A2/B2/B3 with the same conditions; provide `latest.log` and failed Actions job logs for any regressions. All source ZIP files live directly at the project root (not under an extra containing directory).
+**Apply:** upload exactly one whole-project Apply-eligible root ZIP to GitHub `incoming/`. Existing Apply workflow preserves `.github`, `incoming`, `gradle`, `gradlew`, and `gradlew.bat` from GitHub. Run existing PDD Manual Build and Callback Contract Test Actions, then install only the resulting JAR in `mods/`. Report any failed Actions logs and full `latest.log`.

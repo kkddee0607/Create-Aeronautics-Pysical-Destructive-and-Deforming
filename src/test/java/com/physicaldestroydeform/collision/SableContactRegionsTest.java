@@ -70,7 +70,7 @@ final class SableContactRegionsTest {
                     : ((int)record.contactAX()>=4
                         ? new SableContactRegions.Check(List.of(),0,true,"UNVERIFIED","CELL_BUDGET")
                         : new SableContactRegions.Check(List.of(target(owner,(int)record.contactAX())),1)));
-        var policy=new GameImpactCredit(GameImpactCredit.Settings.provisional());
+        var policy=new GameImpactCredit(new GameImpactCredit.Settings(2,2,0.25,64,2,4096,600));
         policy.step(new GameImpactCredit.Frame(PAIR,1,List.of(),true,false,null,null));
         policy.step(new GameImpactCredit.Frame(PAIR,2,List.of(),true,false,null,null));
         var decision=policy.step(new GameImpactCredit.Frame(PAIR,3,

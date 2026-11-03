@@ -17,7 +17,7 @@ final class ContactCreditLedgerTest {
     private static Target b(int i){return target(PAIR.b().stableKey(),i);}
     private static final List<ObservedForce> SAMPLES=List.of(new ObservedForce(1,2,42,0));
     private static Decision approved(long tick,Pair pair,Target at,Target bt) {
-        var e=new GameImpactCredit(Settings.provisional());
+        var e=new GameImpactCredit(new GameImpactCredit.Settings(2,2,0.25,64,2,4096,600));
         e.step(new Frame(pair,tick-2,List.of(),true,false,null,null));
         e.step(new Frame(pair,tick-1,List.of(),true,false,null,null));
         var result=e.step(new Frame(pair,tick,SAMPLES,false,true,at,bt));
@@ -25,7 +25,7 @@ final class ContactCreditLedgerTest {
         return result;
     }
     @Test void fourReportedPointsOneBudget() {
-        var policy=new GameImpactCredit(Settings.provisional());
+        var policy=new GameImpactCredit(new GameImpactCredit.Settings(2,2,0.25,64,2,4096,600));
         policy.step(new Frame(PAIR,1,List.of(),true,false,null,null));
         policy.step(new Frame(PAIR,2,List.of(),true,false,null,null));
         var forces=List.of(new ObservedForce(1,2,42,0),new ObservedForce(1,2,42,1),
@@ -120,7 +120,7 @@ final class ContactCreditLedgerTest {
         ledger.prune(604);assertEquals(0,ledger.size());
     }
     @Test void distinctRearmedEpisodesCanIssueAgainButSameEpisodeCannot() {
-        var f=new GameImpactCredit(Settings.provisional());
+        var f=new GameImpactCredit(new GameImpactCredit.Settings(2,2,0.25,64,2,4096,600));
         var l=new ContactCreditLedger();
         f.step(new Frame(PAIR,1,List.of(),true,false,null,null));
         f.step(new Frame(PAIR,2,List.of(),true,false,null,null));

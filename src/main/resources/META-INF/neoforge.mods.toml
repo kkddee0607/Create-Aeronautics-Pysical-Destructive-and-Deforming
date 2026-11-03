@@ -4,10 +4,10 @@ license="MIT"
 
 [[mods]]
 modId="physical_destroy_deform"
-version="0.3.1superFix"
+version="0.3.1duperFix"
 displayName="Create Aeronautics: Physical Destruction and Deforming"
 authors="PDD contributors"
-description='''PDD 0.3.1superFix: IDS 1.0.6 bounded contact-region ledger, owner epoch and rearm evidence, single-group Q with per-block allocations. No world mutation.'''
+description='''PDD 0.3.1duperFix: IDS 1.0.6 bounded contact-region ledger, owner epoch and rearm evidence, single-group Q with per-block allocations. No world mutation.'''
 
 [[mixins]]
 config="pdd.mixins.json"

@@ -489,8 +489,11 @@ public final class RealFixRuntimeBridge {
             worldClearance.prune(now);
             generations.entrySet().removeIf(e->!e.getValue().present
                     && e.getValue().lastSeen>=0 && now-e.getValue().lastSeen>600);
-            tracked.entrySet().removeIf(e->now>e.getValue().lastSeen && now-e.getValue().lastSeen>600);
-            log.info("[PDD-0.3.1superFix] phase=SUMMARY observed={} credited={} zero={} ownerMissing={} targetMissing={} ambiguous={} trackedPairs={} r2Verified={} r2Rejected={} r3Verified={} prearmed={} r1Fallback={} regionGroups={} regionCount={} regionTooBroad={} ledgerRejected={} activeCredits={} observerErrors={} nativeDropped={} nativeMalformed={} nativeCapSaturatedPolls={} r2Audits={} r2SkippedDuplicate={} r2ActualShapeChecks={} callbackDropped={} preHistoryDropped={} generation=IDS-1.0.6 mutation=OFF",
+            // A pre-contact ARMED pair is processed every tick, but has never
+            // had a contact. Expiring on lastSeen (-1) discards its verified
+            // clearance/AABB evidence while GameImpactCredit stays ARMED.
+            tracked.entrySet().removeIf(e->trackedIdleExpired(now,e.getValue().lastProcessed));
+            log.info("[PDD-0.3.1duperFix] phase=SUMMARY observed={} credited={} zero={} ownerMissing={} targetMissing={} ambiguous={} trackedPairs={} r2Verified={} r2Rejected={} r3Verified={} prearmed={} r1Fallback={} regionGroups={} regionCount={} regionTooBroad={} ledgerRejected={} activeCredits={} observerErrors={} nativeDropped={} nativeMalformed={} nativeCapSaturatedPolls={} r2Audits={} r2SkippedDuplicate={} r2ActualShapeChecks={} callbackDropped={} preHistoryDropped={} generation=IDS-1.0.6 mutation=OFF",
                     observed,credited,zero,missingOwner,missingTarget,ambiguousOwners,tracked.size(),
                     r2Verified,r2Rejected,r3Verified,prearmed,r1Fallback,
                     multiGroupCredits,multiRegions,multiTooBroad,ledgerRejected,regionLedger.size(),
@@ -690,6 +693,11 @@ public final class RealFixRuntimeBridge {
         if(pair.a().stableKey().equals(firstOwner))return new Box[]{first,second};
         if(pair.b().stableKey().equals(firstOwner))return new Box[]{second,first};
         return null;
+    }
+    /** Track last *verified processing*, not last contact. Both maps must retain
+     * the same live pre-contact episode after 600+ ticks of proven clearance. */
+    static boolean trackedIdleExpired(long now,long lastProcessed) {
+        return now>lastProcessed && now-lastProcessed>600;
     }
     private void seedSeparation(Pair pair,long now,Set<Pair> contacted,
                                 String firstOwner,Box first,Box second,Logger log) {
