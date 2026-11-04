@@ -8,6 +8,10 @@ class MaterialProfilesTest {
     @Test void exactVanillaAnchors() {
         var deep=MaterialProfiles.profile("minecraft:reinforced_deepslate",BASE);
         assertEquals(255,deep.hardness());assertEquals(255,deep.threshold());
+        assertEquals(7,deep.ductilityPercent());assertEquals(7,deep.elasticityPercent());
+        var grass=MaterialProfiles.profile("minecraft:grass_block",BASE);
+        assertEquals(24,grass.hardness());assertEquals(32,grass.threshold());
+        assertEquals(25,grass.ductilityPercent());assertEquals(22,grass.elasticityPercent());
         assertEquals(0,MaterialProfiles.profile("minecraft:obsidian",BASE).elasticityPercent());
         assertEquals(100,MaterialProfiles.profile("minecraft:slime_block",BASE).elasticityPercent());
         assertEquals(100,MaterialProfiles.profile("minecraft:gold_block",BASE).ductilityPercent());

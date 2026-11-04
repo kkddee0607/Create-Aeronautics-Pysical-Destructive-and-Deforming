@@ -22,7 +22,7 @@ public final class DamageModel {
                     || !Double.isFinite(deformationGain) || deformationGain<=0)
                 throw new IllegalArgumentException("invalid PDD material damage policy");
         }
-        public static Settings defaults() {return new Settings(0.08,1.5,0.15,1.5,1,1);}
+        public static Settings defaults() {return new Settings(0.08,1.5,0.15,1.5,2.6,1);}
     }
     public enum Status { PLANNED_NOT_APPLIED, UNBREAKABLE_UNUSED, ZERO_Q }
     public record Plan(Status status, double incomingQ, double absorbedQ, double activeQ,

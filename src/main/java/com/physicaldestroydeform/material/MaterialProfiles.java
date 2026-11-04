@@ -9,7 +9,7 @@ public final class MaterialProfiles {
     public static boolean explicit(String id) {
         return switch(id) {
             case "minecraft:reinforced_deepslate","minecraft:obsidian","minecraft:slime_block",
-                    "minecraft:gold_block","minecraft:iron_block","minecraft:copper_block",
+                    "minecraft:gold_block","minecraft:iron_block","minecraft:copper_block","minecraft:grass_block",
                     "minecraft:oak_planks","minecraft:stone","minecraft:glass","minecraft:dirt" -> true;
             default -> false;
         };
@@ -20,7 +20,8 @@ public final class MaterialProfiles {
         if(base==null)throw new IllegalArgumentException("null material candidate");
         int h=base.hardness(),t=base.threshold(),d=base.ductilityPercent(),e=base.elasticityPercent();
         switch(id) {
-            case "minecraft:reinforced_deepslate" -> {h=255;t=255;d=10;e=20;}
+            case "minecraft:reinforced_deepslate" -> {h=255;t=255;d=7;e=7;}
+            case "minecraft:grass_block" -> {h=24;t=32;d=25;e=22;}
             case "minecraft:obsidian" -> {d=0;e=0;}
             case "minecraft:slime_block" -> {d=80;e=100;}
             case "minecraft:gold_block" -> {d=100;e=20;}

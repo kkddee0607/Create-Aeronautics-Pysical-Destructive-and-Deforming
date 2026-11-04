@@ -62,3 +62,17 @@ Code and tests changed; see [0.3.1duperFix verification](docs/verification/0.3.1
 * Checkpoint filename intentionally **remains `pdd-0.4.0Fix-preview-only.bin`** for backwards-compatible preview restoration; it is still shadow-only (`mutation=OFF`).
 * B3 balloon item drops are a separate, cause-unknown issue. No other mod's block-breaking behavior was changed.
 * Static and actual game/Gradle verification states are reported in `docs/verification/0.4.0moreFix.md`.
+
+
+### Experimental collision-scale calibration (0.4.0scaleFix)
+
+The source default uses `forceGain=0.161`, `maxGroupQ=65536`, and
+`damageGain=2.6` to avoid saturating the total game-Q budget at F=258.
+The game-Q formula, callback contract, and `mutation=OFF` remain unchanged.
+Vanilla grass and reinforced deepslate receive the material-sheet H/T/D/E
+anchors. At hypothetical Sable F=400 (mass 1, 10m/s, 0.025s stop) and
+50% allocation to one grass block, the predicted damage reaches T=32.
+This is **not** a verified Sable runtime force or actual world destruction.
+`-Dpdd.realfix.forceGain` and `-Dpdd.realfix.maxGroupQ` override the
+force defaults. Large Q may saturate per-block stored damage and alter
+balance; test on a separate world before any future mutation-enabled build.

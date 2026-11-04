@@ -35,10 +35,11 @@ public final class GameImpactCredit {
                 !Double.isFinite(risingRatio) || risingRatio < 1 || quietFrames < 2)
                 throw new IllegalArgumentException("invalid provisional credit settings");
         }
-        /** 0.4.0 developer calibration: six first-approved 2026-11-03
-         * peaks span 3,849..52,421; old gain .25 saturated all at Q=64.
-         * Game proxy only, not a physics impulse/energy estimate. */
-        public static Settings provisional() { return new Settings(2, 2, 0.001, 64, 2, 4096, 600); }
+        /** Experimental unsaturated collision scale (not a measured Sable calibration).
+         * F=400 -> Q=64.078 for the hypothetical mass-1, 10m/s test;
+         * F=40,000 -> Q=6,439.678, distinct from small impacts.
+         * The upper bound limits the total event budget, not per-block damage. */
+        public static Settings provisional() { return new Settings(2, 2, 0.161, 65536, 2, 4096, 600); }
         /** Per-version developer defaults, operator-overridable after gameplay testing. */
         public static Settings fromSystemProperties() {
             Settings d=provisional();
