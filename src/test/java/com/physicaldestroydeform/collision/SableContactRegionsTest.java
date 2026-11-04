@@ -200,4 +200,55 @@ final class SableContactRegionsTest {
                 (e,owner,remaining)->new SableContactRegions.Check(List.of(target(owner,1)),16));
         assertEquals(SableContactRegions.Status.TOO_BROAD,tooWide.status());
     }
+    @Test void moreFixRuntimeBudgetSeparatesShapeCellsFromTargetCap() {
+        var contacts=new ArrayList<NativeCollisionTelemetry.Contact>();
+        for(int i=0;i<100;i++)contacts.add(contact(i));
+        // 100 inspected distinct source cells, but only one eligible damage target per owner.
+        var expanded=SableContactRegions.collectWithBudget(PAIR,contacts,
+                (record,owner,remaining)-> remaining>0
+                        ?new SableContactRegions.Check(List.of(target(owner,1)),1)
+                        :new SableContactRegions.Check(List.of(),0,true,"UNVERIFIED","CELL_BUDGET"),
+                SableContactRegions.RUNTIME_MAX_UNIQUE_CELLS_PER_SIDE);
+        assertEquals(SableContactRegions.Status.PROVED,expanded.status());
+        assertEquals(100,expanded.checksA());
+        assertEquals(100,expanded.checksB());
+        assertEquals(1,expanded.regions().size());
+        assertEquals(SableContactRegions.AuditFailure.NONE,expanded.trace().failure());
+        // The legacy budget remains 32 for existing pure-policy callers.
+        var legacy=SableContactRegions.collect(PAIR,contacts,
+                (record,owner,remaining)->remaining>0
+                        ?new SableContactRegions.Check(List.of(target(owner,1)),1)
+                        :new SableContactRegions.Check(List.of(),0,true,"UNVERIFIED","CELL_BUDGET"));
+        assertEquals(SableContactRegions.AuditFailure.SIDE_A_AND_B_INCOMPLETE,legacy.trace().failure());
+    }
+    @Test void moreFixRuntimeBudgetStillQuarantinesAfter256UniqueCells() {
+        var contacts=new ArrayList<NativeCollisionTelemetry.Contact>();
+        for(int i=0;i<300;i++)contacts.add(contact(i));
+        var result=SableContactRegions.collectWithBudget(PAIR,contacts,
+                (record,owner,remaining)->owner.equals(PAIR.a().stableKey())
+                        ?remaining>0
+                            ?new SableContactRegions.Check(List.of(target(owner,1)),1)
+                            :new SableContactRegions.Check(List.of(),0,true,"UNVERIFIED","R2_UNIQUE_CELL_BUDGET")
+                        :new SableContactRegions.Check(List.of(target(owner,2)),0),
+                SableContactRegions.RUNTIME_MAX_UNIQUE_CELLS_PER_SIDE);
+        assertEquals(SableContactRegions.Status.PARTIAL,result.status());
+        assertEquals(SableContactRegions.AuditFailure.SIDE_A_INCOMPLETE,result.trace().failure());
+        assertEquals(256,result.checksA());
+        assertNull(result.firstA());
+        assertNotNull(result.firstB());
+    }
+    @Test void moreFixRuntimeStillRejectsOver32DistinctDamageTargets() {
+        var contacts=new ArrayList<NativeCollisionTelemetry.Contact>();
+        for(int i=0;i<40;i++)contacts.add(contact(i));
+        var result=SableContactRegions.collectWithBudget(PAIR,contacts,
+                (record,owner,remaining)->owner.equals(PAIR.a().stableKey())
+                        ?new SableContactRegions.Check(List.of(target(owner,(int)record.contactAX())),1)
+                        :new SableContactRegions.Check(List.of(target(owner,1)),0),
+                SableContactRegions.RUNTIME_MAX_UNIQUE_CELLS_PER_SIDE);
+        assertEquals(SableContactRegions.Status.PARTIAL,result.status());
+        assertEquals(SableContactRegions.AuditFailure.TARGET_LIMIT_A,result.trace().failure());
+        assertNull(result.firstA());
+        assertNotNull(result.firstB());
+    }
+
 }

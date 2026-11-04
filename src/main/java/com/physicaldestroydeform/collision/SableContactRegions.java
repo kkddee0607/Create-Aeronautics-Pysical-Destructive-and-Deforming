@@ -15,7 +15,10 @@ import java.util.HashMap;
  */
 public final class SableContactRegions {
     private SableContactRegions() {}
+    /** Legacy pure-policy test budget; collect() retains its existing contract. */
     public static final int MAX_CHECKS_PER_SIDE=32;
+    /** Independent bounded runtime shape-read budget; damage target cap remains 32. */
+    public static final int RUNTIME_MAX_UNIQUE_CELLS_PER_SIDE=256;
     public enum Status { PROVED, PARTIAL, NO_VERIFIED_REGION, TOO_BROAD, SKIPPED_DUPLICATE }
     public record Check(List<GameImpactCredit.Target> targets,int inspected,boolean incomplete,
                         String method,String detail) {
@@ -30,7 +33,7 @@ public final class SableContactRegions {
         }
         public Check {
             targets=List.copyOf(targets);
-            if(inspected<0 || inspected>MAX_CHECKS_PER_SIDE)throw new IllegalArgumentException("unbounded contact audit");
+            if(inspected<0 || inspected>RUNTIME_MAX_UNIQUE_CELLS_PER_SIDE)throw new IllegalArgumentException("unbounded contact audit");
         }
     }
     @FunctionalInterface public interface Inspector {
@@ -82,7 +85,7 @@ public final class SableContactRegions {
         // Repeated identical native points share shape audits, not credit.
         var cache=new HashMap<AuditKey,Check>();
         var nativeBatch=new OwnerResolver.NativeAuditBatch(server,dimension);
-        Result collected=collect(pair,records,(contact,owner,remainingChecks)-> {
+        Result collected=collectWithBudget(pair,records,(contact,owner,remainingChecks)-> {
             int sourceSide=SableConsumerTargets.sourceSide(owner,contact,dimension);
             if(sourceSide==0)return new Check(List.of(),0,false,"UNVERIFIED","OWNER_FRAME_MISMATCH");
             boolean onA=sourceSide==1;
@@ -121,7 +124,7 @@ public final class SableContactRegions {
             }
             cache.put(key,result);
             return result;
-        });
+        }, RUNTIME_MAX_UNIQUE_CELLS_PER_SIDE);
         var t=collected.trace();
         var stats=nativeBatch.stats();
         var t2=new Trace(t.failure(),t.sourceIndex(),t.processedRecords(),
@@ -131,7 +134,8 @@ public final class SableContactRegions {
                         +" reusedCellReads="+stats.reusedCells()
                         +" shapePointTests="+stats.pointTests()
                         +" testedShapeBoxes="+stats.testedBoxes()
-                        +" cellBudgetPerSide="+MAX_CHECKS_PER_SIDE);
+                        +" cellBudgetPerSide="+RUNTIME_MAX_UNIQUE_CELLS_PER_SIDE
+                        +" damageTargetCapPerSide="+ContactCreditLedger.MAX_TARGETS_PER_SIDE);
         return new Result(collected.regions(),collected.status(),collected.checksA(),collected.checksB(),
                 collected.rejected(),collected.methodA(),collected.methodB(),t2);
     }
@@ -140,7 +144,15 @@ public final class SableContactRegions {
     /** Testable no-world-evidence policy: never approve a side from a guessed owner. */
     public static Result collect(GameImpactCredit.Pair pair,
                                  List<NativeCollisionTelemetry.Contact> records,Inspector inspector) {
+        return collectWithBudget(pair,records,inspector,MAX_CHECKS_PER_SIDE);
+    }
+    /** Runtime audits shape cells under a separate budget from bounded targets. */
+    static Result collectWithBudget(GameImpactCredit.Pair pair,
+                                    List<NativeCollisionTelemetry.Contact> records,
+                                    Inspector inspector,int shapeBudgetPerSide) {
         Objects.requireNonNull(pair);Objects.requireNonNull(records);Objects.requireNonNull(inspector);
+        if(shapeBudgetPerSide<1 || shapeBudgetPerSide>RUNTIME_MAX_UNIQUE_CELLS_PER_SIDE)
+            throw new IllegalArgumentException("invalid shape audit budget");
         var regions=new LinkedHashSet<ContactCreditLedger.Region>();
         var targetsA=new LinkedHashSet<GameImpactCredit.Target>();
         var targetsB=new LinkedHashSet<GameImpactCredit.Target>();
@@ -172,7 +184,7 @@ public final class SableContactRegions {
                         +" worldA="+residue.a()+" worldB="+residue.b()
                         +" worldDelta="+residue.delta()+" distance="+residue.distance();
             }
-            int remainA=MAX_CHECKS_PER_SIDE-checkedA,remainB=MAX_CHECKS_PER_SIDE-checkedB;
+            int remainA=shapeBudgetPerSide-checkedA,remainB=shapeBudgetPerSide-checkedB;
             Check a=exceededA?new Check(List.of(),0,false,"UNVERIFIED","TARGET_LIMIT_A_SIDE_QUARANTINED")
                     :SableConsumerTargets.sourceSide(pair.a().stableKey(),record,record.dimension())==0
                             ?new Check(List.of(),0,false,"UNVERIFIED","OWNER_FRAME_MISMATCH_A")
@@ -202,10 +214,10 @@ public final class SableContactRegions {
                 if(incompleteA) a=new Check(List.of(),0,false,"UNVERIFIED","SIDE_A_INCOMPLETE");
                 if(incompleteB) b=new Check(List.of(),0,false,"UNVERIFIED","SIDE_B_INCOMPLETE");
             }
-            if(checkedA>MAX_CHECKS_PER_SIDE || checkedB>MAX_CHECKS_PER_SIDE)
+            if(checkedA>shapeBudgetPerSide || checkedB>shapeBudgetPerSide)
                 return traced(List.of(),Status.TOO_BROAD,checkedA,checkedB,skipped,
                         "UNVERIFIED","UNVERIFIED",
-                        checkedA>MAX_CHECKS_PER_SIDE?AuditFailure.CHECK_BUDGET_A:AuditFailure.CHECK_BUDGET_B,
+                        checkedA>shapeBudgetPerSide?AuditFailure.CHECK_BUDGET_A:AuditFailure.CHECK_BUDGET_B,
                         index,processed,remainA,remainB,askedA,askedB,targetsA.size(),targetsB.size(),regions.size(),
                         "inspector_claim_over_budget");
             if(a.targets().isEmpty()&&b.targets().isEmpty())emptyChecks++;
@@ -284,7 +296,7 @@ public final class SableContactRegions {
                         ?Status.PROVED:Status.PARTIAL;
         return traced(new ArrayList<>(regions),status,checkedA,checkedB,skipped,
                 regions.isEmpty()?"UNVERIFIED":methodA,regions.isEmpty()?"UNVERIFIED":methodB,
-                failure,overflowIndex>=0?overflowIndex:-1,processed,MAX_CHECKS_PER_SIDE-checkedA,MAX_CHECKS_PER_SIDE-checkedB,
+                failure,overflowIndex>=0?overflowIndex:-1,processed,shapeBudgetPerSide-checkedA,shapeBudgetPerSide-checkedB,
                 0,0,targetsA.size(),targetsB.size(),regions.size(),
                 "invalidSourceRecords="+uncorroborated+" witnessSeparated="+witnessSeparated+
                 " worldProjectionUnavailable="+worldProjectionUnavailable+

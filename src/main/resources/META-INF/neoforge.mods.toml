@@ -4,10 +4,10 @@ license="MIT"
 
 [[mods]]
 modId="physical_destroy_deform"
-version="0.4.0Fix"
+version="0.4.0moreFix"
 displayName="Create Aeronautics: Physical Destruction and Deforming"
 authors="PDD contributors"
-description='''PDD 0.4.0Fix: IDS 1.0.6 verified contact ledger, H/T/D/E material planning, fixed-point damage and sparse state codec. World mutation OFF.'''
+description='''PDD 0.4.0moreFix: IDS 1.0.6 verified contact ledger, H/T/D/E material planning, fixed-point damage and sparse state codec. World mutation OFF.'''
 
 [[mixins]]
 config="pdd.mixins.json"
