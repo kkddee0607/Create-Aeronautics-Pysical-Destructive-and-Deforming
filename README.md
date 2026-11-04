@@ -1,6 +1,16 @@
-# PDD 0.4.0 — Physical Destruction and Deforming
+# PDD 0.4.0Fix — Physical Destruction and Deforming
 
-## Release 0.4.0 (IDS 1.0.6)
+## Release 0.4.0Fix (IDS 1.0.6)
+
+This is the **verification-only Fix** on the actual GitHub `main` SHA `34739bb665d7c0ce5da2d2b0e6f9aae0abae1bb5` (2026-11-03T14:45:13Z). It preserves the full 0.4.0 codebase and unchanged Sable collision/FSM/Q behavior. See [0.4.0Fix verification, source, and two-session in-game protocol](docs/verification/0.4.0Fix.md).
+
+**New**: Read-only cumulative 1/256 fixed-damage shadow state per stable owner/coordinate/fingerprint; bounded credit-ID dedup; runtime SparseStateCodec CRC roundtrip and deliberate corruption rejection; optional restart checkpoint at `pdd-0.4.0Fix-preview-only.bin` in the world folder (diagnostic only, enabled by default, disable via JVM `-Dpdd.preview.checkpoint=false`); per-credit Plot/Plot owner-local native normal evidence gated by pre-substep agreement, owner epochs and grid axis. Unknown World normal remains UNKNOWN. Checkpoint contents are **not authoritative world damage** and are never applied to blocks. No actual damage, stress, plastic deformation, or world mutation in this release.
+
+The Fix changes neither the native 100-record cap nor Q/ledger/rearm safety policies. Gradle/JUnit/Actions and in-game testing of the Fix still require user execution.
+
+---
+
+## Previous release: PDD 0.4.0 (historical notes, IDS 1.0.6)
 
 **GitHub baseline:** `main` `bb064c58381bac8bafae3da36fd591567acc3fb2` (2026-11-03). Original 134 Apply-eligible source files verified against their Git blob SHA values. Read the [0.4.0 implementation and test report](docs/verification/0.4.0.md) for exact feature gates.
 

@@ -24,7 +24,7 @@ import org.slf4j.LoggerFactory;
 @Mod(PhysicalDestroyDeform.MOD_ID)
 public final class PhysicalDestroyDeform {
     public static final String MOD_ID = "physical_destroy_deform";
-    public static final String BUILD_VERSION = "0.4.0";
+    public static final String BUILD_VERSION = "0.4.0Fix";
     private static final Logger LOGGER = LoggerFactory.getLogger(PhysicalDestroyDeform.class);
     private final AcceptanceReport acceptanceReport = new AcceptanceReport();
     private final RealFixRuntimeBridge bridge = new RealFixRuntimeBridge();
@@ -44,20 +44,22 @@ public final class PhysicalDestroyDeform {
 
     private void onServerStarted(ServerStartedEvent event) {
         MaterialRegistry.rebuild(event.getServer(), LOGGER);
-        LOGGER.info("[PDD-0.4.0] phase=START bridge=READ_ONLY nativeScalar=GAME_FORCE_PROXY " +
-                "newNativeABI=NOT_REQUIRED customNullCallback=DISABLED baseSha=bb064c58381bac8bafae3da36fd591567acc3fb2 worldMutation=OFF");
+        bridge.loadPreview(event.getServer(), LOGGER);
+        LOGGER.info("[PDD-0.4.0Fix] phase=START bridge=READ_ONLY nativeScalar=GAME_FORCE_PROXY " +
+                "newNativeABI=NOT_REQUIRED customNullCallback=DISABLED baseSha=34739bb665d7c0ce5da2d2b0e6f9aae0abae1bb5 worldMutation=OFF");
     }
     private void onDatapackSync(OnDatapackSyncEvent event) {
         if (event.getPlayer()==null) MaterialRegistry.rebuild(event.getPlayerList().getServer(), LOGGER);
     }
     private void onServerStopped(ServerStoppedEvent event) {
+        bridge.savePreview(event.getServer(), LOGGER);
         bridge.clear();
         MaterialRegistry.clear();
         NativeCollisionTelemetry.drain();
         SableContactQueue.drain();
         SableFrameCapture.clear();
         acceptanceReport.close();
-        LOGGER.info("[PDD-0.4.0] phase=STOP state=CLEARED worldMutation=OFF");
+        LOGGER.info("[PDD-0.4.0Fix] phase=STOP state=CLEARED worldMutation=OFF");
     }
     private void onServerTick(ServerTickEvent.Post event) {
         // Snapshot and native inputs are consumed exactly once on the server tick.
@@ -69,7 +71,7 @@ public final class PhysicalDestroyDeform {
             bridge.tick(event.getServer(),callbacks,nativeEffects,preHistory,LOGGER);
         } catch (RuntimeException invalid) {
             // Never let a diagnostic bridge disrupt the physics/game tick.
-            LOGGER.error("[PDD-0.4.0] phase=BRIDGE_EXCEPTION reason={} nativeEffects={} " +
+            LOGGER.error("[PDD-0.4.0Fix] phase=BRIDGE_EXCEPTION reason={} nativeEffects={} " +
                     "callbacks={} Q=0 worldMutation=OFF",invalid.getClass().getName(),
                     nativeEffects.size(),callbacks.size(),invalid);
         } finally {

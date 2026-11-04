@@ -56,6 +56,73 @@ public final class NativePlotDirection {
         public int acceptedPairs(){return accepted;}
         public int rejectedPairs(){return rejected;}
         public Map<Reject,Long> rejectedReasons(){return rejectedReasons;}
+
+        /** IDS 1.0.6 §24.6: conservative Plot/Plot *orientation* witness only.
+         * Never asserts exact solver contact point/impulse or enables a block move.
+         * Effect has no substep ID, so every pre-solver substep must agree in
+         * world orientation AND both owner-local signed grid axes. */
+        public record DirectionResult(Map<String,DirectionEvidence> owners,String reason,int auditedFrames) {
+            public DirectionResult {owners=Map.copyOf(owners);}
+        }
+        public DirectionResult ownerLocalDirection(String dimension,long tick,int idA,int idB) {
+            if(idA<0 || idB<0 || idA==idB)
+                return new DirectionResult(Map.of(),"WORLD_OR_INVALID_BODY_FRAME",0);
+            PairBundle bundle=pairs.get(Key.of(dimension,tick,idA,idB));
+            if(bundle==null)return new DirectionResult(Map.of(),"NATIVE_PAIR_WITHOUT_PRE_SNAPSHOT",0);
+            if(bundle.reject!=null)return new DirectionResult(Map.of(),bundle.reject.name(),0);
+            if(bundle.frames.isEmpty())return new DirectionResult(Map.of(),"NO_AUDITED_SUBSTEP",0);
+            int[] localA=null,localB=null;
+            Vec referenceWorld=null;
+            java.util.UUID idLow=null,idHigh=null;
+            long earliestEpoch=Long.MAX_VALUE;
+            int audited=0;
+            for(PairFrame frame:bundle.frames) {
+                if(frame.a().runtimeId()!=Math.min(idA,idB) || frame.b().runtimeId()!=Math.max(idA,idB))
+                    return new DirectionResult(Map.of(),"BODY_ORDER_UNVERIFIED",audited);
+                if(idLow==null){idLow=frame.a().plotId();idHigh=frame.b().plotId();}
+                if(!idLow.equals(frame.a().plotId())||!idHigh.equals(frame.b().plotId()))
+                    return new DirectionResult(Map.of(),"PLOT_GENERATION_OR_OWNER_CHANGED",audited);
+                Vec towardLow=frame.normalBtoA();
+                if(referenceWorld!=null && referenceWorld.dot(towardLow)<0.98)
+                    return new DirectionResult(Map.of(),"SUBSTEP_WORLD_NORMAL_CONFLICT",audited);
+                referenceWorld=towardLow;
+                int[] aAxis,bAxis;
+                try {
+                    aAxis=ownerAxis(frame.a().pose().toLocalNormal(towardLow));
+                    bAxis=ownerAxis(frame.b().pose().toLocalNormal(towardLow.times(-1)));
+                }catch(IllegalArgumentException invalid) {
+                    return new DirectionResult(Map.of(),"OWNER_NORMAL_TRANSFORM_INVALID",audited);
+                }
+                if(aAxis==null||bAxis==null)return new DirectionResult(Map.of(),"NOT_OWNER_GRID_AXIS",audited);
+                if(localA!=null && (!java.util.Arrays.equals(localA,aAxis)
+                        ||!java.util.Arrays.equals(localB,bAxis)))
+                    return new DirectionResult(Map.of(),"SUBSTEP_OWNER_AXIS_CONFLICT",audited);
+                localA=aAxis;localB=bAxis;
+                earliestEpoch=Math.min(earliestEpoch,frame.snapshot().epoch());
+                audited++;
+            }
+            if(earliestEpoch<0)return new DirectionResult(Map.of(),"SUBSTEP_EPOCH_INVALID",audited);
+            String quality="ALL_PRE_SUBSTEPS_NORMAL_COMPATIBLE_EFFECT_SUBSTEP_UNKNOWN";
+            // Substep=-1 explicitly means not individually addressable.
+            // All captured pre-solver substeps were checked instead.
+            DirectionEvidence first=new DirectionEvidence("PLOT:"+idLow,
+                    "SABLE_RAPIER_LOCAL_N1_N2",quality,tick,-1,earliestEpoch,
+                    localA[0],localA[1],localA[2]);
+            DirectionEvidence second=new DirectionEvidence("PLOT:"+idHigh,
+                    "SABLE_RAPIER_LOCAL_N1_N2",quality,tick,-1,earliestEpoch,
+                    localB[0],localB[1],localB[2]);
+            return new DirectionResult(Map.of("PLOT:"+idLow,first,"PLOT:"+idHigh,second),
+                    "OWNER_LOCAL_AXIS_CORROBORATED_NO_CONTACT_POINT_PROOF",audited);
+        }
+        private static int[] ownerAxis(Vec n) {
+            if(n==null||!n.finite())return null;
+            double[] xyz={n.x(),n.y(),n.z()};
+            int axis=0;
+            for(int i=1;i<3;i++)if(Math.abs(xyz[i])>Math.abs(xyz[axis]))axis=i;
+            if(Math.abs(xyz[axis])<0.98)return null;
+            int[] result={0,0,0};result[axis]=xyz[axis]>0?1:-1;
+            return result;
+        }
         /** Explains the *body-pair* native gate, never a per-block solver manifold. */
         public String explain(Evidence e) {
             if(e==null||e.hit()==null||e.other()==null||!e.hit().plot()||!e.other().plot())

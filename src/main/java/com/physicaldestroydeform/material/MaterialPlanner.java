@@ -30,7 +30,17 @@ public final class MaterialPlanner {
     public static Report plan(ContactCreditLedger.Grant grant, long materialGeneration,
                               Function<String,MaterialProperties> materialLookup,
                               DamageModel.Settings settings) {
+        return plan(grant,materialGeneration,materialLookup,settings,
+                key->new BlockDamageState(),key->Optional.empty());
+    }
+    /** Preview against a caller-provided isolated prior state, never a world commit. */
+    public static Report plan(ContactCreditLedger.Grant grant, long materialGeneration,
+                              Function<String,MaterialProperties> materialLookup,
+                              DamageModel.Settings settings,
+                              Function<SparseStateKey,BlockDamageState> priorState,
+                              Function<SparseStateKey,Optional<DirectionEvidence>> directions) {
         Objects.requireNonNull(grant);Objects.requireNonNull(materialLookup);Objects.requireNonNull(settings);
+        Objects.requireNonNull(priorState);Objects.requireNonNull(directions);
         if(!grant.credited())throw new IllegalArgumentException("not an issued credit");
         List<TargetPlan> plans=new ArrayList<>();
         double missingQ=0,plannedQ=0,absorbedQ=0,directQ=0,unused=grant.unused();
@@ -42,9 +52,10 @@ public final class MaterialPlanner {
             GameImpactCredit.Owner owner=grant.id().pair().a().stableKey().equals(target.ownerKey())
                     ?grant.id().pair().a():grant.id().pair().b();
             SparseStateKey key=SparseStateKey.fromTarget(grant.id().pair().dimension(),owner,target);
-            // No committed old damage is available until 0.4.1; preview starts from pristine.
-            DamageModel.Plan p=DamageModel.plan(share.q(),material,new BlockDamageState(),settings);
-            plans.add(new TargetPlan(key,material,p,materialGeneration,Optional.empty()));
+            BlockDamageState prior=Objects.requireNonNull(priorState.apply(key),"missing preview state");
+            DamageModel.Plan p=DamageModel.plan(share.q(),material,prior,settings);
+            plans.add(new TargetPlan(key,material,p,materialGeneration,
+                    Objects.requireNonNull(directions.apply(key),"missing optional direction")));
             plannedQ+=share.q();absorbedQ+=p.absorbedQ();directQ+=p.directQ();
             unused+=p.unusedPlannedQ();increments+=p.fixedIncrement();
         }

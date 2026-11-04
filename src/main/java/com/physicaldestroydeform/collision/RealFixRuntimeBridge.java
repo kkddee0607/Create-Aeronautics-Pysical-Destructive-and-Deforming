@@ -3,6 +3,8 @@ package com.physicaldestroydeform.collision;
 import com.physicaldestroydeform.diagnostics.NativeCollisionTelemetry;
 import com.physicaldestroydeform.material.MaterialPlanner;
 import com.physicaldestroydeform.material.MaterialRegistry;
+import com.physicaldestroydeform.material.PreviewDamageLedger;
+import com.physicaldestroydeform.state.PreviewCheckpoint;
 import com.physicaldestroydeform.DamageModel;
 import com.physicaldestroydeform.diagnostics.RawObservation;
 import dev.ryanhcode.sable.api.sublevel.SubLevelContainer;
@@ -53,6 +55,9 @@ public final class RealFixRuntimeBridge {
     private final ContactCreditLedger regionLedger=new ContactCreditLedger();
     private final WorldClearanceVerifier worldClearance=new WorldClearanceVerifier();
     private final ForceCalibration forceCalibration=new ForceCalibration();
+    private final PreviewDamageLedger preview=new PreviewDamageLedger();
+    private long directionApproved,directionUnknown,previewFailures;
+    private boolean previewCheckpointWritable=true;
     private final Map<Pair,Tracked> tracked=new HashMap<>();
     private final Map<String,Generation> generations=new HashMap<>();
     private long credited,observed,zero,missingOwner,ambiguousOwners,missingTarget;
@@ -136,6 +141,54 @@ public final class RealFixRuntimeBridge {
         clearanceCalls=clearanceCellReads=clearanceElapsedNanos=clearanceProved=0;
         forceCalibration.clear();
         materialPlanned=materialMissing=materialRejected=0;
+        directionApproved=directionUnknown=previewFailures=0;
+        preview.clear();
+        previewCheckpointWritable=true;
+    }
+
+    /** Diagnostic snapshot ONLY. No connection to real World/Plot damage persistence. */
+    public void loadPreview(MinecraftServer server,Logger log) {
+        if(!PreviewCheckpoint.enabled()) {
+            log.info("[PDD-PREVIEW-SAVE] phase=START status=DISABLED persisted=false mutation=OFF");
+            return;
+        }
+        try {
+            var path=PreviewCheckpoint.file(server.getWorldPath(net.minecraft.world.level.storage.LevelResource.ROOT));
+            var bytes=PreviewCheckpoint.load(path);
+            if(bytes==null) {
+                log.info("[PDD-PREVIEW-SAVE] phase=START status=EMPTY file={} restored=0 mutation=OFF",path);
+                return;
+            }
+            preview.restore(bytes);
+            log.info("[PDD-PREVIEW-SAVE] phase=START status=RESTORED file={} entries={} fixedTotal={} " +
+                    "bytes={} authoritative=false replay=false mutation=OFF",
+                    path,preview.size(),preview.fixedTotal(),bytes.length);
+        }catch(Exception invalid) {
+            // An invalid checkpoint is never partially used or treated as legitimate game damage.
+            preview.clear();
+            previewCheckpointWritable=false;
+            log.warn("[PDD-PREVIEW-SAVE] phase=START status=REJECTED reason={} " +
+                    "authoritative=false mutation=OFF",invalid.getClass().getSimpleName(),invalid);
+        }
+    }
+    public void savePreview(MinecraftServer server,Logger log) {
+        if(!PreviewCheckpoint.enabled())return;
+        if(!previewCheckpointWritable) {
+            log.warn("[PDD-PREVIEW-SAVE] phase=STOP status=SKIPPED_BAD_INPUT " +
+                    "originalCheckpointPreserved=true mutation=OFF");
+            return;
+        }
+        try {
+            byte[] bytes=preview.verifyRoundTrip();
+            var path=PreviewCheckpoint.file(server.getWorldPath(net.minecraft.world.level.storage.LevelResource.ROOT));
+            PreviewCheckpoint.save(path,bytes);
+            log.info("[PDD-PREVIEW-SAVE] phase=STOP status=WRITTEN file={} entries={} fixedTotal={} " +
+                    "bytes={} authoritative=false mutation=OFF",
+                    path,preview.size(),preview.fixedTotal(),bytes.length);
+        }catch(Exception error) {
+            log.warn("[PDD-PREVIEW-SAVE] phase=STOP status=FAILED reason={} mutation=OFF",
+                    error.getClass().getSimpleName(),error);
+        }
     }
 
     /** Called only from ServerTickEvent.Post. Never mutate any world or native buffer. */
@@ -407,42 +460,78 @@ public final class RealFixRuntimeBridge {
                         forceCalibration.record(result.peakForce(),credit.settings());
                         multiGroupCredits++;
                         multiRegions+=grant.observedRegions();
-                        // IDS 1.0.6 §24.1: consume issued immutable shares for a *pure preview*.
-                        // Do not allocate a new Q, alter Sable, or persist predicted damage.
+                        // Native n1/n2 are only directional candidates. The existing
+                        // Plot/Plot all-substep gate must prove orientation consistency;
+                        // Plot/World is intentionally UNKNOWN until World normal frame is verified.
+                        NativePlotDirection.Prepared.DirectionResult witness;
+                        if(saturatedPoll) {
+                            witness=new NativePlotDirection.Prepared.DirectionResult(
+                                    Map.of(),"NATIVE_EFFECT_100_RECORD_CAP",0);
+                        } else if(massSafe==null || massSafe.maskedFrames()>0
+                                || massSafe.contacts().stream().anyMatch(c->
+                                (c.idA()>=0&&c.frameA()==null) || (c.idB()>=0&&c.frameB()==null))) {
+                            witness=new NativePlotDirection.Prepared.DirectionResult(
+                                    Map.of(),"OWNER_MASS_EPOCH_FRAME_UNVERIFIED",0);
+                        } else if(pair.a().stableKey().startsWith("PLOT:")
+                                &&pair.b().stableKey().startsWith("PLOT:")) {
+                            witness=NativePlotDirection.prepare(massSafe.contacts(),pre).ownerLocalDirection(
+                                    stamp.dimension,stamp.tick,group.runtimePair().lowId(),group.runtimePair().highId());
+                        } else witness=new NativePlotDirection.Prepared.DirectionResult(
+                                Map.of(),"WORLD_NATIVE_NORMAL_FRAME_NOT_PROVED",0);
+                        if(witness.owners().isEmpty())directionUnknown++;
+                        else directionApproved++;
+                        if(VERF_ENABLED)log.info("[PDD-DIRECTION] credit={} status={} reason={} " +
+                                "auditedPreFrames={} witnesses={} exactContact=false " +
+                                "deformationAuthorized=false mutation=OFF",
+                                grant.id(),witness.owners().isEmpty()?"UNKNOWN":"OWNER_AXIS_CORROBORATED",
+                                witness.reason(),witness.auditedFrames(),witness.owners());
                         try {
                             var materials=MaterialRegistry.snapshot();
-                            var planReport=MaterialPlanner.plan(grant,materials.generation(),
-                                    materials::resolveFingerprint,DamageModel.Settings.defaults());
-                            materialPlanned+=planReport.plans().size();
-                            if(planReport.missingMaterialQ()>0)materialMissing++;
-                            double difference=Math.abs(planReport.accountedQ()-grant.issuedQ());
-                            if(difference>1.0e-7)
-                                throw new IllegalStateException("material Q reconciliation failed " + difference);
-                            if(materialLines++<24)log.info("[PDD-MATERIAL-PLAN] credit={} " +
-                                    "revision={} materialGeneration={} verifiedTargets={} missingMaterialQ={} " +
-                                    "reservedQ={} absorbedQ={} directQ={} unusedPlannedQ={} " +
-                                    "fixedIncrement={} direction=UNKNOWN stress=INACTIVE plastic=INACTIVE " +
-                                    "state=PREVIEW_ONLY committedDamage=0 mutation=OFF",
-                                    planReport.creditId(),DamageModel.ALGORITHM_REVISION,
-                                    planReport.materialGeneration(),planReport.plans().size(),
-                                    planReport.missingMaterialQ(),grant.issuedQ(),planReport.absorbedQ(),
-                                    planReport.directQ(),planReport.unusedPlannedQ(),
-                                    planReport.fixedIncrementTotal());
-                            // Show a bounded number of exact owner-local plans, never a world scan.
-                            for(int i=0;i<Math.min(8,planReport.plans().size()) && materialLines++<24;i++) {
-                                var targetPlan=planReport.plans().get(i);
-                                var m=targetPlan.material();var planned=targetPlan.plan();
-                                log.info("[PDD-MATERIAL-TARGET] key={} H={} T={} D={} E={} unbreakable={} " +
-                                                "Q={} absorbed={} direct={} plasticUnused={} stressUnused={} " +
-                                                "rawDamage={} incrementFixed={} predictedDamage={} remainder={} " +
-                                                "thresholdReached={} plasticPreview={} direction=UNKNOWN " +
-                                                "applied=false reason=PLAN_ONLY mutation=OFF",
-                                        targetPlan.key(),m.hardness(),m.threshold(),m.ductilityPercent(),
-                                        m.elasticityPercent(),m.unbreakable(),planned.incomingQ(),
-                                        planned.absorbedQ(),planned.directQ(),planned.plasticQ(),planned.stressQ(),
-                                        planned.rawDamage(),planned.fixedIncrement(),planned.plannedDamageU8(),
-                                        planned.plannedRemainderU8(),planned.thresholdReached(),
-                                        planned.plannedPlasticIncrement());
+                            var previewResult=preview.record(grant,materials.generation(),now,
+                                    materials::resolveFingerprint,DamageModel.Settings.defaults(),
+                                    key->java.util.Optional.ofNullable(witness.owners().get(
+                                            key.ownerSpace()+":"+key.ownerId())));
+                            if(previewResult.status()!=PreviewDamageLedger.ResultStatus.ACCEPTED) {
+                                previewFailures++;
+                                log.warn("[PDD-MATERIAL-PLAN] credit={} status={} " +
+                                        "reason=PREVIEW_DEDUP_OR_BOUNDED_CAP mutation=OFF",
+                                        grant.id(),previewResult.status());
+                            } else {
+                                var planReport=previewResult.report();
+                                materialPlanned+=planReport.plans().size();
+                                if(planReport.missingMaterialQ()>0)materialMissing++;
+                                double difference=Math.abs(planReport.accountedQ()-grant.issuedQ());
+                                if(difference>1.0e-7)
+                                    throw new IllegalStateException("material Q reconciliation failed " + difference);
+                                if(materialLines++<24)log.info("[PDD-MATERIAL-PLAN] credit={} " +
+                                        "revision={} materialGeneration={} verifiedTargets={} missingMaterialQ={} " +
+                                        "reservedQ={} absorbedQ={} directQ={} unusedPlannedQ={} " +
+                                        "fixedIncrement={} directionWitnesses={} stress=INACTIVE plastic=INACTIVE " +
+                                        "state=PREVIEW_ONLY committedDamage=0 previewEntries={} previewFixedBefore={} " +
+                                        "previewFixedAfter={} previewUpdated={} mutation=OFF",
+                                        planReport.creditId(),DamageModel.ALGORITHM_REVISION,
+                                        planReport.materialGeneration(),planReport.plans().size(),
+                                        planReport.missingMaterialQ(),grant.issuedQ(),planReport.absorbedQ(),
+                                        planReport.directQ(),planReport.unusedPlannedQ(),
+                                        planReport.fixedIncrementTotal(),witness.owners().size(),
+                                        previewResult.entries(),previewResult.fixedBefore(),
+                                        previewResult.fixedAfter(),previewResult.updatedTargets());
+                                for(int i=0;i<Math.min(8,planReport.plans().size()) && materialLines++<24;i++) {
+                                    var targetPlan=planReport.plans().get(i);
+                                    var m=targetPlan.material();var planned=targetPlan.plan();
+                                    log.info("[PDD-MATERIAL-TARGET] key={} H={} T={} D={} E={} unbreakable={} " +
+                                                    "Q={} absorbed={} direct={} plasticUnused={} stressUnused={} " +
+                                                    "rawDamage={} incrementFixed={} predictedDamage={} remainder={} " +
+                                                    "thresholdReached={} plasticPreview={} direction={} " +
+                                                    "applied=false reason=SHADOW_PREVIEW_ONLY mutation=OFF",
+                                            targetPlan.key(),m.hardness(),m.threshold(),m.ductilityPercent(),
+                                            m.elasticityPercent(),m.unbreakable(),planned.incomingQ(),
+                                            planned.absorbedQ(),planned.directQ(),planned.plasticQ(),planned.stressQ(),
+                                            planned.rawDamage(),planned.fixedIncrement(),planned.plannedDamageU8(),
+                                            planned.plannedRemainderU8(),planned.thresholdReached(),
+                                            planned.plannedPlasticIncrement(),
+                                            targetPlan.direction().map(Object::toString).orElse("UNKNOWN"));
+                                }
                             }
                         } catch (RuntimeException invalidMaterialPlan) {
                             materialRejected++;
@@ -541,7 +630,7 @@ public final class RealFixRuntimeBridge {
             // had a contact. Expiring on lastSeen (-1) discards its verified
             // clearance/AABB evidence while GameImpactCredit stays ARMED.
             tracked.entrySet().removeIf(e->trackedIdleExpired(now,e.getValue().lastProcessed));
-            log.info("[PDD-0.4.0] phase=SUMMARY observed={} credited={} zero={} ownerMissing={} targetMissing={} ambiguous={} trackedPairs={} r2Verified={} r2Rejected={} r3Verified={} prearmed={} r1Fallback={} regionGroups={} regionCount={} regionTooBroad={} ledgerRejected={} activeCredits={} observerErrors={} nativeDropped={} nativeMalformed={} nativeCapSaturatedPolls={} r2Audits={} r2SkippedDuplicate={} r2ActualShapeChecks={} callbackDropped={} preHistoryDropped={} generation=IDS-1.0.6 mutation=OFF",
+            log.info("[PDD-0.4.0Fix] phase=SUMMARY observed={} credited={} zero={} ownerMissing={} targetMissing={} ambiguous={} trackedPairs={} r2Verified={} r2Rejected={} r3Verified={} prearmed={} r1Fallback={} regionGroups={} regionCount={} regionTooBroad={} ledgerRejected={} activeCredits={} observerErrors={} nativeDropped={} nativeMalformed={} nativeCapSaturatedPolls={} r2Audits={} r2SkippedDuplicate={} r2ActualShapeChecks={} callbackDropped={} preHistoryDropped={} generation=IDS-1.0.6 mutation=OFF",
                     observed,credited,zero,missingOwner,missingTarget,ambiguousOwners,tracked.size(),
                     r2Verified,r2Rejected,r3Verified,prearmed,r1Fallback,
                     multiGroupCredits,multiRegions,multiTooBroad,ledgerRejected,regionLedger.size(),
@@ -550,8 +639,26 @@ public final class RealFixRuntimeBridge {
                     NativeCollisionTelemetry.nativeCapSaturatedPolls(),r2Audits,r2SkippedDuplicate,r2ShapeChecks,
                     com.physicaldestroydeform.diagnostics.SableContactQueue.dropped(),SableFrameCapture.preHistoryDropped());
             log.info("[PDD-MATERIAL-PLAN] phase=SUMMARY targetsPlanned={} missingMaterialEvents={} " +
-                    "planRejected={} mode=PREVIEW_ONLY storedEntries=0 applied=0 mutation=OFF",
-                    materialPlanned,materialMissing,materialRejected);
+                    "planRejected={} mode=PREVIEW_ONLY storedEntries={} fixedTotal={} " +
+                    "handledCredits={} duplicatePreview={} previewCapacityRejected={} " +
+                    "directionCorroborated={} directionUnknown={} previewFailures={} applied=0 mutation=OFF",
+                    materialPlanned,materialMissing,materialRejected,preview.size(),preview.fixedTotal(),
+                    preview.handledCredits(),preview.duplicates(),preview.capacityRejected(),
+                    directionApproved,directionUnknown,previewFailures);
+            if(VERF_ENABLED && preview.size()>0) {
+                try {
+                    byte[] encoded=preview.verifyRoundTrip();
+                    log.info("[PDD-PREVIEW-CODEC] status=PASS entries={} bytes={} " +
+                                    "roundTrips={} fixedTotal={} schema={} corruptionVeto=PASS " +
+                                    "authoritative=false mutation=OFF",
+                            preview.size(),encoded.length,preview.roundTrips(),preview.fixedTotal(),
+                            com.physicaldestroydeform.state.SparseStateCodec.SCHEMA_VERSION);
+                }catch(RuntimeException invalid) {
+                    log.warn("[PDD-PREVIEW-CODEC] status=FAIL reason={} " +
+                            "roundTripErrors={} mutation=OFF",invalid.getClass().getSimpleName(),
+                            preview.roundTripErrors(),invalid);
+                }
+            }
             if(VERF_ENABLED) {
                 var evidence=forceCalibration.snapshot();
                 var settings=credit.settings();

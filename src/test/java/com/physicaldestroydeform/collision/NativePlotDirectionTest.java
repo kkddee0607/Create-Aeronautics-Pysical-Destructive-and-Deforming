@@ -175,4 +175,38 @@ class NativePlotDirectionTest {
         }
     }
 
+    @Test void allPreSubstepsProveTwoOpposedOwnerLocalAxesOnly() {
+        var first=pre(11,100,new Vec(3,0,0),new Vec(0,0,0),new Vec(0,0,0),new Vec(0,0,0));
+        var second=pre(12,100,new Vec(2,0,0),new Vec(0,0,0),new Vec(0,0,0),new Vec(0,0,0));
+        var observed=NativePlotDirection.prepare(List.of(contact(100)),List.of(first,second));
+        var witness=observed.ownerLocalDirection(DIM,100,1,2);
+        assertEquals(2,witness.auditedFrames());
+        assertEquals(2,witness.owners().size());
+        assertEquals(-1,witness.owners().get("PLOT:"+A).signedX());
+        assertEquals(1,witness.owners().get("PLOT:"+B).signedX());
+        assertTrue(witness.reason().contains("NO_CONTACT_POINT_PROOF"));
+        assertEquals(-1,witness.owners().get("PLOT:"+A).sourceSubstep());
+    }
+    @Test void obliqueManifoldNormalHasNoFakeDiscreteVoxelDirection() {
+        var s=pre(11,100,new Vec(3,0,0),new Vec(0,0,0),new Vec(0,0,0),new Vec(0,0,0));
+        double n=Math.sqrt(0.5);
+        var diagonal=new NativeCollisionTelemetry.Contact(1,2,10,n,n,0,-n,-n,0,
+                0,0,0,0,0,0,DIM,100);
+        var prepared=NativePlotDirection.prepare(List.of(diagonal),List.of(s));
+        assertEquals(1,prepared.acceptedPairs());
+        var evidence=prepared.ownerLocalDirection(DIM,100,1,2);
+        assertEquals("NOT_OWNER_GRID_AXIS",evidence.reason());
+        assertTrue(evidence.owners().isEmpty());
+    }
+    @Test void unverifiableWorldAndConflictingNormalsNeverBecomeOwnerAxis() {
+        var s=pre(11,100,new Vec(3,0,0),new Vec(0,0,0),new Vec(0,0,0),new Vec(0,0,0));
+        var good=NativePlotDirection.prepare(List.of(contact(100)),List.of(s));
+        assertTrue(good.ownerLocalDirection(DIM,100,-1,1).owners().isEmpty());
+        var opposite=new NativeCollisionTelemetry.Contact(1,2,10,-1,0,0,1,0,0,
+                0,0,0,0,0,0,DIM,100);
+        var bad=NativePlotDirection.prepare(List.of(contact(100),opposite),List.of(s));
+        assertTrue(bad.ownerLocalDirection(DIM,100,1,2).owners().isEmpty());
+        assertEquals("CONFLICTING_MANIFOLD_NORMAL",bad.ownerLocalDirection(DIM,100,1,2).reason());
+    }
+
 }
