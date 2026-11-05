@@ -12,12 +12,13 @@ import java.util.Set;
 /**
  * IDS 1.0.6 §22.4: one read-only debit ledger for a verified pair episode.
  * Native contact point ordinals are never solver contact IDs or credit IDs.
- * A single source force event may reach several independently audited blocks,
- * but its Q is issued once, then split among bounded verified targets per side.
+ * A single approved source event has one Q upper envelope. Legacy issue()
+ * splits Q uniformly among contact-proved targets; issuePropagated() assigns
+ * F through owner-verified connected cells before deriving target Q.
  */
 public final class ContactCreditLedger {
-    public static final String ALGORITHM_REVISION = "PDD-IDS-1.0.6/0.4.0scaleFix2";
-    // Never allocate one side to more than 32 independently verified owner-local targets.
+    public static final String ALGORITHM_REVISION = "PDD-IDS-1.0.6/0.4.0colFix";
+    // Native contact SEEDS (not propagated neighbors) remain capped at 32/side.
     public static final int MAX_TARGETS_PER_SIDE = 32;
     public static final int MAX_REGIONS = 2 * MAX_TARGETS_PER_SIDE;
     public static final int MAX_ENTRIES = 4096;
@@ -46,11 +47,26 @@ public final class ContactCreditLedger {
     }
     public record Grant(CreditId id, Source source, Status status, long tick,
                         double issuedQ, List<Share> a, List<Share> b,
-                        double unused, int observedRegions, String algorithmRevision) {
+                        double unused, int observedRegions, String algorithmRevision,
+                        ForcePropagation.Result propagationA, ForcePropagation.Result propagationB) {
         public Grant {
             a = List.copyOf(a);
             b = List.copyOf(b);
         }
+        /** Compatibility constructor for legacy 0.4.0 callers/tests and Q-reservation fixtures. */
+        public Grant(CreditId id,Source source,Status status,long tick,double issuedQ,
+                     List<Share> a,List<Share> b,double unused,int regions,String revision) {
+            this(id,source,status,tick,issuedQ,a,b,unused,regions,revision,null,null);
+        }
+        public boolean propagated(){return propagationA!=null || propagationB!=null;}
+        public double inputF(){return (propagationA==null?0:propagationA.inputF())+
+                (propagationB==null?0:propagationB.inputF());}
+        public double dampedF(){return (propagationA==null?0:propagationA.dampedF())+
+                (propagationB==null?0:propagationB.dampedF());}
+        public double unresolvedF(){return (propagationA==null?0:propagationA.unresolvedF())+
+                (propagationB==null?0:propagationB.unresolvedF());}
+        public double elasticallyDampedQ(){return (propagationA==null?0:propagationA.dampedQ())+
+                (propagationB==null?0:propagationB.dampedQ());}
         public double allocatedA() {return a.stream().mapToDouble(Share::q).sum();}
         public double allocatedB() {return b.stream().mapToDouble(Share::q).sum();}
         public double accounted() {return allocatedA()+allocatedB()+unused;}
@@ -134,6 +150,50 @@ public final class ContactCreditLedger {
         recorded.put(id,new Stored(source,decision.tick(),issued));
         return issued;
     }
+    /** colFix: use R2 source-verified contacts as seeds, then inspect actual
+     * connected World/Plot neighbors. Keep GameImpactCredit's approval/cap as
+     * ONE cause envelope; only the sealed per-block F-derived Q can be spent.
+     * Legacy issue() remains available to verify pre-colFix regression contracts. */
+    public Grant issuePropagated(GameImpactCredit.Pair pair,GameImpactCredit.Decision decision,
+                                 Source source,List<Region> evidence,
+                                 ForcePropagation.NeighborReader neighbors,
+                                 java.util.function.Function<String,com.physicaldestroydeform.MaterialProperties> materials,
+                                 GameImpactCredit.Settings forces,
+                                 com.physicaldestroydeform.DamageModel.Settings damage) {
+        // Preserve every existing owner/region/episode validation and one-credit rule.
+        Grant base=issue(pair,decision,source,evidence);
+        if(!base.credited())return base;
+        try {
+            List<GameImpactCredit.Target> seedsA=base.a().stream().map(Share::target).toList();
+            List<GameImpactCredit.Target> seedsB=base.b().stream().map(Share::target).toList();
+            double sideF=decision.peakForce()/2;
+            var pa=ForcePropagation.plan(pair.a().stableKey(),seedsA,sideF,neighbors,materials,forces,damage);
+            var pb=ForcePropagation.plan(pair.b().stableKey(),seedsB,sideF,neighbors,materials,forces,damage);
+            var a=seal(pa,decision.allocation().sideA());
+            var b=seal(pb,decision.allocation().sideB());
+            double sum=a.stream().mapToDouble(Share::q).sum()+b.stream().mapToDouble(Share::q).sum();
+            double unused=decision.issuedQ()-sum;
+            if(!Double.isFinite(unused) || unused < -1e-7 ||
+                    sum > decision.issuedQ()+1e-7)
+                throw new IllegalArgumentException("propagated Q exceeded source envelope");
+            Grant grant=new Grant(base.id(),source,Status.ISSUED,base.tick(),decision.issuedQ(),
+                    a,b,Math.max(0,unused),base.observedRegions(),ALGORITHM_REVISION,pa,pb);
+            recorded.put(grant.id(),new Stored(source,base.tick(),grant));
+            return grant;
+        }catch(RuntimeException unsafe) {
+            // Nothing is committed to the preview or source on a failed plan.
+            recorded.remove(base.id());
+            return empty(base.id(),source,Status.INVALID_TARGET_SET,base.tick(),evidence.size());
+        }
+    }
+    private static List<Share> seal(ForcePropagation.Result plan,double sideQcap) {
+        double factor=plan.finalQ()>sideQcap && plan.finalQ()>0?
+                Math.max(0,sideQcap/plan.finalQ()):1;
+        var out=new ArrayList<Share>(plan.shares().size());
+        for(var node:plan.shares())out.add(new Share(node.target(),node.finalQ()*factor));
+        return List.copyOf(out);
+    }
+
     private static List<Share> split(Set<GameImpactCredit.Target> targets,double total) {
         if(targets.isEmpty() || total==0)return List.of();
         var ordered=new ArrayList<>(targets);

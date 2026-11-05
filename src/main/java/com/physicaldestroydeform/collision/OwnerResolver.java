@@ -166,6 +166,47 @@ public final class OwnerResolver {
         }
     }
 
+    /** Read-only six-neighbor propagation evidence. Local WORLD coordinates are
+     * world block coordinates; local PLOT coordinates are Sable embedded-accessor
+     * relative coordinates. Do not load chunks or invent the next block. */
+    public static ForcePropagation.Probe propagationNeighbor(MinecraftServer server,String dimension,
+                                                              GameImpactCredit.Target from,
+                                                              int x,int y,int z) {
+        if (server==null || dimension==null || from==null)return ForcePropagation.Probe.unknown();
+        try {
+            BlockPos cell=new BlockPos(x,y,z);
+            if(from.ownerKey().startsWith("PLOT:")) {
+                UUID id=UUID.fromString(from.ownerKey().substring(5));
+                ServerLevel level=null;
+                for(var candidate:server.getAllLevels())
+                    if(candidate.dimension().location().toString().equals(dimension)) {level=candidate;break;}
+                if(level==null)return ForcePropagation.Probe.unknown();
+                var container=SubLevelContainer.getContainer(level);
+                if(container==null)return ForcePropagation.Probe.unknown();
+                var sub=container.getSubLevel(id);
+                if(!(sub instanceof ServerSubLevel concrete) || concrete.isRemoved()
+                        || concrete.getLevel()!=level || !concrete.getUniqueId().equals(id)
+                        || concrete.getPlot()==null)
+                    return ForcePropagation.Probe.unknown();
+                BlockPos center=concrete.getPlot().getCenterBlock();
+                cell=new BlockPos(Math.addExact(center.getX(),x),Math.addExact(center.getY(),y),
+                        Math.addExact(center.getZ(),z));
+            }else if(!from.ownerKey().equals("WORLD:"+dimension))return ForcePropagation.Probe.unknown();
+            Check checked=auditNative(server,dimension,from.ownerKey(),cell,null);
+            if(checked.verified()) {
+                var key=checked.key();
+                return ForcePropagation.Probe.present(new GameImpactCredit.Target(from.ownerKey(),
+                        key.x()+","+key.y()+","+key.z(),key.fingerprint()));
+            }
+            if(checked.status()==Status.BLOCK_UNAVAILABLE && (
+                    checked.detail().equals("BLOCK_MISSING_OR_AIR") ||
+                    checked.detail().equals("WORLD_SHAPE_EMPTY") ||
+                    checked.detail().equals("PLOT_SHAPE_EMPTY")))
+                return ForcePropagation.Probe.empty();
+            return ForcePropagation.Probe.unknown();
+        }catch(RuntimeException invalidOwnerOrPosition){return ForcePropagation.Probe.unknown();}
+    }
+
     /** A source point must be on/in the actual collision shape of that owner
      * block, not merely inside some populated neighboring block. */
     private static boolean nearShape(VoxelShape shape,Vec point,BlockPos block) {

@@ -53,7 +53,9 @@ public final class MaterialPlanner {
                     ?grant.id().pair().a():grant.id().pair().b();
             SparseStateKey key=SparseStateKey.fromTarget(grant.id().pair().dimension(),owner,target);
             BlockDamageState prior=Objects.requireNonNull(priorState.apply(key),"missing preview state");
-            DamageModel.Plan p=DamageModel.plan(share.q(),material,prior,settings);
+            DamageModel.Plan p=grant.propagated()
+                    ?DamageModel.planPreDamped(share.q(),material,prior,settings)
+                    :DamageModel.plan(share.q(),material,prior,settings);
             plans.add(new TargetPlan(key,material,p,materialGeneration,
                     Objects.requireNonNull(directions.apply(key),"missing optional direction")));
             plannedQ+=share.q();absorbedQ+=p.absorbedQ();directQ+=p.directQ();

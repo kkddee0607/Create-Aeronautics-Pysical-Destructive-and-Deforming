@@ -156,11 +156,13 @@ public final class RealFixRuntimeBridge {
         var q=credit.settings();
         log.info("[PDD-POLICY] revision={} forceEnter={} forceFloor={} forceGain={} maxGroupQ={} " +
                         "damageGain={} directShare={} plasticShare={} stressShare={} fixedPointScale={} " +
+                        "F_FIRST=TRUE halfTransfer=0.5 maxNodesPerSide={} minRemainingF={} " +
                         "source=POST_EFFECT_GAME_PROXY measured=false mutation=OFF",
                 GameImpactCredit.POLICY_REVISION,q.forceEnter(),q.forceFloor(),q.forceGain(),
                 q.maxGroupQ(),damageSettings.damageGain(),DamageModel.DIRECT_SHARE,
                 DamageModel.PLASTIC_SHARE,DamageModel.STRESS_SHARE,
-                com.physicaldestroydeform.BlockDamageState.FIXED_SCALE);
+                com.physicaldestroydeform.BlockDamageState.FIXED_SCALE,
+                ForcePropagation.MAX_NODES_PER_SIDE,ForcePropagation.MIN_REMAINING_F);
         // A changed Q, damage, material override or datapack cache must not replay
         // the previous calibration's diagnostic damage as this policy's result.
         previewPolicyId=calibrationIdentity();
@@ -217,6 +219,7 @@ public final class RealFixRuntimeBridge {
         var material=MaterialRegistry.snapshot();
         String policy=GameImpactCredit.POLICY_REVISION+"|"+credit.settings()+"|"+
                 DamageModel.ALGORITHM_REVISION+"|"+damageSettings+"|"+
+                ContactCreditLedger.ALGORITHM_REVISION+"|F-FIRST-0.4.0colFix|"+
                 material.algorithmRevision()+"|"+material.definitions().hashCode()+"|"+
                 material.stateSpecific().hashCode();
         return UUID.nameUUIDFromBytes(policy.getBytes(StandardCharsets.UTF_8)).toString();
@@ -486,11 +489,33 @@ public final class RealFixRuntimeBridge {
                                 result.reason(),gapBefore.pendingApproach()&&!gapAfter.pendingApproach());
                         t.lastVerfFsm=fsmSignature;t.lastVerfFsmTick=now;
                     }
-                    ContactCreditLedger.Grant grant=result.credited()?regionLedger.issue(pair,result,
-                            ContactCreditLedger.Source.SABLE_POST_EFFECT,regions.regions()):null;
+                    var materialSnapshot=MaterialRegistry.snapshot();
+                    ContactCreditLedger.Grant grant=result.credited()?regionLedger.issuePropagated(
+                            pair,result,ContactCreditLedger.Source.SABLE_POST_EFFECT,regions.regions(),
+                            (from,x,y,z)->OwnerResolver.propagationNeighbor(
+                                    server,stamp.dimension,from,x,y,z),
+                            materialSnapshot::resolveFingerprint,credit.settings(),damageSettings):null;
                     boolean granted=grant!=null && grant.credited();
                     if(granted) {
                         credited++;
+                        if(grant.propagated()) {
+                            for(var side:List.of(grant.propagationA(),grant.propagationB())) {
+                                String owner=side==grant.propagationA()?pair.a().stableKey():pair.b().stableKey();
+                                if(lines++<MAX_LOG_PER_TICK)log.info(
+                                        "[PDD-F-LEDGER] credit={} owner={} inputF={} allocatedF={} dampedF={} " +
+                                        "unresolvedF={} candidateQ={} finalQ={} dampedQ={} end={} " +
+                                        "nodes={} mutation=OFF",
+                                        grant.id(),owner,side.inputF(),side.assignedF(),side.dampedF(),
+                                        side.unresolvedF(),side.candidateQ(),side.finalQ(),side.dampedQ(),
+                                        side.endReason(),side.shares().size());
+                                int shownNodes=0;
+                                for(var node:side.shares())if(shownNodes++<4 && lines++<MAX_LOG_PER_TICK)log.info(
+                                        "[PDD-F-PROPAGATION] credit={} owner={} layer={} local={} F={} " +
+                                        "candidateQ={} finalQ={} E={} mutation=OFF",
+                                        grant.id(),owner,node.layer(),node.target().localBlock(),
+                                        node.allocatedF(),node.rawQ(),node.finalQ(),node.elasticityPercent());
+                            }
+                        }
                         // Only the first approved frame of each actually issued grant.
                         forceCalibration.record(result.peakForce(),credit.settings());
                         multiGroupCredits++;
@@ -521,7 +546,7 @@ public final class RealFixRuntimeBridge {
                                 grant.id(),witness.owners().isEmpty()?"UNKNOWN":"OWNER_AXIS_CORROBORATED",
                                 witness.reason(),witness.auditedFrames(),witness.owners());
                         try {
-                            var materials=MaterialRegistry.snapshot();
+                            var materials=materialSnapshot;
                             var previewResult=preview.record(grant,materials.generation(),now,
                                     materials::resolveFingerprint,damageSettings,
                                     key->java.util.Optional.ofNullable(witness.owners().get(
@@ -665,7 +690,7 @@ public final class RealFixRuntimeBridge {
             // had a contact. Expiring on lastSeen (-1) discards its verified
             // clearance/AABB evidence while GameImpactCredit stays ARMED.
             tracked.entrySet().removeIf(e->trackedIdleExpired(now,e.getValue().lastProcessed));
-            log.info("[PDD-0.4.0scaleFix2] phase=SUMMARY observed={} credited={} zero={} ownerMissing={} targetMissing={} ambiguous={} trackedPairs={} r2Verified={} r2Rejected={} r3Verified={} prearmed={} r1Fallback={} regionGroups={} regionCount={} regionTooBroad={} ledgerRejected={} activeCredits={} observerErrors={} nativeDropped={} nativeMalformed={} nativeCapSaturatedPolls={} r2Audits={} r2SkippedDuplicate={} r2ActualShapeChecks={} callbackDropped={} preHistoryDropped={} generation=IDS-1.0.6 mutation=OFF",
+            log.info("[PDD-0.4.0colFix] phase=SUMMARY observed={} credited={} zero={} ownerMissing={} targetMissing={} ambiguous={} trackedPairs={} r2Verified={} r2Rejected={} r3Verified={} prearmed={} r1Fallback={} regionGroups={} regionCount={} regionTooBroad={} ledgerRejected={} activeCredits={} observerErrors={} nativeDropped={} nativeMalformed={} nativeCapSaturatedPolls={} r2Audits={} r2SkippedDuplicate={} r2ActualShapeChecks={} callbackDropped={} preHistoryDropped={} generation=IDS-1.0.6 mutation=OFF",
                     observed,credited,zero,missingOwner,missingTarget,ambiguousOwners,tracked.size(),
                     r2Verified,r2Rejected,r3Verified,prearmed,r1Fallback,
                     multiGroupCredits,multiRegions,multiTooBroad,ledgerRejected,regionLedger.size(),

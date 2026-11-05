@@ -1,13 +1,21 @@
-# PDD 0.4.0scaleFix2 — Physical Destruction and Deforming
+# PDD 0.4.0colFix — Physical Destruction and Deforming
 
-## Release 0.4.0scaleFix2 (PDD IDS 1.0.6, experimental calibration)
+## Release 0.4.0colFix — F-first impact distribution (IDS 1.0.6 + F propagation v0.1)
+
+- New **server-side F-first** impact preview: Sable observed peak F -> World/Plot 50% side budgets -> owner-local verified first-contact seeds -> six-face connected propagation; each layer keeps half the surviving F, except the PROVED terminal receives everything. Target Q is computed **after** its F is assigned. Equal-depth simultaneous contact targets share that layer's F equally (provisional branch resolution, not measured contact timing).
+- **Elasticity:** a layer lowers its predecessor layer's still-pending Q and its own outgoing F. No Sable solver modification or double elastic multiplier in `DamageModel` for colFix grants. E=0 preserves full transfer, otherwise existing bounded E curve is reused as a provisional transmission factor. No already-persisted damage is modified retroactively.
+- Per-owner six-neighbor World and Plot verification uses `OwnerResolver` loaded block-state and Sable Plot access; same credit never visits one cell twice, and the 128-node owner budget is fail-closed. Unknown/unloaded/bounded branches must not masquerade as a terminal. Logs: `[PDD-F-LEDGER]`, `[PDD-F-PROPAGATION]`.
+- **Still 0.4.0 preview-only.** No World or Plot block destruction, structural splits or permanent physical deformation (`worldMutation=OFF`), per the IDS 1.0.6 version gates. Distinct 0.4.0colFix preview checkpoint, preserving older file names.
+- Existing 0.4.0scaleFix2 calibration, source-gate and original Sable callback contract are preserved. See `docs/PDD-0.4.0-F-First-Impact-Propagation-Design-v0.1.md` and `docs/verification/0.4.0colFix.md`.
+
+## Previous release: 0.4.0scaleFix2 (PDD IDS 1.0.6, experimental calibration)
 
 Based on GitHub main `a7b3c1b3854bb6a2d6e7bad1a6d0b5d600b26094` (latest verified at packaging). Source tree matches the main `src` / `docs` / `scripts` Git trees. **World/Plot mutation remains OFF.** This release does not make real blocks break.
 
 - Retains `Q = min(maxGroupQ, forceGain * max(0, F - forceFloor))`, 0.161 force gain, 65,536 group cap, and 2.6 default damage gain. This is **not measured Sable force**.
 - Rejects conflicting block fingerprints for a single owner-local cell in an impact Credit; duplicates with identical fingerprints remain one target.
 - Snapshot `-Dpdd.material.damageGain=<positive finite number>` once per bridge instance, invalid property falls back to 2.6; original `-Dpdd.realfix.forceGain`, `-Dpdd.realfix.maxGroupQ` knobs remain. Force gain is limited to [0, 1] by IDS P-16.
-- Isolates non-authoritative preview checkpoints by release and a stable policy/material-cache identity (file name begins `pdd-0.4.0scaleFix2-preview-only-`), leaving old checkpoints untouched. A datapack/policy change during the session skips the old-policy checkpoint save. Current calibration is reported under `[PDD-POLICY]`.
+- Previous scaleFix2 isolated non-authoritative preview checkpoints by release and a stable policy/material-cache identity (file name begins `pdd-0.4.0scaleFix2-preview-only-`), leaving old checkpoints untouched. A datapack/policy change during the session skips the old-policy checkpoint save. Current calibration is reported under `[PDD-POLICY]`.
 - Corrects stale JUnit expectations from preceding calibration changes. The earlier moreFix implementation and reports remain as historical evidence.
 - Does not alter the Sable callback, collision episode/owner proofs, per-side 32 target cap, runtime R2 256 shape-read bound, or Apply/Actions contracts.
 

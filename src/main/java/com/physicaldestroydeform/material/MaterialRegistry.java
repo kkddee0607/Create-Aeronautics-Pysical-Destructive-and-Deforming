@@ -31,7 +31,7 @@ import java.util.Map;
 /** IDS 1.0.6: immutable block-definition and relevant state material tables, atomically swapped on reload. */
 public final class MaterialRegistry {
     public static final MaterialProperties FALLBACK=new MaterialProperties(128,20,30);
-    public static final String ALGORITHM_REVISION="PDD-IDS-1.0.6/MATERIAL-0.4.0scaleFix2";
+    public static final String ALGORITHM_REVISION="PDD-IDS-1.0.6/MATERIAL-0.4.0colFix";
     public record Snapshot(long generation,Map<ResourceLocation,MaterialProperties> definitions,
                            Map<String,MaterialProperties> stateSpecific,String algorithmRevision) {
         public Snapshot {

@@ -4,7 +4,7 @@ import java.util.Objects;
 
 /** IDS 1.0.6 §24.1 game-Q planning only. No block mutation or committed damage. */
 public final class DamageModel {
-    public static final String ALGORITHM_REVISION = "PDD-IDS-1.0.6/0.4.0scaleFix2";
+    public static final String ALGORITHM_REVISION = "PDD-IDS-1.0.6/0.4.0colFix";
     public static final double DIRECT_SHARE = 0.60;
     public static final double PLASTIC_SHARE = 0.15;
     public static final double STRESS_SHARE = 0.25;
@@ -58,6 +58,16 @@ public final class DamageModel {
     /** Immutable prediction. Plastic/stress are *reserved then unused*, not added to direct. */
     public static Plan plan(double incomingQ, MaterialProperties material, BlockDamageState previous,
                             Settings cfg) {
+        return planInternal(incomingQ,material,previous,cfg,true);
+    }
+    /** colFix F-propagated target Q already had elastic reduction at the prior
+     * layer. Applying local E again would double-discount the same episode. */
+    public static Plan planPreDamped(double incomingQ,MaterialProperties material,
+                                     BlockDamageState previous,Settings cfg) {
+        return planInternal(incomingQ,material,previous,cfg,false);
+    }
+    private static Plan planInternal(double incomingQ,MaterialProperties material,
+                                     BlockDamageState previous,Settings cfg,boolean localElasticity) {
         if (!Double.isFinite(incomingQ) || incomingQ<0) throw new IllegalArgumentException("invalid source Q");
         Objects.requireNonNull(material); Objects.requireNonNull(previous); Objects.requireNonNull(cfg);
         if (incomingQ==0 || material.unbreakable()) {
@@ -65,7 +75,7 @@ public final class DamageModel {
                     incomingQ,0,0,0,0,0,incomingQ,0,0,previous.damage(),previous.remainder(),0,
                     false,ALGORITHM_REVISION);
         }
-        double active=incomingQ*elasticityTransmission(material,cfg);
+        double active=incomingQ*(localElasticity?elasticityTransmission(material,cfg):1);
         double absorbed=incomingQ-active;
         double direct=active*DIRECT_SHARE;
         double plastic=active*PLASTIC_SHARE;
