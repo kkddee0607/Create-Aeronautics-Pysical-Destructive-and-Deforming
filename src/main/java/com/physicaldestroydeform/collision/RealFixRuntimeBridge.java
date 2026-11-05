@@ -219,7 +219,7 @@ public final class RealFixRuntimeBridge {
         var material=MaterialRegistry.snapshot();
         String policy=GameImpactCredit.POLICY_REVISION+"|"+credit.settings()+"|"+
                 DamageModel.ALGORITHM_REVISION+"|"+damageSettings+"|"+
-                ContactCreditLedger.ALGORITHM_REVISION+"|F-FIRST-0.4.0colFix|"+
+                ContactCreditLedger.ALGORITHM_REVISION+"|F-FIRST-0.4.0colFix2|"+
                 material.algorithmRevision()+"|"+material.definitions().hashCode()+"|"+
                 material.stateSpecific().hashCode();
         return UUID.nameUUIDFromBytes(policy.getBytes(StandardCharsets.UTF_8)).toString();
@@ -490,13 +490,26 @@ public final class RealFixRuntimeBridge {
                         t.lastVerfFsm=fsmSignature;t.lastVerfFsmTick=now;
                     }
                     var materialSnapshot=MaterialRegistry.snapshot();
+                    // Sable 2.0.6 already emits both real manifold local normals.
+                    // Validate both owner frames and opposing directions before
+                    // authorizing directional F traversal; UNKNOWN remains bounded.
+                    var nativeNormal=(!result.credited() || saturatedPoll || massSafe==null
+                            || massSafe.maskedFrames()>0)
+                            ?NativeEffectDirection.unknown("NATIVE_FRAME_OR_EFFECT_UNVERIFIED")
+                            :NativeEffectDirection.verify(pair,massSafe.contacts(),pre);
                     ContactCreditLedger.Grant grant=result.credited()?regionLedger.issuePropagated(
                             pair,result,ContactCreditLedger.Source.SABLE_POST_EFFECT,regions.regions(),
                             (from,x,y,z)->OwnerResolver.propagationNeighbor(
                                     server,stamp.dimension,from,x,y,z),
-                            materialSnapshot::resolveFingerprint,credit.settings(),damageSettings):null;
+                            materialSnapshot::resolveFingerprint,credit.settings(),damageSettings,
+                            nativeNormal.owners()):null;
                     boolean granted=grant!=null && grant.credited();
                     if(granted) {
+                        if(VERF_ENABLED)log.info("[PDD-NATIVE-NORMAL] credit={} status={} " +
+                                        "reason={} records={} ownerVectors={} effectPhase=true " +
+                                        "exactSolverContact=false deformationAuthorized=false mutation=OFF",
+                                grant.id(),nativeNormal.owners().size()==2?"CORROBORATED":"UNKNOWN",
+                                nativeNormal.reason(),nativeNormal.corroboratedRecords(),nativeNormal.owners());
                         credited++;
                         if(grant.propagated()) {
                             for(var side:List.of(grant.propagationA(),grant.propagationB())) {
@@ -536,8 +549,19 @@ public final class RealFixRuntimeBridge {
                                 &&pair.b().stableKey().startsWith("PLOT:")) {
                             witness=NativePlotDirection.prepare(massSafe.contacts(),pre).ownerLocalDirection(
                                     stamp.dimension,stamp.tick,group.runtimePair().lowId(),group.runtimePair().highId());
+                        } else if(!nativeNormal.owners().isEmpty()) {
+                            long earliest=pre.stream()
+                                    .filter(p->p.phase()==CollisionFrame.Phase.PRE_SOLVER
+                                            && p.serverTick()==stamp.tick
+                                            && stamp.dimension.equals(p.dimension()))
+                                    .mapToLong(CollisionFrame.Snapshot::epoch)
+                                    .min().orElse(-1);
+                            var axes=NativeEffectDirection.gridAxes(nativeNormal,stamp.tick,earliest);
+                            witness=new NativePlotDirection.Prepared.DirectionResult(axes,
+                                    axes.isEmpty()?"NATIVE_VECTOR_NONAXIAL":nativeNormal.reason(),
+                                    nativeNormal.corroboratedRecords());
                         } else witness=new NativePlotDirection.Prepared.DirectionResult(
-                                Map.of(),"WORLD_NATIVE_NORMAL_FRAME_NOT_PROVED",0);
+                                Map.of(),nativeNormal.reason(),0);
                         if(witness.owners().isEmpty())directionUnknown++;
                         else directionApproved++;
                         if(VERF_ENABLED)log.info("[PDD-DIRECTION] credit={} status={} reason={} " +
@@ -690,7 +714,7 @@ public final class RealFixRuntimeBridge {
             // had a contact. Expiring on lastSeen (-1) discards its verified
             // clearance/AABB evidence while GameImpactCredit stays ARMED.
             tracked.entrySet().removeIf(e->trackedIdleExpired(now,e.getValue().lastProcessed));
-            log.info("[PDD-0.4.0colFix] phase=SUMMARY observed={} credited={} zero={} ownerMissing={} targetMissing={} ambiguous={} trackedPairs={} r2Verified={} r2Rejected={} r3Verified={} prearmed={} r1Fallback={} regionGroups={} regionCount={} regionTooBroad={} ledgerRejected={} activeCredits={} observerErrors={} nativeDropped={} nativeMalformed={} nativeCapSaturatedPolls={} r2Audits={} r2SkippedDuplicate={} r2ActualShapeChecks={} callbackDropped={} preHistoryDropped={} generation=IDS-1.0.6 mutation=OFF",
+            log.info("[PDD-0.4.0colFix2] phase=SUMMARY observed={} credited={} zero={} ownerMissing={} targetMissing={} ambiguous={} trackedPairs={} r2Verified={} r2Rejected={} r3Verified={} prearmed={} r1Fallback={} regionGroups={} regionCount={} regionTooBroad={} ledgerRejected={} activeCredits={} observerErrors={} nativeDropped={} nativeMalformed={} nativeCapSaturatedPolls={} r2Audits={} r2SkippedDuplicate={} r2ActualShapeChecks={} callbackDropped={} preHistoryDropped={} generation=IDS-1.0.6 mutation=OFF",
                     observed,credited,zero,missingOwner,missingTarget,ambiguousOwners,tracked.size(),
                     r2Verified,r2Rejected,r3Verified,prearmed,r1Fallback,
                     multiGroupCredits,multiRegions,multiTooBroad,ledgerRejected,regionLedger.size(),

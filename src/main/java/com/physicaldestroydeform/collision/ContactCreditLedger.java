@@ -17,7 +17,7 @@ import java.util.Set;
  * F through owner-verified connected cells before deriving target Q.
  */
 public final class ContactCreditLedger {
-    public static final String ALGORITHM_REVISION = "PDD-IDS-1.0.6/0.4.0colFix";
+    public static final String ALGORITHM_REVISION = "PDD-IDS-1.0.6/0.4.0colFix2";
     // Native contact SEEDS (not propagated neighbors) remain capped at 32/side.
     public static final int MAX_TARGETS_PER_SIDE = 32;
     public static final int MAX_REGIONS = 2 * MAX_TARGETS_PER_SIDE;
@@ -160,6 +160,18 @@ public final class ContactCreditLedger {
                                  java.util.function.Function<String,com.physicaldestroydeform.MaterialProperties> materials,
                                  GameImpactCredit.Settings forces,
                                  com.physicaldestroydeform.DamageModel.Settings damage) {
+        return issuePropagated(pair,decision,source,evidence,neighbors,materials,forces,damage,null);
+    }
+    /** A non-null direction map selects the bounded owner-local propagation
+     * engine, including its bounded UNKNOWN-direction fallback. The original
+     * signature remains for historical pure regression fixtures. */
+    public Grant issuePropagated(GameImpactCredit.Pair pair,GameImpactCredit.Decision decision,
+                                 Source source,List<Region> evidence,
+                                 ForcePropagation.NeighborReader neighbors,
+                                 java.util.function.Function<String,com.physicaldestroydeform.MaterialProperties> materials,
+                                 GameImpactCredit.Settings forces,
+                                 com.physicaldestroydeform.DamageModel.Settings damage,
+                                 Map<String,ForcePropagation.Orientation> directions) {
         // Preserve every existing owner/region/episode validation and one-credit rule.
         Grant base=issue(pair,decision,source,evidence);
         if(!base.credited())return base;
@@ -167,8 +179,14 @@ public final class ContactCreditLedger {
             List<GameImpactCredit.Target> seedsA=base.a().stream().map(Share::target).toList();
             List<GameImpactCredit.Target> seedsB=base.b().stream().map(Share::target).toList();
             double sideF=decision.peakForce()/2;
-            var pa=ForcePropagation.plan(pair.a().stableKey(),seedsA,sideF,neighbors,materials,forces,damage);
-            var pb=ForcePropagation.plan(pair.b().stableKey(),seedsB,sideF,neighbors,materials,forces,damage);
+            var pa=directions==null
+                    ?ForcePropagation.plan(pair.a().stableKey(),seedsA,sideF,neighbors,materials,forces,damage)
+                    :ForcePropagation.plan(pair.a().stableKey(),seedsA,sideF,neighbors,materials,forces,damage,
+                            directions.getOrDefault(pair.a().stableKey(),ForcePropagation.Orientation.unknown()));
+            var pb=directions==null
+                    ?ForcePropagation.plan(pair.b().stableKey(),seedsB,sideF,neighbors,materials,forces,damage)
+                    :ForcePropagation.plan(pair.b().stableKey(),seedsB,sideF,neighbors,materials,forces,damage,
+                            directions.getOrDefault(pair.b().stableKey(),ForcePropagation.Orientation.unknown()));
             var a=seal(pa,decision.allocation().sideA());
             var b=seal(pb,decision.allocation().sideB());
             double sum=a.stream().mapToDouble(Share::q).sum()+b.stream().mapToDouble(Share::q).sum();

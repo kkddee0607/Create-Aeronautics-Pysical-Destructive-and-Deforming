@@ -162,6 +162,232 @@ public final class ForcePropagation {
         return new Result(shares,inputF,allocated,dampedF,Math.max(0,remaining),
                 candidate,finalQ,dampedQ,reason);
     }
+
+    /** A verified owner-local native manifold normal, or explicit UNKNOWN.
+     * This field is an inward direction for gameplay F propagation only.
+     * It does not claim the exact impact point, substep or solver impulse. */
+    public record Orientation(FrameMath.Vec inward, String evidence) {
+        public Orientation {
+            Objects.requireNonNull(evidence);
+            if (inward != null) inward=inward.unit();
+        }
+        public boolean verified() {return inward!=null;}
+        public static Orientation unknown() {return new Orientation(null,"UNKNOWN");}
+    }
+    // Actual production geometry is bounded. Neither radius nor a safety cap is
+    // a real block boundary, so no terminal remainder may be manufactured there.
+    public static final int MAX_UNKNOWN_DEPTH=2;
+    public static final int MAX_NATIVE_DEPTH=9;
+
+    private static final class Flow {
+        final GameImpactCredit.Target target;
+        final int x,y,z,depth,elasticity;
+        final java.util.Map<Flow,Double> parents=new java.util.HashMap<>();
+        double incoming,localF,rawQ,finalQ;
+        Flow(GameImpactCredit.Target t,int depth,int e) {
+            this.target=t;this.depth=depth;this.elasticity=e;
+            String[] p=t.localBlock().split(",",-1);
+            if(p.length!=3)throw new IllegalArgumentException("bad target coordinates");
+            x=Integer.parseInt(p[0]);y=Integer.parseInt(p[1]);z=Integer.parseInt(p[2]);
+        }
+    }
+
+    /**
+     * Direction-aware WORLD/Plot engine. Each parent sends its own outgoing
+     * F to its eligible unvisited children; a child with multiple parents
+     * sums incoming F and is processed exactly once. Elasticity affects only
+     * its upstream graph parents' provisional Q and its OWN outgoing F, not
+     * unrelated sibling branches. No global mean transmission is used.
+     *
+     * UNKNOWN direction is a deliberately short damage-only fallback. Native
+     * direction follows a narrow forward cone in owner-local coordinates.
+     */
+    public static Result plan(String ownerKey,List<GameImpactCredit.Target> seeds,double inputF,
+                              NeighborReader neighbors,Function<String,MaterialProperties> materials,
+                              GameImpactCredit.Settings forces,DamageModel.Settings damage,
+                              Orientation direction) {
+        Objects.requireNonNull(direction);
+        Objects.requireNonNull(ownerKey);Objects.requireNonNull(seeds);
+        Objects.requireNonNull(neighbors);Objects.requireNonNull(materials);
+        Objects.requireNonNull(forces);Objects.requireNonNull(damage);
+        if(!Double.isFinite(inputF)||inputF<0)throw new IllegalArgumentException("invalid F");
+        if(inputF==0||seeds.isEmpty())return new Result(List.of(),inputF,0,0,inputF,0,0,0,
+                "NO_VERIFIED_SEEDS");
+        var seen=new java.util.HashMap<String,Flow>();
+        for(var t:seeds) {
+            if(t==null||!ownerKey.equals(t.ownerKey()))throw new IllegalArgumentException("invalid seed owner");
+            Flow old=seen.get(t.localBlock());
+            if(old!=null) {
+                if(!old.target.fingerprint().equals(t.fingerprint()))
+                    throw new IllegalArgumentException("conflicting seed fingerprint");
+                continue;
+            }
+            var m=Objects.requireNonNull(materials.apply(t.fingerprint()),"missing material");
+            seen.put(t.localBlock(),new Flow(t,0,m.elasticityPercent()));
+        }
+        if(seen.size()>MAX_NODES_PER_SIDE)throw new IllegalArgumentException("too many contact seeds");
+        List<Flow> layer=new ArrayList<>(seen.values());
+        layer.sort(Comparator.comparing(n->n.target.localBlock()));
+        for(var n:layer)n.incoming=inputF/layer.size();
+        var all=new ArrayList<Flow>();
+        double assigned=0,dampedF=0,unresolved=0;
+        boolean capped=false,unknown=false,depthLimited=false,belowFloor=false;
+        while(!layer.isEmpty()) {
+            int depth=layer.getFirst().depth;
+            // Build all next-layer edges BEFORE publishing any source Q.
+            var nextMap=new java.util.HashMap<String,Flow>();
+            var links=new java.util.HashMap<Flow,List<Flow>>();
+            var uncertain=new java.util.HashSet<Flow>();
+            boolean depthCap=depth >= (direction.verified()?MAX_NATIVE_DEPTH:MAX_UNKNOWN_DEPTH);
+            for(var node:layer) {
+                var children=new ArrayList<Flow>();
+                if(!depthCap) for(var step:DIRECTIONS) {
+                    int x,y,z;
+                    try {
+                        x=Math.addExact(node.x,step[0]);y=Math.addExact(node.y,step[1]);z=Math.addExact(node.z,step[2]);
+                    }catch(ArithmeticException overflow) {uncertain.add(node);continue;}
+                    if(!withinField(direction,seeds,x,y,z))continue;
+                    Probe found=Objects.requireNonNull(neighbors.read(node.target,x,y,z),"missing proof");
+                    if(found.status()==ProbeStatus.UNKNOWN){uncertain.add(node);continue;}
+                    if(found.status()==ProbeStatus.EMPTY)continue;
+                    var target=found.target();
+                    if(!ownerKey.equals(target.ownerKey())||!target.localBlock().equals(x+","+y+","+z))
+                        throw new IllegalArgumentException("neighbor owner/coordinate mismatch");
+                    var prior=seen.get(target.localBlock());
+                    if(prior!=null) {
+                        if(!prior.target.fingerprint().equals(target.fingerprint()))
+                            throw new IllegalArgumentException("changed neighbor fingerprint");
+                        continue;
+                    }
+                    var child=nextMap.get(target.localBlock());
+                    if(child==null) {
+                        if(seen.size()+nextMap.size()>=MAX_NODES_PER_SIDE) {
+                            capped=true;uncertain.add(node);continue;
+                        }
+                        var m=Objects.requireNonNull(materials.apply(target.fingerprint()),"missing neighbor material");
+                        child=new Flow(target,depth+1,m.elasticityPercent());
+                        nextMap.put(target.localBlock(),child);
+                    } else if(!child.target.fingerprint().equals(target.fingerprint()))
+                        throw new IllegalArgumentException("conflicting branch fingerprint");
+                    children.add(child);
+                }
+                if(depthCap) {
+                    // The search radius is not a physical endpoint. Still
+                    // inspect the immediate frontier: if it is truly EMPTY,
+                    // grant a real terminal; otherwise keep the remainder
+                    // unresolved instead of assigning it to this node.
+                    for(var step:DIRECTIONS) {
+                        int x,y,z;
+                        try {
+                            x=Math.addExact(node.x,step[0]);y=Math.addExact(node.y,step[1]);z=Math.addExact(node.z,step[2]);
+                        }catch(ArithmeticException overflow){uncertain.add(node);continue;}
+                        if(!withinField(direction,seeds,x,y,z))continue;
+                        Probe found=Objects.requireNonNull(neighbors.read(node.target,x,y,z),"missing boundary proof");
+                        if(found.status()==ProbeStatus.UNKNOWN){uncertain.add(node);unknown=true;continue;}
+                        if(found.status()==ProbeStatus.PRESENT) {
+                            var t=found.target();
+                            if(!ownerKey.equals(t.ownerKey()) || !t.localBlock().equals(x+","+y+","+z))
+                                throw new IllegalArgumentException("boundary owner/coordinate mismatch");
+                            var already=seen.get(t.localBlock());
+                            if(already!=null && !already.target.fingerprint().equals(t.fingerprint()))
+                                throw new IllegalArgumentException("boundary fingerprint changed");
+                            if(already==null){uncertain.add(node);depthLimited=true;}
+                        }
+                    }
+                }
+                links.put(node,children);
+            }
+            List<Flow> next=new ArrayList<>(nextMap.values());
+            next.sort(Comparator.comparing(n->n.target.localBlock()));
+            // Nodes that could have undiscovered edges cannot redirect that
+            // unproved budget to whichever neighbors happened to be scanned.
+            for(var node:layer) {
+                List<Flow> children=links.get(node);
+                boolean blocked=uncertain.contains(node);
+                boolean terminal=children.isEmpty()&&!blocked;
+                double local=terminal?node.incoming:node.incoming/2;
+                node.localF=local;
+                node.rawQ=forces.candidate(local);
+                node.finalQ=node.rawQ;
+                assigned+=local;
+                all.add(node);
+                if(blocked) {
+                    unresolved+=node.incoming-local;
+                    unknown=true;
+                    continue;
+                }
+                if(children.isEmpty())continue;
+                double transmit=DamageModel.elasticityTransmissionPercent(node.elasticity,damage);
+                double onward=(node.incoming-local);
+                double forward=onward*transmit;
+                dampedF+=onward-forward;
+                // Skip subthreshold expansion after an intact node has been
+                // accounted. This is a gameplay Q floor, NOT a terminal.
+                if(forward/children.size()<forces.forceFloor() && depth>=3) {
+                    unresolved+=forward;
+                    belowFloor=true;
+                    continue;
+                }
+                for(var child:children) {
+                    double part=forward/children.size();
+                    child.incoming+=part;
+                    child.parents.merge(node,part,Double::sum);
+                }
+            }
+            // Applying a child's elasticity to each actual predecessor keeps
+            // unrelated branches independent; a join contributes one Q only.
+            var sums=new java.util.HashMap<Flow,Double>();
+            var weighted=new java.util.HashMap<Flow,Double>();
+            for(var child:next) {
+                double transmission=DamageModel.elasticityTransmissionPercent(child.elasticity,damage);
+                for(var entry:child.parents.entrySet()) {
+                    sums.merge(entry.getKey(),entry.getValue(),Double::sum);
+                    weighted.merge(entry.getKey(),entry.getValue()*transmission,Double::sum);
+                }
+            }
+            for(var entry:sums.entrySet())
+                if(entry.getValue()>0)entry.getKey().finalQ*=weighted.get(entry.getKey())/entry.getValue();
+            seen.putAll(nextMap);
+            layer=next.stream().filter(n->n.incoming>0).toList();
+            if(depthCap)break;
+        }
+        var shares=new ArrayList<Share>(all.size());
+        double candidate=0,finalQ=0;
+        for(var n:all) {
+            candidate+=n.rawQ;finalQ+=n.finalQ;
+            shares.add(new Share(n.target,n.localF,n.rawQ,n.finalQ,n.depth,n.elasticity));
+        }
+        String end=capped?"UNVERIFIED_BOUNDARY":depthLimited?"DIRECTION_DEPTH_LIMIT"
+                :unknown?"UNVERIFIED_BOUNDARY":belowFloor?"BELOW_Q_FLOOR":"VERIFIED_TERMINAL";
+        double residual=inputF-assigned-dampedF;
+        if(residual<0&&residual>-1e-7*Math.max(1,inputF))residual=0;
+        if(!Double.isFinite(residual)||residual<-1e-7*Math.max(1,inputF)||
+                Math.abs((assigned+dampedF+residual)-inputF)>1e-7*Math.max(1,inputF)||
+                finalQ>candidate+1e-7||finalQ<0||!Double.isFinite(finalQ))
+            throw new IllegalStateException("directed F/Q budget mismatch");
+        return new Result(shares,inputF,assigned,dampedF,Math.max(0,residual),candidate,
+                finalQ,Math.max(0,candidate-finalQ),end);
+    }
+    private static boolean withinField(Orientation direction,List<GameImpactCredit.Target> seeds,
+                                       int x,int y,int z) {
+        if(!direction.verified())return true;
+        FrameMath.Vec n=direction.inward();
+        for(var seed:seeds) {
+            var p=seed.localBlock().split(",",-1);
+            double dx=(double)x-Integer.parseInt(p[0]),dy=(double)y-Integer.parseInt(p[1]),
+                    dz=(double)z-Integer.parseInt(p[2]);
+            double parallel=dx*n.x()+dy*n.y()+dz*n.z();
+            if(parallel<0.49)continue;
+            double dist2=dx*dx+dy*dy+dz*dz;
+            // Permit the first signed axis of an oblique manifold, then a
+            // narrow expanding forward cone. Do not propagate backward.
+            if((dist2<=1.01 && parallel>=.5)
+                    || dist2-parallel*parallel<=.36*parallel*parallel+1e-10)
+                return true;
+        }
+        return false;
+    }
+
     private static void add(Map<String,GameImpactCredit.Target> seen,String owner,GameImpactCredit.Target target) {
         Objects.requireNonNull(target);
         if(!owner.equals(target.ownerKey()))throw new IllegalArgumentException("wrong target owner");

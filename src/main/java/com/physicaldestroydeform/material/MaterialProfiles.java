@@ -23,7 +23,7 @@ public final class MaterialProfiles {
             case "minecraft:reinforced_deepslate" -> {h=255;t=255;d=7;e=7;}
             case "minecraft:grass_block" -> {h=24;t=32;d=25;e=22;}
             case "minecraft:obsidian" -> {d=0;e=0;}
-            case "minecraft:slime_block" -> {d=80;e=100;}
+            case "minecraft:slime_block" -> {t=Math.max(t,64);d=80;e=100;}
             case "minecraft:gold_block" -> {d=100;e=20;}
             case "minecraft:iron_block" -> {d=70;e=35;}
             case "minecraft:copper_block" -> {d=85;e=25;}

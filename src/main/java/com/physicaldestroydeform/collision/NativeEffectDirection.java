@@ -1,0 +1,147 @@
+package com.physicaldestroydeform.collision;
+
+import com.physicaldestroydeform.diagnostics.NativeCollisionTelemetry;
+import com.physicaldestroydeform.collision.FrameMath.Vec;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+/**
+ * Sable Rapier 2.0.6 clearCollisions()[3..8] contains genuine opposing
+ * local_n1/local_n2 MANIFOLD normals. These are NOT measured impulse vectors.
+ * The static (-1) rigid collider uses the world basis. Plot normals are in
+ * its local collider basis, independently corroborated against the Sable
+ * post-effect owner pose. All records of one approved body pair must agree.
+ * A missing/rotating/malformed witness is UNKNOWN, never inferred by order.
+ * Effect arrays have no per-record solver substep/point identity: this result
+ * only authorizes directional F prediction, never a block move.
+ */
+public final class NativeEffectDirection {
+    private NativeEffectDirection() {}
+    private static final double MIN_OPPOSING_COS = .98;
+    private static final double MIN_AGREEMENT_COS = .98;
+
+    public record Result(Map<String, ForcePropagation.Orientation> owners,
+                         String reason, int corroboratedRecords) {
+        public Result { owners = Map.copyOf(owners); }
+        public ForcePropagation.Orientation forOwner(String owner) {
+            return owners.getOrDefault(owner, ForcePropagation.Orientation.unknown());
+        }
+    }
+    public static Result unknown(String reason) { return new Result(Map.of(),reason,0); }
+
+    public static Result verify(GameImpactCredit.Pair pair,
+                                List<NativeCollisionTelemetry.Contact> contacts) {
+        if (pair == null || contacts == null || contacts.isEmpty()) return unknown("NO_NATIVE_WITNESSES");
+        var candidates = new HashMap<String,Vec>();
+        int inspected=0;
+        for(var c:contacts) {
+            if(c==null || !pair.dimension().equals(c.dimension()) || c.capSaturated())
+                return unknown("BAD_OR_SATURATED_NATIVE_RECORD");
+            String a=owner(c.idA(),c.frameA(),c.dimension());
+            String b=owner(c.idB(),c.frameB(),c.dimension());
+            if(a==null || b==null || a.equals(b)
+                    || !(a.equals(pair.a().stableKey())&&b.equals(pair.b().stableKey())
+                    || a.equals(pair.b().stableKey())&&b.equals(pair.a().stableKey())))
+                return unknown("OWNER_OR_EFFECT_POSE_UNVERIFIED");
+            try {
+                Vec localA=new Vec(c.ax(),c.ay(),c.az()).unit();
+                Vec localB=new Vec(c.bx(),c.by(),c.bz()).unit();
+                Vec worldA=world(localA,c.idA(),c.frameA());
+                Vec worldB=world(localB,c.idB(),c.frameB());
+                if(worldA.dot(worldB)>-MIN_OPPOSING_COS)
+                    return unknown("NATIVE_OPPOSING_NORMALS_DISAGREE");
+                // Negative local outward manifold normal points into the target.
+                Vec inA=localA.times(-1),inB=localB.times(-1);
+                if(!add(candidates,a,inA) || !add(candidates,b,inB))
+                    return unknown("NATIVE_MANIFOLD_DIRECTION_CONFLICT");
+                inspected++;
+            }catch(IllegalArgumentException invalid) {
+                return unknown("NONFINITE_OR_INVALID_NATIVE_NORMAL");
+            }
+        }
+        if(inspected==0 || candidates.size()!=2)return unknown("INCOMPLETE_NATIVE_NORMALS");
+        var owners=new HashMap<String,ForcePropagation.Orientation>();
+        for(var entry:candidates.entrySet())
+            owners.put(entry.getKey(),new ForcePropagation.Orientation(entry.getValue(),
+                    "SABLE_RAPIER_LOCAL_MANIFOLD_NORMAL_EFFECT_PHASE"));
+        return new Result(owners,"OPPOSING_MANIFOLD_NORMALS_CORROBORATED",inspected);
+    }
+    /** Additional production gate: an effect pose must not be promoted to a
+     * native world direction when any captured pre-solver substep had an
+     * incompatible orientation. Collision records lack a substep index. */
+    public static Result verify(GameImpactCredit.Pair pair,
+                                List<NativeCollisionTelemetry.Contact> contacts,
+                                List<CollisionFrame.Snapshot> preFrames) {
+        Result result=verify(pair,contacts);
+        if(result.owners().isEmpty())return result;
+        if(preFrames==null || preFrames.isEmpty())return unknown("MISSING_PRE_SOLVER_POSE");
+        for(var c:contacts) {
+            if(c.idA()>=0 && !sameRotationAcrossSubsteps(c.idA(),c.frameA(),c.dimension(),c.serverTick(),preFrames))
+                return unknown("PLOT_NORMAL_FRAME_ROTATION_UNVERIFIED");
+            if(c.idB()>=0 && !sameRotationAcrossSubsteps(c.idB(),c.frameB(),c.dimension(),c.serverTick(),preFrames))
+                return unknown("PLOT_NORMAL_FRAME_ROTATION_UNVERIFIED");
+        }
+        return result;
+    }
+    private static boolean sameRotationAcrossSubsteps(int id,
+                   NativeCollisionTelemetry.OwnerFrame frame,String dimension,long tick,
+                   List<CollisionFrame.Snapshot> snapshots) {
+        if(frame==null)return false;
+        int matching=0;
+        var e=frame.pose();
+        for(var s:snapshots) {
+            if(s==null || s.phase()!=CollisionFrame.Phase.PRE_SOLVER
+                    || s.serverTick()!=tick || !dimension.equals(s.dimension()))continue;
+            CollisionFrame.Body match=null;
+            for(var b:s.bodies())if(b.runtimeId()==id) {
+                if(match!=null)return false;
+                match=b;
+            }
+            if(match==null || !frame.uuid().equals(match.plotId())
+                    || match.pose()==null || !match.pose().valid())return false;
+            var p=match.pose();
+            double dot=e.qx()*p.qx()+e.qy()*p.qy()+e.qz()*p.qz()+e.qw()*p.qw();
+            double ea=e.qx()*e.qx()+e.qy()*e.qy()+e.qz()*e.qz()+e.qw()*e.qw();
+            double pa=p.qx()*p.qx()+p.qy()*p.qy()+p.qz()*p.qz()+p.qw()*p.qw();
+            if(!Double.isFinite(dot) || dot*dot/(ea*pa)<.995*.995)return false;
+            matching++;
+        }
+        return matching>0;
+    }
+    /** Optional signed-grid witnesses for the existing direction preview.
+     * Diagonal native vectors remain usable for F propagation but MUST NOT
+     * be rounded into a supposedly exact block-deformation axis. */
+    public static Map<String,DirectionEvidence> gridAxes(Result result,long tick,long preEpoch) {
+        if(result==null || result.owners().isEmpty() || tick<0 || preEpoch<0)return Map.of();
+        var out=new HashMap<String,DirectionEvidence>();
+        for(var entry:result.owners().entrySet()) {
+            Vec n=entry.getValue().inward();
+            if(n==null)continue;
+            double[] a={n.x(),n.y(),n.z()};
+            int axis=0;
+            for(int i=1;i<3;i++)if(Math.abs(a[i])>Math.abs(a[axis]))axis=i;
+            if(Math.abs(a[axis])<.98)continue;
+            int[] signed={0,0,0};signed[axis]=a[axis]>0?1:-1;
+            out.put(entry.getKey(),new DirectionEvidence(entry.getKey(),
+                    "SABLE_RAPIER_LOCAL_MANIFOLD_NORMAL",
+                    "ALL_EFFECT_NORMALS_AND_PRE_POSE_CORROBORATED_SUBSTEP_UNKNOWN",
+                    tick,-1,preEpoch,signed[0],signed[1],signed[2]));
+        }
+        return Map.copyOf(out);
+    }
+    private static boolean add(Map<String,Vec> map,String owner,Vec normal) {
+        Vec previous=map.putIfAbsent(owner,normal);
+        return previous==null || previous.dot(normal)>=MIN_AGREEMENT_COS;
+    }
+    private static String owner(int id,NativeCollisionTelemetry.OwnerFrame frame,String dimension) {
+        if(id==-1)return "WORLD:"+dimension;
+        if(id<0 || frame==null)return null;
+        return "PLOT:"+frame.uuid();
+    }
+    private static Vec world(Vec local,int id,NativeCollisionTelemetry.OwnerFrame frame) {
+        if(id==-1)return local; // Sable Rapier fixed ground collider is world-aligned.
+        if(frame==null)throw new IllegalArgumentException("missing Sable effect frame");
+        return frame.pose().toWorldNormal(local);
+    }
+}

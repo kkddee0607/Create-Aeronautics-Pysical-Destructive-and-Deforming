@@ -4,7 +4,7 @@ import java.util.Objects;
 
 /** IDS 1.0.6 §24.1 game-Q planning only. No block mutation or committed damage. */
 public final class DamageModel {
-    public static final String ALGORITHM_REVISION = "PDD-IDS-1.0.6/0.4.0colFix";
+    public static final String ALGORITHM_REVISION = "PDD-IDS-1.0.6/0.4.0colFix2";
     public static final double DIRECT_SHARE = 0.60;
     public static final double PLASTIC_SHARE = 0.15;
     public static final double STRESS_SHARE = 0.25;
@@ -51,20 +51,28 @@ public final class DamageModel {
                 * Math.pow(1-material.hardnessNormalized(),cfg.hardnessExponent());
     }
     public static double elasticityTransmission(MaterialProperties material, Settings cfg) {
-        Objects.requireNonNull(material); Objects.requireNonNull(cfg);
-        return cfg.minElasticFactor() + (1-cfg.minElasticFactor())
-                * Math.pow(1-material.elasticity(),cfg.elasticExponent());
+        Objects.requireNonNull(material);
+        return elasticityTransmissionPercent(material.elasticityPercent(),cfg);
+    }
+    /** Direct percent lookup for the bounded graph. Avoid per-edge temporary
+     * material allocation during World/Plot stress planning. */
+    public static double elasticityTransmissionPercent(int percent,Settings cfg) {
+        Objects.requireNonNull(cfg);
+        if(percent<0 || percent>100)throw new IllegalArgumentException("invalid E percent");
+        return cfg.minElasticFactor()+(1-cfg.minElasticFactor())
+                * Math.pow(1-percent/100.0,cfg.elasticExponent());
     }
     /** Immutable prediction. Plastic/stress are *reserved then unused*, not added to direct. */
     public static Plan plan(double incomingQ, MaterialProperties material, BlockDamageState previous,
                             Settings cfg) {
         return planInternal(incomingQ,material,previous,cfg,true);
     }
-    /** colFix F-propagated target Q already had elastic reduction at the prior
-     * layer. Applying local E again would double-discount the same episode. */
+    /** F propagation damped this target's Q only by DOWNSTREAM elastic nodes.
+     * Its OWN elasticity still absorbs part of its own Q exactly once, which
+     * does not double-count the neighbor's separate upstream effect. */
     public static Plan planPreDamped(double incomingQ,MaterialProperties material,
                                      BlockDamageState previous,Settings cfg) {
-        return planInternal(incomingQ,material,previous,cfg,false);
+        return planInternal(incomingQ,material,previous,cfg,true);
     }
     private static Plan planInternal(double incomingQ,MaterialProperties material,
                                      BlockDamageState previous,Settings cfg,boolean localElasticity) {

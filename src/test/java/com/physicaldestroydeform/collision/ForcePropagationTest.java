@@ -160,8 +160,9 @@ class ForcePropagationTest {
         assertEquals(pair.b().stableKey(),r.b().getFirst().target().ownerKey());
         assertEquals(q,r.accounted(),1e-9);
         var material=MaterialPlanner.plan(r,1,fp->material(60),DAMAGE);
-        // A sole terminal has no preceding block to damp; local E is not applied a second time.
-        assertEquals(r.a().getFirst().q(),material.plans().getFirst().plan().activeQ(),1e-8);
+        // colFix2 separates neighbor damping from the material's OWN elasticity.
+        assertTrue(material.plans().getFirst().plan().activeQ()<r.a().getFirst().q());
+        assertEquals(r.a().getFirst().q(),material.plans().getFirst().plan().accountedQ(),1e-8);
         assertEquals(ContactCreditLedger.Status.DUPLICATE_CAUSE,
                 ledger.issuePropagated(pair,d,ContactCreditLedger.Source.SABLE_POST_EFFECT,evidence,
                         graph(Set.of()),fp->material(60),FORCE,DAMAGE).status());
