@@ -23,7 +23,7 @@ class MaterialPlanningTest {
         assertEquals(1.5,plan.stressQ(),1e-9);
         assertEquals(2.4,plan.unusedPlannedQ(),1e-9);
         assertEquals(40,plan.accountedQ(),1e-9);
-        assertEquals(3.6,plan.rawDamage(),1e-9);
+        assertEquals(3.6*POLICY.damageGain(),plan.rawDamage(),1e-9);
         assertEquals(0,plan.plannedPlasticIncrement()); // yield not reached: no invented deformation
     }
     @Test void plasticCapacityAndYieldAreIndependentOfDirectDamage() {
@@ -47,11 +47,11 @@ class MaterialPlanningTest {
     @Test void tinyDamageAggregatesWithoutPerImpactCeiling() {
         var m=new MaterialProperties(255,255,0,0,false);
         BlockDamageState current=new BlockDamageState();
-        var p=DamageModel.plan(.1,m,current,POLICY); // 0.1 * 0.6 * 0.08 = .0048
-        assertEquals(1,p.fixedIncrement());
+        var p=DamageModel.plan(.1,m,current,POLICY); // 0.1 * 0.6 * 0.08 * 2.6 = .01248
+        assertEquals(3,p.fixedIncrement());
         assertEquals(0,p.plannedDamageU8());
         for(int i=0;i<256;i++)current.addFixedDamage(p.fixedIncrement());
-        assertEquals(1,current.damage());assertEquals(0,current.remainder());
+        assertEquals(3,current.damage());assertEquals(0,current.remainder());
     }
     @Test void refusesInvalidEnergyAndParameters() {
         assertThrows(IllegalArgumentException.class,
@@ -65,7 +65,7 @@ class MaterialPlanningTest {
         var m=new MaterialProperties(0,7,0,0,false);
         var state=new BlockDamageState();state.setDamage(6);state.setRemainder(250);
         var p=DamageModel.plan(1,m,state,POLICY);
-        assertEquals(7,p.plannedDamageU8());assertTrue(p.thresholdReached());
+        assertEquals(8,p.plannedDamageU8());assertTrue(p.thresholdReached());
         assertEquals(6,state.damage()); // a *plan* never commits the old mutable state
     }
     @Test void materialPlanZeroDoesNotChangePrevious() {

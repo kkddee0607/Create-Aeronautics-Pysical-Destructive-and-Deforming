@@ -16,6 +16,8 @@ import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import org.slf4j.Logger;
 
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -52,12 +54,14 @@ public final class RealFixRuntimeBridge {
             Long.getLong("pdd.verf.sampleTicks",100L));
     private String runId=UUID.randomUUID().toString();
     private final GameImpactCredit credit=new GameImpactCredit(Settings.fromSystemProperties());
+    private final DamageModel.Settings damageSettings=DamageModel.Settings.fromSystemProperties();
     private final ContactCreditLedger regionLedger=new ContactCreditLedger();
     private final WorldClearanceVerifier worldClearance=new WorldClearanceVerifier();
     private final ForceCalibration forceCalibration=new ForceCalibration();
     private final PreviewDamageLedger preview=new PreviewDamageLedger();
     private long directionApproved,directionUnknown,previewFailures;
     private boolean previewCheckpointWritable=true;
+    private String previewPolicyId;
     private final Map<Pair,Tracked> tracked=new HashMap<>();
     private final Map<String,Generation> generations=new HashMap<>();
     private long credited,observed,zero,missingOwner,ambiguousOwners,missingTarget;
@@ -144,16 +148,28 @@ public final class RealFixRuntimeBridge {
         directionApproved=directionUnknown=previewFailures=0;
         preview.clear();
         previewCheckpointWritable=true;
+        previewPolicyId=null;
     }
 
     /** Diagnostic snapshot ONLY. No connection to real World/Plot damage persistence. */
     public void loadPreview(MinecraftServer server,Logger log) {
+        var q=credit.settings();
+        log.info("[PDD-POLICY] revision={} forceEnter={} forceFloor={} forceGain={} maxGroupQ={} " +
+                        "damageGain={} directShare={} plasticShare={} stressShare={} fixedPointScale={} " +
+                        "source=POST_EFFECT_GAME_PROXY measured=false mutation=OFF",
+                GameImpactCredit.POLICY_REVISION,q.forceEnter(),q.forceFloor(),q.forceGain(),
+                q.maxGroupQ(),damageSettings.damageGain(),DamageModel.DIRECT_SHARE,
+                DamageModel.PLASTIC_SHARE,DamageModel.STRESS_SHARE,
+                com.physicaldestroydeform.BlockDamageState.FIXED_SCALE);
+        // A changed Q, damage, material override or datapack cache must not replay
+        // the previous calibration's diagnostic damage as this policy's result.
+        previewPolicyId=calibrationIdentity();
         if(!PreviewCheckpoint.enabled()) {
             log.info("[PDD-PREVIEW-SAVE] phase=START status=DISABLED persisted=false mutation=OFF");
             return;
         }
         try {
-            var path=PreviewCheckpoint.file(server.getWorldPath(net.minecraft.world.level.storage.LevelResource.ROOT));
+            var path=previewPath(server);
             var bytes=PreviewCheckpoint.load(path);
             if(bytes==null) {
                 log.info("[PDD-PREVIEW-SAVE] phase=START status=EMPTY file={} restored=0 mutation=OFF",path);
@@ -173,6 +189,11 @@ public final class RealFixRuntimeBridge {
     }
     public void savePreview(MinecraftServer server,Logger log) {
         if(!PreviewCheckpoint.enabled())return;
+        if(previewPolicyId==null || !previewPolicyId.equals(calibrationIdentity())) {
+            log.warn("[PDD-PREVIEW-SAVE] phase=STOP status=SKIPPED_POLICY_CHANGED " +
+                    "originalCheckpointPreserved=true mutation=OFF");
+            return;
+        }
         if(!previewCheckpointWritable) {
             log.warn("[PDD-PREVIEW-SAVE] phase=STOP status=SKIPPED_BAD_INPUT " +
                     "originalCheckpointPreserved=true mutation=OFF");
@@ -180,7 +201,7 @@ public final class RealFixRuntimeBridge {
         }
         try {
             byte[] bytes=preview.verifyRoundTrip();
-            var path=PreviewCheckpoint.file(server.getWorldPath(net.minecraft.world.level.storage.LevelResource.ROOT));
+            var path=previewPath(server);
             PreviewCheckpoint.save(path,bytes);
             log.info("[PDD-PREVIEW-SAVE] phase=STOP status=WRITTEN file={} entries={} fixedTotal={} " +
                     "bytes={} authoritative=false mutation=OFF",
@@ -189,6 +210,20 @@ public final class RealFixRuntimeBridge {
             log.warn("[PDD-PREVIEW-SAVE] phase=STOP status=FAILED reason={} mutation=OFF",
                     error.getClass().getSimpleName(),error);
         }
+    }
+
+    private String calibrationIdentity() {
+        // Name-based UUID is a stable, bounded checkpoint namespace, not a security checksum.
+        var material=MaterialRegistry.snapshot();
+        String policy=GameImpactCredit.POLICY_REVISION+"|"+credit.settings()+"|"+
+                DamageModel.ALGORITHM_REVISION+"|"+damageSettings+"|"+
+                material.algorithmRevision()+"|"+material.definitions().hashCode()+"|"+
+                material.stateSpecific().hashCode();
+        return UUID.nameUUIDFromBytes(policy.getBytes(StandardCharsets.UTF_8)).toString();
+    }
+    private Path previewPath(MinecraftServer server) {
+        return PreviewCheckpoint.file(server.getWorldPath(net.minecraft.world.level.storage.LevelResource.ROOT),
+                previewPolicyId);
     }
 
     /** Called only from ServerTickEvent.Post. Never mutate any world or native buffer. */
@@ -488,7 +523,7 @@ public final class RealFixRuntimeBridge {
                         try {
                             var materials=MaterialRegistry.snapshot();
                             var previewResult=preview.record(grant,materials.generation(),now,
-                                    materials::resolveFingerprint,DamageModel.Settings.defaults(),
+                                    materials::resolveFingerprint,damageSettings,
                                     key->java.util.Optional.ofNullable(witness.owners().get(
                                             key.ownerSpace()+":"+key.ownerId())));
                             if(previewResult.status()!=PreviewDamageLedger.ResultStatus.ACCEPTED) {
@@ -630,7 +665,7 @@ public final class RealFixRuntimeBridge {
             // had a contact. Expiring on lastSeen (-1) discards its verified
             // clearance/AABB evidence while GameImpactCredit stays ARMED.
             tracked.entrySet().removeIf(e->trackedIdleExpired(now,e.getValue().lastProcessed));
-            log.info("[PDD-0.4.0moreFix] phase=SUMMARY observed={} credited={} zero={} ownerMissing={} targetMissing={} ambiguous={} trackedPairs={} r2Verified={} r2Rejected={} r3Verified={} prearmed={} r1Fallback={} regionGroups={} regionCount={} regionTooBroad={} ledgerRejected={} activeCredits={} observerErrors={} nativeDropped={} nativeMalformed={} nativeCapSaturatedPolls={} r2Audits={} r2SkippedDuplicate={} r2ActualShapeChecks={} callbackDropped={} preHistoryDropped={} generation=IDS-1.0.6 mutation=OFF",
+            log.info("[PDD-0.4.0scaleFix2] phase=SUMMARY observed={} credited={} zero={} ownerMissing={} targetMissing={} ambiguous={} trackedPairs={} r2Verified={} r2Rejected={} r3Verified={} prearmed={} r1Fallback={} regionGroups={} regionCount={} regionTooBroad={} ledgerRejected={} activeCredits={} observerErrors={} nativeDropped={} nativeMalformed={} nativeCapSaturatedPolls={} r2Audits={} r2SkippedDuplicate={} r2ActualShapeChecks={} callbackDropped={} preHistoryDropped={} generation=IDS-1.0.6 mutation=OFF",
                     observed,credited,zero,missingOwner,missingTarget,ambiguousOwners,tracked.size(),
                     r2Verified,r2Rejected,r3Verified,prearmed,r1Fallback,
                     multiGroupCredits,multiRegions,multiTooBroad,ledgerRejected,regionLedger.size(),

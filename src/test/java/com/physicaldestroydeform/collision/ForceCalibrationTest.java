@@ -40,7 +40,7 @@ final class ForceCalibrationTest {
                 51475.45,30462.21,32265.78}) {
             stats.record(peak,settings);
             assertTrue(settings.candidate(peak)>0);
-            assertTrue(settings.candidate(peak)<64);
+            assertTrue(settings.candidate(peak)<settings.maxGroupQ());
         }
         assertEquals(6,stats.snapshot().approved());
         assertEquals(0,stats.snapshot().saturated());

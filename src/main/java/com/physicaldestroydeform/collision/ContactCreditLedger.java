@@ -16,7 +16,7 @@ import java.util.Set;
  * but its Q is issued once, then split among bounded verified targets per side.
  */
 public final class ContactCreditLedger {
-    public static final String ALGORITHM_REVISION = "PDD-IDS-1.0.6/0.4.0";
+    public static final String ALGORITHM_REVISION = "PDD-IDS-1.0.6/0.4.0scaleFix2";
     // Never allocate one side to more than 32 independently verified owner-local targets.
     public static final int MAX_TARGETS_PER_SIDE = 32;
     public static final int MAX_REGIONS = 2 * MAX_TARGETS_PER_SIDE;
@@ -98,15 +98,22 @@ public final class ContactCreditLedger {
         if (evidence.isEmpty() || evidence.size()>MAX_REGIONS)
             return empty(id,source,Status.INVALID_TARGET_SET,decision.tick(),evidence.size());
         Set<GameImpactCredit.Target> a=new HashSet<>(), b=new HashSet<>();
+        Map<String,String> aCells=new HashMap<>(), bCells=new HashMap<>();
         for(Region region:evidence) {
             if (region==null) return empty(id,source,Status.INVALID_TARGET_SET,decision.tick(),evidence.size());
             if(region.a()!=null) {
                 if(!region.a().ownerKey().equals(pair.a().stableKey()))
                     return empty(id,source,Status.INVALID_TARGET_SET,decision.tick(),evidence.size());
+                String earlier=aCells.putIfAbsent(region.a().localBlock(),region.a().fingerprint());
+                if(earlier!=null && !earlier.equals(region.a().fingerprint()))
+                    return empty(id,source,Status.INVALID_TARGET_SET,decision.tick(),evidence.size());
                 a.add(region.a());
             }
             if(region.b()!=null) {
                 if(!region.b().ownerKey().equals(pair.b().stableKey()))
+                    return empty(id,source,Status.INVALID_TARGET_SET,decision.tick(),evidence.size());
+                String earlier=bCells.putIfAbsent(region.b().localBlock(),region.b().fingerprint());
+                if(earlier!=null && !earlier.equals(region.b().fingerprint()))
                     return empty(id,source,Status.INVALID_TARGET_SET,decision.tick(),evidence.size());
                 b.add(region.b());
             }

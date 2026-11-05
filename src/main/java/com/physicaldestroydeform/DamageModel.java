@@ -4,7 +4,7 @@ import java.util.Objects;
 
 /** IDS 1.0.6 §24.1 game-Q planning only. No block mutation or committed damage. */
 public final class DamageModel {
-    public static final String ALGORITHM_REVISION = "PDD-IDS-1.0.6/0.4.0";
+    public static final String ALGORITHM_REVISION = "PDD-IDS-1.0.6/0.4.0scaleFix2";
     public static final double DIRECT_SHARE = 0.60;
     public static final double PLASTIC_SHARE = 0.15;
     public static final double STRESS_SHARE = 0.25;
@@ -23,6 +23,18 @@ public final class DamageModel {
                 throw new IllegalArgumentException("invalid PDD material damage policy");
         }
         public static Settings defaults() {return new Settings(0.08,1.5,0.15,1.5,2.6,1);}
+        /** Read once at bridge construction. Invalid operator input preserves the calibration default. */
+        public static Settings fromSystemProperties() {
+            Settings d=defaults();
+            String text=System.getProperty("pdd.material.damageGain");
+            if(text==null)return d;
+            try {
+                double value=Double.parseDouble(text);
+                return Double.isFinite(value)&&value>0
+                        ?new Settings(d.minHardnessFactor(),d.hardnessExponent(),
+                                d.minElasticFactor(),d.elasticExponent(),value,d.deformationGain()) : d;
+            }catch(NumberFormatException malformed){return d;}
+        }
     }
     public enum Status { PLANNED_NOT_APPLIED, UNBREAKABLE_UNUSED, ZERO_Q }
     public record Plan(Status status, double incomingQ, double absorbedQ, double activeQ,

@@ -44,12 +44,13 @@ final class GameImpactCreditTest {
     }
     @Test void defaultPolicyIsBoundedAndSeparatesMeasuredImpactStrengths() {
         var d=Settings.provisional();
-        assertEquals(0.001,d.forceGain(),1e-12);
+        assertEquals(0.161,d.forceGain(),1e-12);
+        assertEquals(65536,d.maxGroupQ(),0);
         assertEquals(0.0,d.candidate(1.8));
-        assertEquals(3.84728271484375,d.candidate(3849.28271484375),1e-9);
-        assertEquals(30.17988671875,d.candidate(30181.88671875),1e-9);
-        assertEquals(52.41902,d.candidate(52421.02),1e-9);
-        assertEquals(64.0,d.candidate(100000));
+        assertEquals(0.161*(3849.28271484375-2),d.candidate(3849.28271484375),1e-9);
+        assertEquals(0.161*(30181.88671875-2),d.candidate(30181.88671875),1e-9);
+        assertEquals(0.161*(52421.02-2),d.candidate(52421.02),1e-9);
+        assertEquals(0.161*(100000-2),d.candidate(100000),1e-9);
         assertTrue(d.candidate(3849.28271484375)<d.candidate(30181.88671875));
     }
     @Test void duplicateForcePointsProduceOneGroupPeak() {

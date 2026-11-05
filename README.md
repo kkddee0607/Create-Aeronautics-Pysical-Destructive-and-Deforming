@@ -1,6 +1,19 @@
-# PDD 0.4.0moreFix — Physical Destruction and Deforming
+# PDD 0.4.0scaleFix2 — Physical Destruction and Deforming
 
-## Release 0.4.0moreFix (IDS 1.0.6)
+## Release 0.4.0scaleFix2 (PDD IDS 1.0.6, experimental calibration)
+
+Based on GitHub main `a7b3c1b3854bb6a2d6e7bad1a6d0b5d600b26094` (latest verified at packaging). Source tree matches the main `src` / `docs` / `scripts` Git trees. **World/Plot mutation remains OFF.** This release does not make real blocks break.
+
+- Retains `Q = min(maxGroupQ, forceGain * max(0, F - forceFloor))`, 0.161 force gain, 65,536 group cap, and 2.6 default damage gain. This is **not measured Sable force**.
+- Rejects conflicting block fingerprints for a single owner-local cell in an impact Credit; duplicates with identical fingerprints remain one target.
+- Snapshot `-Dpdd.material.damageGain=<positive finite number>` once per bridge instance, invalid property falls back to 2.6; original `-Dpdd.realfix.forceGain`, `-Dpdd.realfix.maxGroupQ` knobs remain. Force gain is limited to [0, 1] by IDS P-16.
+- Isolates non-authoritative preview checkpoints by release and a stable policy/material-cache identity (file name begins `pdd-0.4.0scaleFix2-preview-only-`), leaving old checkpoints untouched. A datapack/policy change during the session skips the old-policy checkpoint save. Current calibration is reported under `[PDD-POLICY]`.
+- Corrects stale JUnit expectations from preceding calibration changes. The earlier moreFix implementation and reports remain as historical evidence.
+- Does not alter the Sable callback, collision episode/owner proofs, per-side 32 target cap, runtime R2 256 shape-read bound, or Apply/Actions contracts.
+
+Details: `docs/verification/0.4.0scaleFix2.md`.
+
+## Historical release 0.4.0moreFix (IDS 1.0.6)
 
 This is the **read-only R2 audit improvement** based on the verified 0.4.0Fix ZIP; the newest GitHub main SHA could not be verified from this environment. The 0.4.0Fix basis was on the actual GitHub `main` SHA `34739bb665d7c0ce5da2d2b0e6f9aae0abae1bb5` (2026-11-03T14:45:13Z). It preserves the full 0.4.0 codebase and unchanged Sable collision/FSM/Q behavior. See [0.4.0Fix verification, source, and two-session in-game protocol](docs/verification/0.4.0Fix.md).
 

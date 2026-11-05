@@ -151,4 +151,33 @@ final class ContactCreditLedgerTest {
         assertEquals(ContactCreditLedger.Status.DUPLICATE_CAUSE,
                 ledger.issue(PAIR,decision,ContactCreditLedger.Source.SOLVER_VERIFIED,region).status());
     }
+
+    @Test void sameOwnerLocalCellWithDifferentFingerprintsMustNotDoubleSpendQ() {
+        var ledger=new ContactCreditLedger();
+        var decision=approved(3,PAIR,a(0),b(0));
+        var altered=new Target(PAIR.a().stableKey(),a(0).localBlock(),"minecraft:dirt");
+        var rejected=ledger.issue(PAIR,decision,ContactCreditLedger.Source.SABLE_POST_EFFECT,
+                List.of(new ContactCreditLedger.Region(a(0),b(0)),
+                        new ContactCreditLedger.Region(altered,b(0))));
+        assertEquals(ContactCreditLedger.Status.INVALID_TARGET_SET,rejected.status());
+        assertEquals(0,ledger.size());
+        assertEquals(0,rejected.issuedQ());
+        var clean=ledger.issue(PAIR,decision,ContactCreditLedger.Source.SABLE_POST_EFFECT,
+                List.of(new ContactCreditLedger.Region(a(0),b(0)),
+                        new ContactCreditLedger.Region(a(0),b(0))));
+        assertTrue(clean.credited());
+        assertEquals(1,clean.a().size());
+        assertEquals(1,clean.b().size());
+        assertEquals(clean.issuedQ(),clean.accounted(),1e-9);
+    }
+    @Test void conflictingBCellFingerprintAlsoVetoesEntireIssue() {
+        var ledger=new ContactCreditLedger();
+        var decision=approved(3,PAIR,a(0),b(0));
+        var changed=new Target(PAIR.b().stableKey(),b(0).localBlock(),"minecraft:dirt");
+        var rejected=ledger.issue(PAIR,decision,ContactCreditLedger.Source.SABLE_POST_EFFECT,
+                List.of(new ContactCreditLedger.Region(a(0),b(0)),
+                        new ContactCreditLedger.Region(a(0),changed)));
+        assertEquals(ContactCreditLedger.Status.INVALID_TARGET_SET,rejected.status());
+        assertEquals(0,ledger.size());
+    }
 }

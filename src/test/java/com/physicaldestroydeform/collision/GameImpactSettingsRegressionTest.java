@@ -4,7 +4,7 @@ import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
 
 class GameImpactSettingsRegressionTest {
-    @Test void duperFixDeveloperGainIsBoundedAndOperatorOverridable() {
+    @Test void scaleFixDeveloperGainIsBoundedAndOperatorOverridable() {
         String prior=System.getProperty("pdd.realfix.forceGain");
         try {
             System.clearProperty("pdd.realfix.forceGain");
@@ -13,6 +13,10 @@ class GameImpactSettingsRegressionTest {
             assertEquals(0.25,GameImpactCredit.Settings.fromSystemProperties().forceGain(),1e-12);
             System.setProperty("pdd.realfix.forceGain","NaN");
             assertEquals(0.161,GameImpactCredit.Settings.fromSystemProperties().forceGain(),1e-12);
+            System.setProperty("pdd.realfix.forceGain","2.0");
+            assertEquals(0.161,GameImpactCredit.Settings.fromSystemProperties().forceGain(),1e-12);
+            assertThrows(IllegalArgumentException.class,
+                    ()->new GameImpactCredit.Settings(2,2,2,65536,2,4096,600));
         } finally {
             if(prior==null)System.clearProperty("pdd.realfix.forceGain");
             else System.setProperty("pdd.realfix.forceGain",prior);

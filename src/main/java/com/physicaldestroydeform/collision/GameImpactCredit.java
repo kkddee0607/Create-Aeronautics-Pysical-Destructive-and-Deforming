@@ -15,7 +15,7 @@ import java.util.Objects;
  * No Minecraft/Sable mutable object crosses this boundary.</p>
  */
 public final class GameImpactCredit {
-    public static final String POLICY_REVISION = "PDD-IDS-1.0.6/0.4.0";
+    public static final String POLICY_REVISION = "PDD-IDS-1.0.6/0.4.0scaleFix2";
 
     public record Settings(double forceEnter, double forceFloor, double forceGain,
                            double maxGroupQ, int separatedFrames, int maxEntries,
@@ -29,7 +29,7 @@ public final class GameImpactCredit {
         public Settings {
             if (!Double.isFinite(forceEnter) || forceEnter < 0 ||
                 !Double.isFinite(forceFloor) || forceFloor < 0 ||
-                !Double.isFinite(forceGain) || forceGain < 0 ||
+                !Double.isFinite(forceGain) || forceGain < 0 || forceGain > 1 ||
                 !Double.isFinite(maxGroupQ) || maxGroupQ < 0 ||
                 separatedFrames < 2 || maxEntries < 1 || maxIdleTicks < 1 ||
                 !Double.isFinite(risingRatio) || risingRatio < 1 || quietFrames < 2)
@@ -45,7 +45,7 @@ public final class GameImpactCredit {
             Settings d=provisional();
             return new Settings(
                 numeric("forceEnter",d.forceEnter()),numeric("forceFloor",d.forceFloor()),
-                numeric("forceGain",d.forceGain()),numeric("maxGroupQ",d.maxGroupQ()),
+                boundedGain("forceGain",d.forceGain()),numeric("maxGroupQ",d.maxGroupQ()),
                 Math.max(2,whole("separatedFrames",d.separatedFrames())),
                 whole("maxEntries",d.maxEntries()),
                 positiveTicks("maxIdleTicks",d.maxIdleTicks()),
@@ -59,6 +59,10 @@ public final class GameImpactCredit {
                 if(!Double.isFinite(value)||value<0) return fallback;
                 return value;
             } catch(NumberFormatException malformed) {return fallback;}
+        }
+        private static double boundedGain(String name,double fallback) {
+            double value=numeric(name,fallback);
+            return value<=1?value:fallback;
         }
         private static int whole(String name,int fallback) {
             double value=numeric(name,fallback);
