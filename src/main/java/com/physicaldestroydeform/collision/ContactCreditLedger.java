@@ -17,7 +17,7 @@ import java.util.Set;
  * F through owner-verified connected cells before deriving target Q.
  */
 public final class ContactCreditLedger {
-    public static final String ALGORITHM_REVISION = "PDD-IDS-1.0.6/0.4.0colFix3";
+    public static final String ALGORITHM_REVISION = "PDD-IDS-1.0.6/0.4.0superFix";
     // Native contact SEEDS (not propagated neighbors) remain capped at 32/side.
     public static final int MAX_TARGETS_PER_SIDE = 32;
     public static final int MAX_REGIONS = 2 * MAX_TARGETS_PER_SIDE;
@@ -172,9 +172,24 @@ public final class ContactCreditLedger {
                                  GameImpactCredit.Settings forces,
                                  com.physicaldestroydeform.DamageModel.Settings damage,
                                  Map<String,ForcePropagation.Orientation> directions) {
+        return issuePropagated(pair,decision,source,evidence,neighbors,materials,forces,damage,
+                directions,null);
+    }
+    /** Trace is delivered only after a credit is successfully sealed; the
+     * in-memory ledger never owns the potentially large edge records. */
+    public Grant issuePropagated(GameImpactCredit.Pair pair,GameImpactCredit.Decision decision,
+                                 Source source,List<Region> evidence,
+                                 ForcePropagation.NeighborReader neighbors,
+                                 java.util.function.Function<String,com.physicaldestroydeform.MaterialProperties> materials,
+                                 GameImpactCredit.Settings forces,
+                                 com.physicaldestroydeform.DamageModel.Settings damage,
+                                 Map<String,ForcePropagation.Orientation> directions,
+                                 java.util.function.Consumer<ForcePropagation.Trace> trace) {
         // Preserve every existing owner/region/episode validation and one-credit rule.
         Grant base=issue(pair,decision,source,evidence);
         if(!base.credited())return base;
+        List<ForcePropagation.Trace> traces=trace==null?null:new ArrayList<>();
+        Grant issued;
         try {
             List<GameImpactCredit.Target> seedsA=base.a().stream().map(Share::target).toList();
             List<GameImpactCredit.Target> seedsB=base.b().stream().map(Share::target).toList();
@@ -182,11 +197,13 @@ public final class ContactCreditLedger {
             var pa=directions==null
                     ?ForcePropagation.plan(pair.a().stableKey(),seedsA,sideF,neighbors,materials,forces,damage)
                     :ForcePropagation.plan(pair.a().stableKey(),seedsA,sideF,neighbors,materials,forces,damage,
-                            directions.getOrDefault(pair.a().stableKey(),ForcePropagation.Orientation.unknown()));
+                            directions.getOrDefault(pair.a().stableKey(),ForcePropagation.Orientation.unknown()),
+                            traces==null?null:traces::add);
             var pb=directions==null
                     ?ForcePropagation.plan(pair.b().stableKey(),seedsB,sideF,neighbors,materials,forces,damage)
                     :ForcePropagation.plan(pair.b().stableKey(),seedsB,sideF,neighbors,materials,forces,damage,
-                            directions.getOrDefault(pair.b().stableKey(),ForcePropagation.Orientation.unknown()));
+                            directions.getOrDefault(pair.b().stableKey(),ForcePropagation.Orientation.unknown()),
+                            traces==null?null:traces::add);
             var a=seal(pa,decision.allocation().sideA());
             var b=seal(pb,decision.allocation().sideB());
             double sum=a.stream().mapToDouble(Share::q).sum()+b.stream().mapToDouble(Share::q).sum();
@@ -197,12 +214,17 @@ public final class ContactCreditLedger {
             Grant grant=new Grant(base.id(),source,Status.ISSUED,base.tick(),decision.issuedQ(),
                     a,b,Math.max(0,unused),base.observedRegions(),ALGORITHM_REVISION,pa,pb);
             recorded.put(grant.id(),new Stored(source,base.tick(),grant));
-            return grant;
+            issued=grant;
         }catch(RuntimeException unsafe) {
             // Nothing is committed to the preview or source on a failed plan.
             recorded.remove(base.id());
             return empty(base.id(),source,Status.INVALID_TARGET_SET,base.tick(),evidence.size());
         }
+        // A diagnostic consumer must never revoke the already accepted credit.
+        if(traces!=null)for(var event:traces) {
+            try {trace.accept(event);}catch(RuntimeException ignored) {break;}
+        }
+        return issued;
     }
     private static List<Share> seal(ForcePropagation.Result plan,double sideQcap) {
         double factor=plan.finalQ()>sideQcap && plan.finalQ()>0?

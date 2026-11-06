@@ -43,6 +43,13 @@ public final class ForcePropagation {
     }
     public record Share(GameImpactCredit.Target target, double allocatedF,
                         double rawQ, double finalQ, int layer, int elasticityPercent) {}
+    /** Ephemeral proof of an actual forwarded payment. Never store this in a persistent credit. */
+    public sealed interface Trace permits Edge, Receipt {}
+    public record Edge(GameImpactCredit.Target parent, GameImpactCredit.Target child,
+                       int layer, double parentReceivedF, double parentLocalF,
+                       double parentOutgoingF, double directionWeight, double sentF) implements Trace {}
+    public record Receipt(GameImpactCredit.Target child, int layer, int parentCount,
+                          double totalReceivedF, boolean processedOnce) implements Trace {}
     public record Result(List<Share> shares, double inputF, double assignedF,
                          double dampedF, double unresolvedF, double candidateQ,
                          double finalQ, double dampedQ, String endReason) {
@@ -215,6 +222,15 @@ public final class ForcePropagation {
                               NeighborReader neighbors,Function<String,MaterialProperties> materials,
                               GameImpactCredit.Settings forces,DamageModel.Settings damage,
                               Orientation direction) {
+        return plan(ownerKey,seeds,inputF,neighbors,materials,forces,damage,direction,null);
+    }
+
+    /** Optional trace is a per-approved-event, non-authoritative diagnostic sink.
+     * It cannot alter the collision decision, ledger or Q computation. */
+    public static Result plan(String ownerKey,List<GameImpactCredit.Target> seeds,double inputF,
+                              NeighborReader neighbors,Function<String,MaterialProperties> materials,
+                              GameImpactCredit.Settings forces,DamageModel.Settings damage,
+                              Orientation direction,java.util.function.Consumer<Trace> trace) {
         Objects.requireNonNull(direction);
         Objects.requireNonNull(ownerKey);Objects.requireNonNull(seeds);
         Objects.requireNonNull(neighbors);Objects.requireNonNull(materials);
@@ -339,12 +355,25 @@ public final class ForcePropagation {
                     belowFloor=true;
                     continue;
                 }
-                for(var child:children) {
-                    double part=forward/children.size();
+                // Geometry filters eligible face-connected children first. A
+                // verified oblique normal biases their shares by projection;
+                // quantize only the WEIGHTS (0.1), never the native normal.
+                // UNKNOWN retains the existing equal F split unchanged.
+                double[] weights=directionWeights(direction,children,node);
+                double sent=0;
+                for(int i=0;i<children.size();i++) {
+                    var child=children.get(i);
+                    double part=i==children.size()-1?forward-sent:forward*weights[i];
+                    sent+=part;
                     child.incoming+=part;
                     child.parents.merge(node,part,Double::sum);
+                    if(trace!=null)trace.accept(new Edge(node.target,child.target,depth,
+                            node.incoming,node.localF,forward,weights[i],part));
                 }
             }
+            if(trace!=null)for(var child:next)if(!child.parents.isEmpty())
+                trace.accept(new Receipt(child.target,child.depth,child.parents.size(),
+                        child.incoming,true));
             // Applying a child's elasticity to each actual predecessor keeps
             // unrelated branches independent; a join contributes one Q only.
             var sums=new java.util.HashMap<Flow,Double>();
@@ -379,6 +408,49 @@ public final class ForcePropagation {
         return new Result(shares,inputF,assigned,dampedF,Math.max(0,residual),candidate,
                 finalQ,Math.max(0,candidate-finalQ),end);
     }
+    /** A deterministic tenths partition. Every graph-valid child gets at least
+     * 0.1; remaining tenths follow positive axial projection with a small
+     * tangential fallback. Largest remainders settle ties in DIRECTIONS order.
+     * A vector (0.8,0,0.6) therefore yields 0.6/0.4 for +X/+Z, not
+     * an arbitrary 0.8/0.2. No force is lost by quantization. */
+    private static double[] directionWeights(Orientation direction,List<Flow> children,Flow parent) {
+        int size=children.size();
+        double[] weights=new double[size];
+        if(!direction.verified()) {
+            java.util.Arrays.fill(weights,1.0/size);
+            return weights;
+        }
+        if(size>10)throw new IllegalStateException("more than 10 face neighbors");
+        double[] score=new double[size],fractions=new double[size];
+        int[] tenths=new int[size];
+        FrameMath.Vec n=direction.inward();
+        double total=0;
+        for(int i=0;i<size;i++) {
+            var child=children.get(i);
+            double projection=(child.x-parent.x)*n.x()+(child.y-parent.y)*n.y()
+                    +(child.z-parent.z)*n.z();
+            score[i]=Math.max(0.01,projection);
+            total+=score[i];
+        }
+        int slots=10-size;
+        int remaining=slots;
+        for(int i=0;i<size;i++) {
+            double scaled=slots*score[i]/total;
+            int floor=(int)Math.floor(scaled);
+            tenths[i]=1+floor;
+            fractions[i]=scaled-floor;
+            remaining-=floor;
+        }
+        while(remaining-->0) {
+            int best=0;
+            for(int i=1;i<size;i++)if(fractions[i]>fractions[best]+1e-12)best=i;
+            tenths[best]++;
+            fractions[best]=-1;
+        }
+        for(int i=0;i<size;i++)weights[i]=tenths[i]/10.0;
+        return weights;
+    }
+
     /** No backward edge, including at an oblique normal. Perpendicular moves
      * are allowed only where the global cone includes the destination. */
     private static boolean forwardStep(Orientation direction,int[] step) {

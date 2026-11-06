@@ -1,4 +1,19 @@
-# PDD 0.4.0colFix3 — Physical Destruction and Deforming
+# PDD 0.4.0superFix — Physical Destruction and Deforming
+
+## Release 0.4.0superFix — 0.1-quantized oblique F sharing and receipt diagnostics
+
+- Verified owner-local Sable inward normal stays full precision and is **never** rounded. Six-face graph adjacency, existing 30-degree expanding envelope and strict no-backward BFS are preserved.
+- Only eligible children share each parent's already approved, elastically attenuated outgoing F. Verified normal projections are quantized to **0.1 weight increments**, with an equal-or-greater 0.1 share per reachable child and deterministic largest-remainder assignment. The sum of child weights is exactly 1.0. UNKNOWN direction continues using the legacy unquantized equal split.
+- New per-credit `[PDD-F-EDGE]` records parent/child/owner/layer, input/local/outgoing F, directional fraction and actual sent F; `[PDD-F-MERGE]` records the unique child's parent count and summed F, and `[PDD-F-TRACE]` reports truncated diagnostic lines. Only accepted ledger credits emit these traces; no trace data is retained in the credit ledger.
+- Per-tick trace limit 128 lines; per-credited-event limit 96 lines. Use JVM `-Dpdd.f.trace.enabled=false` to disable. Truncation counts are reported for every credited event while enabled.
+- Keeps Sable callbacks, F/Q global envelopes, Elasticity/H/T/D material coefficients, Plot/World frame validation, owner IDs, preview-only world mutation OFF and all previous JUnit tests unchanged.
+- **Explicitly excluded:** reinforced-deepslate material/threshold edits, actual block destruction/deformation, new Sable API dependencies, per-layer moving Plot world-pose resampling. Checkpoint name changed to avoid treating old policy's preview estimates as directly comparable.
+
+**Verification and in-game log protocol:** `docs/verification/0.4.0superFix.md`.
+
+---
+
+## Historical release — PDD 0.4.0colFix3
 
 ## Release 0.4.0colFix3 — multi-contact normal-directed F propagation (design priority: confirmed conversation contract)
 

@@ -47,6 +47,11 @@ import static com.physicaldestroydeform.collision.RealFixBoundsEvidence.*;
 public final class RealFixRuntimeBridge {
     private static final int MAX_TRACKED=4096;
     private static final int MAX_LOG_PER_TICK=64;
+    // Diagnostic-only trace, capped independently from collision evidence logs.
+    private static final boolean F_TRACE_ENABLED=Boolean.parseBoolean(
+            System.getProperty("pdd.f.trace.enabled","true"));
+    private static final int MAX_F_TRACE_PER_TICK=128;
+    private static final int MAX_F_TRACE_PER_CREDIT=96;
     // Verification-build-only instrumentation; never changes credit, owner or Q logic.
     private static final boolean VERF_ENABLED=Boolean.parseBoolean(
             System.getProperty("pdd.verf.enabled","true"));
@@ -219,7 +224,7 @@ public final class RealFixRuntimeBridge {
         var material=MaterialRegistry.snapshot();
         String policy=GameImpactCredit.POLICY_REVISION+"|"+credit.settings()+"|"+
                 DamageModel.ALGORITHM_REVISION+"|"+damageSettings+"|"+
-                ContactCreditLedger.ALGORITHM_REVISION+"|F-FIRST-0.4.0colFix3|"+
+                ContactCreditLedger.ALGORITHM_REVISION+"|F-FIRST-0.4.0superFix|"+
                 material.algorithmRevision()+"|"+material.definitions().hashCode()+"|"+
                 material.stateSpecific().hashCode();
         return UUID.nameUUIDFromBytes(policy.getBytes(StandardCharsets.UTF_8)).toString();
@@ -260,6 +265,7 @@ public final class RealFixRuntimeBridge {
         // accepted only when every matching snapshot maps to the same stable pair.
         int lines=0;
         int materialLines=0;
+        final int[] fTraceLines={0};
         // Clearance is safety-critical. R4 is diagnostic-only: separate
         // bounded budgets prevent R4 from starving positive separation proof.
         int[] remainingClearanceChecks={RealFixBoundaryCandidates.MAX_PER_TICK};
@@ -497,13 +503,49 @@ public final class RealFixRuntimeBridge {
                             || massSafe.maskedFrames()>0)
                             ?NativeEffectDirection.unknown("NATIVE_FRAME_OR_EFFECT_UNVERIFIED")
                             :NativeEffectDirection.verify(pair,massSafe.contacts(),pre);
+                    // Trace only accepted credits. The ledger buffers edge receipts
+                    // transiently, emits after validation and never persists them.
+                    final int[] traceCounts={0,0,0}; // edges, receipts, emitted
+                    java.util.function.Consumer<ForcePropagation.Trace> fTrace=F_TRACE_ENABLED
+                            ?traceEvent->{
+                                if(traceEvent instanceof ForcePropagation.Edge)traceCounts[0]++;
+                                else traceCounts[1]++;
+                                if(fTraceLines[0]>=MAX_F_TRACE_PER_TICK
+                                        ||traceCounts[2]>=MAX_F_TRACE_PER_CREDIT)return;
+                                fTraceLines[0]++;traceCounts[2]++;
+                                if(traceEvent instanceof ForcePropagation.Edge edge) {
+                                    log.info("[PDD-F-EDGE] credit={}/{} generation={} owner={} " +
+                                            "layer={} parent={} child={} parentReceivedF={} parentLocalF={} " +
+                                            "parentOutgoingF={} directionWeight={} sentF={} " +
+                                            "normalFrame=OWNER_LOCAL normal={} normalEvidence={} mutation=OFF",
+                                            pair.a().stableKey(),pair.b().stableKey(),result.episodeGeneration(),
+                                            edge.parent().ownerKey(),edge.layer(),edge.parent().localBlock(),
+                                            edge.child().localBlock(),edge.parentReceivedF(),edge.parentLocalF(),
+                                            edge.parentOutgoingF(),edge.directionWeight(),edge.sentF(),
+                                            nativeNormal.forOwner(edge.parent().ownerKey()).inward(),
+                                            nativeNormal.forOwner(edge.parent().ownerKey()).evidence());
+                                } else if(traceEvent instanceof ForcePropagation.Receipt receipt) {
+                                    log.info("[PDD-F-MERGE] credit={}/{} generation={} owner={} " +
+                                            "layer={} child={} parentCount={} totalReceivedF={} " +
+                                            "processedOnce={} mutation=OFF",
+                                            pair.a().stableKey(),pair.b().stableKey(),result.episodeGeneration(),
+                                            receipt.child().ownerKey(),receipt.layer(),receipt.child().localBlock(),
+                                            receipt.parentCount(),receipt.totalReceivedF(),receipt.processedOnce());
+                                }
+                            }:null;
                     ContactCreditLedger.Grant grant=result.credited()?regionLedger.issuePropagated(
                             pair,result,ContactCreditLedger.Source.SABLE_POST_EFFECT,regions.regions(),
                             OwnerResolver.propagationSnapshot(server,stamp.dimension),
                             materialSnapshot::resolveFingerprint,credit.settings(),damageSettings,
-                            nativeNormal.owners()):null;
+                            nativeNormal.owners(),fTrace):null;
                     boolean granted=grant!=null && grant.credited();
                     if(granted) {
+                        if(F_TRACE_ENABLED)log.info("[PDD-F-TRACE] credit={} edges={} receipts={} " +
+                                        "emitted={} suppressed={} maxPerTick={} maxPerCredit={} " +
+                                        "quantization=0.1 directionUnknownEqualSplit=true mutation=OFF",
+                                grant.id(),traceCounts[0],traceCounts[1],traceCounts[2],
+                                traceCounts[0]+traceCounts[1]-traceCounts[2],
+                                MAX_F_TRACE_PER_TICK,MAX_F_TRACE_PER_CREDIT);
                         if(VERF_ENABLED)log.info("[PDD-NATIVE-NORMAL] credit={} status={} " +
                                         "reason={} records={} ownerVectors={} effectPhase=true " +
                                         "exactSolverContact=false deformationAuthorized=false mutation=OFF",
@@ -713,7 +755,7 @@ public final class RealFixRuntimeBridge {
             // had a contact. Expiring on lastSeen (-1) discards its verified
             // clearance/AABB evidence while GameImpactCredit stays ARMED.
             tracked.entrySet().removeIf(e->trackedIdleExpired(now,e.getValue().lastProcessed));
-            log.info("[PDD-0.4.0colFix3] phase=SUMMARY observed={} credited={} zero={} ownerMissing={} targetMissing={} ambiguous={} trackedPairs={} r2Verified={} r2Rejected={} r3Verified={} prearmed={} r1Fallback={} regionGroups={} regionCount={} regionTooBroad={} ledgerRejected={} activeCredits={} observerErrors={} nativeDropped={} nativeMalformed={} nativeCapSaturatedPolls={} r2Audits={} r2SkippedDuplicate={} r2ActualShapeChecks={} callbackDropped={} preHistoryDropped={} generation=IDS-1.0.6 mutation=OFF",
+            log.info("[PDD-0.4.0superFix] phase=SUMMARY observed={} credited={} zero={} ownerMissing={} targetMissing={} ambiguous={} trackedPairs={} r2Verified={} r2Rejected={} r3Verified={} prearmed={} r1Fallback={} regionGroups={} regionCount={} regionTooBroad={} ledgerRejected={} activeCredits={} observerErrors={} nativeDropped={} nativeMalformed={} nativeCapSaturatedPolls={} r2Audits={} r2SkippedDuplicate={} r2ActualShapeChecks={} callbackDropped={} preHistoryDropped={} generation=IDS-1.0.6 mutation=OFF",
                     observed,credited,zero,missingOwner,missingTarget,ambiguousOwners,tracked.size(),
                     r2Verified,r2Rejected,r3Verified,prearmed,r1Fallback,
                     multiGroupCredits,multiRegions,multiTooBroad,ledgerRejected,regionLedger.size(),

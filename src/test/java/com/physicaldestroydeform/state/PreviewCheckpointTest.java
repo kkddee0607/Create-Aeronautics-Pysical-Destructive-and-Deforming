@@ -11,7 +11,7 @@ class PreviewCheckpointTest {
         var dir=Files.createTempDirectory("pdd-preview-check-");
         try {
             var file=PreviewCheckpoint.file(dir);
-            assertEquals("pdd-0.4.0colFix3-preview-only.bin",file.getFileName().toString());
+            assertEquals("pdd-0.4.0superFix-preview-only.bin",file.getFileName().toString());
             var firstPolicy=PreviewCheckpoint.file(dir,"11111111-1111-1111-1111-111111111111");
             var secondPolicy=PreviewCheckpoint.file(dir,"22222222-2222-2222-2222-222222222222");
             assertNotEquals(firstPolicy,secondPolicy);
