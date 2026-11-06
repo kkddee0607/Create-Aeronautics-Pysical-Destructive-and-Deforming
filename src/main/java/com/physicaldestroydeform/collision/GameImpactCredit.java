@@ -15,7 +15,7 @@ import java.util.Objects;
  * No Minecraft/Sable mutable object crosses this boundary.</p>
  */
 public final class GameImpactCredit {
-    public static final String POLICY_REVISION = "PDD-IDS-1.0.6/0.4.0colFix2";
+    public static final String POLICY_REVISION = "PDD-IDS-1.0.6/0.4.0colFix3";
 
     public record Settings(double forceEnter, double forceFloor, double forceGain,
                            double maxGroupQ, int separatedFrames, int maxEntries,

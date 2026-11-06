@@ -1,6 +1,22 @@
-# PDD 0.4.0colFix2 — Physical Destruction and Deforming
+# PDD 0.4.0colFix3 — Physical Destruction and Deforming
 
-## Release 0.4.0colFix2 — native-direction-gated and branch-accounted F-first preview (IDS 1.0.6 + F propagation v0.2)
+## Release 0.4.0colFix3 — multi-contact normal-directed F propagation (design priority: confirmed conversation contract)
+
+- Preserves Sable's native collision handling, owner/episode authorization, F-first Q envelope, material coefficients, elastic parent-Q/child-F attenuation and `worldMutation=OFF`.
+- Direction is corroborated from Sable manifold **owner-local vectors** using the captured effect pose (inverse-transpose for non-uniform scale). All pre-solver snapshot rotations **and scales** must agree; otherwise fallback is `UNKNOWN`.
+- Normal-based forwarding now uses a 30° expanding forward field with half-block initial width in each owner-local lattice. A permitted grid edge cannot point backward along the inward normal. **No nearest-axis rounding** and no world-coordinate reprojection between BFS layers.
+- Multi-source seeds each receive an equal fraction of source F. A later cell can accumulate valid contributions from several distinct parents, yet its Q is computed only once. Earlier or same-depth cells cannot receive F again.
+- During one grant, the Plot storage center is frozen as an identity check; movement/reallocation during traversal yields an `UNKNOWN` neighbor, not an invented position. This does not change the contact-time rotation or the local cell indices.
+- Normal-free bounded fallback and prior tests remain. New regression tests cover tilted normals, four roots, joining paths, nonuniform scale, epoch mismatch and unknown boundaries.
+- Preview checkpoint names are version-namespaced (`colFix3`). Old preview files remain intact; no previous game state is replayed across changed policies.
+
+**Source review and rollout:** `docs/verification/0.4.0colFix3.md`. The 30°/0.5-cell directional envelope is a *provisional gameplay policy* rather than a measured Rapier contact cone. No exact native impulse is claimed.
+
+---
+
+## Previous release — PDD 0.4.0colFix2
+
+### Release 0.4.0colFix2 — native-direction-gated and branch-accounted F-first preview (IDS 1.0.6 + F propagation v0.2)
 
 - New **server-side F-first** impact preview: Sable observed peak F -> World/Plot 50% side budgets -> owner-local verified first-contact seeds -> six-face connected propagation; each layer keeps half the surviving F, except the PROVED terminal receives everything. Target Q is computed **after** its F is assigned. Equal-depth simultaneous contact targets share that layer's F equally (provisional branch resolution, not measured contact timing).
 - **Elasticity:** branch-local elastic descendants attenuate each actual predecessor's provisional Q, and each node attenuates its OWN outgoing F. After F-to-Q issuance, a node's own E absorbs its local Q once in `DamageModel`; this is separate from its effect on a different node. Same-episode prior persisted damage is never retroactively changed. Sable motion/solver is not modified.

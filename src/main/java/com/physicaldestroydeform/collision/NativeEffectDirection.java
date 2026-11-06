@@ -51,8 +51,15 @@ public final class NativeEffectDirection {
                 Vec worldB=world(localB,c.idB(),c.frameB());
                 if(worldA.dot(worldB)>-MIN_OPPOSING_COS)
                     return unknown("NATIVE_OPPOSING_NORMALS_DISAGREE");
-                // Negative local outward manifold normal points into the target.
-                Vec inA=localA.times(-1),inB=localB.times(-1);
+                // The source normals are collider-local, not world normals.
+                // Explicitly convert each inward WORLD direction back through
+                // its OWN effect-pose inverse transpose. Translation is never
+                // applied to a normal; non-uniform / signed scale matters.
+                Vec inA=local(worldA.times(-1),c.idA(),c.frameA());
+                Vec inB=local(worldB.times(-1),c.idB(),c.frameB());
+                if(inA.dot(localA.times(-1))<0.999999
+                        || inB.dot(localB.times(-1))<0.999999)
+                    return unknown("NATIVE_NORMAL_FRAME_ROUNDTRIP_FAILED");
                 if(!add(candidates,a,inA) || !add(candidates,b,inB))
                     return unknown("NATIVE_MANIFOLD_DIRECTION_CONFLICT");
                 inspected++;
@@ -77,17 +84,17 @@ public final class NativeEffectDirection {
         if(result.owners().isEmpty())return result;
         if(preFrames==null || preFrames.isEmpty())return unknown("MISSING_PRE_SOLVER_POSE");
         for(var c:contacts) {
-            if(c.idA()>=0 && !sameRotationAcrossSubsteps(c.idA(),c.frameA(),c.dimension(),c.serverTick(),preFrames))
-                return unknown("PLOT_NORMAL_FRAME_ROTATION_UNVERIFIED");
-            if(c.idB()>=0 && !sameRotationAcrossSubsteps(c.idB(),c.frameB(),c.dimension(),c.serverTick(),preFrames))
-                return unknown("PLOT_NORMAL_FRAME_ROTATION_UNVERIFIED");
+            if(c.idA()>=0 && !sameLinearFrameAcrossSubsteps(c.idA(),c.frameA(),c.dimension(),c.serverTick(),preFrames))
+                return unknown("PLOT_NORMAL_LINEAR_FRAME_UNVERIFIED");
+            if(c.idB()>=0 && !sameLinearFrameAcrossSubsteps(c.idB(),c.frameB(),c.dimension(),c.serverTick(),preFrames))
+                return unknown("PLOT_NORMAL_LINEAR_FRAME_UNVERIFIED");
         }
         return result;
     }
-    private static boolean sameRotationAcrossSubsteps(int id,
+    private static boolean sameLinearFrameAcrossSubsteps(int id,
                    NativeCollisionTelemetry.OwnerFrame frame,String dimension,long tick,
                    List<CollisionFrame.Snapshot> snapshots) {
-        if(frame==null)return false;
+        if(frame==null || frame.pose()==null || !frame.pose().valid())return false;
         int matching=0;
         var e=frame.pose();
         for(var s:snapshots) {
@@ -104,10 +111,18 @@ public final class NativeEffectDirection {
             double dot=e.qx()*p.qx()+e.qy()*p.qy()+e.qz()*p.qz()+e.qw()*p.qw();
             double ea=e.qx()*e.qx()+e.qy()*e.qy()+e.qz()*e.qz()+e.qw()*e.qw();
             double pa=p.qx()*p.qx()+p.qy()*p.qy()+p.qz()*p.qz()+p.qw()*p.qw();
-            if(!Double.isFinite(dot) || dot*dot/(ea*pa)<.995*.995)return false;
+            if(!Double.isFinite(dot) || !Double.isFinite(ea) || !Double.isFinite(pa)
+                    || dot*dot/(ea*pa)<.995*.995
+                    || !sameScale(e.scale().x(),p.scale().x())
+                    || !sameScale(e.scale().y(),p.scale().y())
+                    || !sameScale(e.scale().z(),p.scale().z()))return false;
             matching++;
         }
         return matching>0;
+    }
+    private static boolean sameScale(double a,double b) {
+        return Double.isFinite(a) && Double.isFinite(b)
+                && Math.abs(a-b)<=1.0e-5*Math.max(1.0,Math.max(Math.abs(a),Math.abs(b)));
     }
     /** Optional signed-grid witnesses for the existing direction preview.
      * Diagonal native vectors remain usable for F propagation but MUST NOT
@@ -141,7 +156,14 @@ public final class NativeEffectDirection {
     }
     private static Vec world(Vec local,int id,NativeCollisionTelemetry.OwnerFrame frame) {
         if(id==-1)return local; // Sable Rapier fixed ground collider is world-aligned.
-        if(frame==null)throw new IllegalArgumentException("missing Sable effect frame");
+        if(frame==null || frame.pose()==null)
+            throw new IllegalArgumentException("missing Sable effect frame");
         return frame.pose().toWorldNormal(local);
+    }
+    private static Vec local(Vec worldNormal,int id,NativeCollisionTelemetry.OwnerFrame frame) {
+        if(id==-1)return worldNormal.unit();
+        if(frame==null || frame.pose()==null)
+            throw new IllegalArgumentException("missing Sable effect frame");
+        return frame.pose().toLocalNormal(worldNormal);
     }
 }

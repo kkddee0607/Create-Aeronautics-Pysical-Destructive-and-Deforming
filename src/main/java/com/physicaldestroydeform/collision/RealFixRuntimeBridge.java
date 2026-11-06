@@ -219,7 +219,7 @@ public final class RealFixRuntimeBridge {
         var material=MaterialRegistry.snapshot();
         String policy=GameImpactCredit.POLICY_REVISION+"|"+credit.settings()+"|"+
                 DamageModel.ALGORITHM_REVISION+"|"+damageSettings+"|"+
-                ContactCreditLedger.ALGORITHM_REVISION+"|F-FIRST-0.4.0colFix2|"+
+                ContactCreditLedger.ALGORITHM_REVISION+"|F-FIRST-0.4.0colFix3|"+
                 material.algorithmRevision()+"|"+material.definitions().hashCode()+"|"+
                 material.stateSpecific().hashCode();
         return UUID.nameUUIDFromBytes(policy.getBytes(StandardCharsets.UTF_8)).toString();
@@ -499,8 +499,7 @@ public final class RealFixRuntimeBridge {
                             :NativeEffectDirection.verify(pair,massSafe.contacts(),pre);
                     ContactCreditLedger.Grant grant=result.credited()?regionLedger.issuePropagated(
                             pair,result,ContactCreditLedger.Source.SABLE_POST_EFFECT,regions.regions(),
-                            (from,x,y,z)->OwnerResolver.propagationNeighbor(
-                                    server,stamp.dimension,from,x,y,z),
+                            OwnerResolver.propagationSnapshot(server,stamp.dimension),
                             materialSnapshot::resolveFingerprint,credit.settings(),damageSettings,
                             nativeNormal.owners()):null;
                     boolean granted=grant!=null && grant.credited();
@@ -714,7 +713,7 @@ public final class RealFixRuntimeBridge {
             // had a contact. Expiring on lastSeen (-1) discards its verified
             // clearance/AABB evidence while GameImpactCredit stays ARMED.
             tracked.entrySet().removeIf(e->trackedIdleExpired(now,e.getValue().lastProcessed));
-            log.info("[PDD-0.4.0colFix2] phase=SUMMARY observed={} credited={} zero={} ownerMissing={} targetMissing={} ambiguous={} trackedPairs={} r2Verified={} r2Rejected={} r3Verified={} prearmed={} r1Fallback={} regionGroups={} regionCount={} regionTooBroad={} ledgerRejected={} activeCredits={} observerErrors={} nativeDropped={} nativeMalformed={} nativeCapSaturatedPolls={} r2Audits={} r2SkippedDuplicate={} r2ActualShapeChecks={} callbackDropped={} preHistoryDropped={} generation=IDS-1.0.6 mutation=OFF",
+            log.info("[PDD-0.4.0colFix3] phase=SUMMARY observed={} credited={} zero={} ownerMissing={} targetMissing={} ambiguous={} trackedPairs={} r2Verified={} r2Rejected={} r3Verified={} prearmed={} r1Fallback={} regionGroups={} regionCount={} regionTooBroad={} ledgerRejected={} activeCredits={} observerErrors={} nativeDropped={} nativeMalformed={} nativeCapSaturatedPolls={} r2Audits={} r2SkippedDuplicate={} r2ActualShapeChecks={} callbackDropped={} preHistoryDropped={} generation=IDS-1.0.6 mutation=OFF",
                     observed,credited,zero,missingOwner,missingTarget,ambiguousOwners,tracked.size(),
                     r2Verified,r2Rejected,r3Verified,prearmed,r1Fallback,
                     multiGroupCredits,multiRegions,multiTooBroad,ledgerRejected,regionLedger.size(),

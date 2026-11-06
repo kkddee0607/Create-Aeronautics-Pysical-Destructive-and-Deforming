@@ -169,9 +169,24 @@ public final class OwnerResolver {
     /** Read-only six-neighbor propagation evidence. Local WORLD coordinates are
      * world block coordinates; local PLOT coordinates are Sable embedded-accessor
      * relative coordinates. Do not load chunks or invent the next block. */
+    /** Scope Plot storage-center identity to ONE approved impact plan. The
+     * physics normal was frozen at the effect epoch; the owner-local lattice
+     * must not silently jump to a different Sable storage allocation while
+     * traversing its children. Do not reproject later layers from world pose. */
+    public static ForcePropagation.NeighborReader propagationSnapshot(
+            MinecraftServer server,String dimension) {
+        Map<String,BlockPos> centers=new HashMap<>();
+        return (from,x,y,z)->propagationNeighbor(server,dimension,from,x,y,z,centers);
+    }
     public static ForcePropagation.Probe propagationNeighbor(MinecraftServer server,String dimension,
                                                               GameImpactCredit.Target from,
                                                               int x,int y,int z) {
+        return propagationNeighbor(server,dimension,from,x,y,z,null);
+    }
+    private static ForcePropagation.Probe propagationNeighbor(MinecraftServer server,String dimension,
+                                                              GameImpactCredit.Target from,
+                                                              int x,int y,int z,
+                                                              Map<String,BlockPos> centers) {
         if (server==null || dimension==null || from==null)return ForcePropagation.Probe.unknown();
         try {
             BlockPos cell=new BlockPos(x,y,z);
@@ -189,6 +204,10 @@ public final class OwnerResolver {
                         || concrete.getPlot()==null)
                     return ForcePropagation.Probe.unknown();
                 BlockPos center=concrete.getPlot().getCenterBlock();
+                if(centers!=null) {
+                    BlockPos first=centers.putIfAbsent(from.ownerKey(),center);
+                    if(first!=null && !first.equals(center))return ForcePropagation.Probe.unknown();
+                }
                 cell=new BlockPos(Math.addExact(center.getX(),x),Math.addExact(center.getY(),y),
                         Math.addExact(center.getZ(),z));
             }else if(!from.ownerKey().equals("WORLD:"+dimension))return ForcePropagation.Probe.unknown();

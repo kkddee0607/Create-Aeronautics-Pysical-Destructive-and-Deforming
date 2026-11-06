@@ -13,10 +13,10 @@ import java.util.Set;
 import java.util.function.Function;
 
 /**
- * colFix 0.4.0: server-side, bounded F-first prediction for either owner space.
- * Never invents a neighbor from an AABB, native normal or an unloaded chunk.
- * The six-neighbor graph is a provisional NON-DIRECTIONAL gameplay policy,
- * not a proven physical stress direction or a Sable solver impulse.
+ * Bounded owner-local F-first prediction. World and Plot block coordinates
+ * remain in their respective stable lattices throughout one server-thread
+ * event. Native normals select allowed edges; they never identify a block.
+ * Neither collision impulse nor world mutation is inferred from this graph.
  */
 public final class ForcePropagation {
     public static final int MAX_NODES_PER_SIDE = 128;
@@ -178,6 +178,12 @@ public final class ForcePropagation {
     // a real block boundary, so no terminal remainder may be manufactured there.
     public static final int MAX_UNKNOWN_DEPTH=2;
     public static final int MAX_NATIVE_DEPTH=9;
+    // Gameplay geometry policy, not a measured material/solver constant.
+    // 30-degree forward expansion with a half-block opening. The opening lets
+    // a later layer traverse sideways without manufacturing disconnected hits.
+    private static final double FORWARD_CONE_SLOPE=0.5773502691896257;
+    private static final double CONTACT_RADIUS=0.5;
+    private static final double GEOMETRY_EPS=1.0e-10;
 
     private static final class Flow {
         final GameImpactCredit.Target target;
@@ -200,7 +206,10 @@ public final class ForcePropagation {
      * unrelated sibling branches. No global mean transmission is used.
      *
      * UNKNOWN direction is a deliberately short damage-only fallback. Native
-     * direction follows a narrow forward cone in owner-local coordinates.
+     * inward direction defines a forward-expanding cone in the frozen owner
+     * lattice, with no edge that retreats along the collision normal. A Plot
+     * may move in world coordinates while its block-local positions stay fixed.
+     * Re-sampling a world pose for every BFS layer would mix physics epochs.
      */
     public static Result plan(String ownerKey,List<GameImpactCredit.Target> seeds,double inputF,
                               NeighborReader neighbors,Function<String,MaterialProperties> materials,
@@ -246,7 +255,8 @@ public final class ForcePropagation {
                     try {
                         x=Math.addExact(node.x,step[0]);y=Math.addExact(node.y,step[1]);z=Math.addExact(node.z,step[2]);
                     }catch(ArithmeticException overflow) {uncertain.add(node);continue;}
-                    if(!withinField(direction,seeds,x,y,z))continue;
+                    if(!withinField(direction,seeds,x,y,z)
+                            || !forwardStep(direction,step))continue;
                     Probe found=Objects.requireNonNull(neighbors.read(node.target,x,y,z),"missing proof");
                     if(found.status()==ProbeStatus.UNKNOWN){uncertain.add(node);continue;}
                     if(found.status()==ProbeStatus.EMPTY)continue;
@@ -281,7 +291,8 @@ public final class ForcePropagation {
                         try {
                             x=Math.addExact(node.x,step[0]);y=Math.addExact(node.y,step[1]);z=Math.addExact(node.z,step[2]);
                         }catch(ArithmeticException overflow){uncertain.add(node);continue;}
-                        if(!withinField(direction,seeds,x,y,z))continue;
+                        if(!withinField(direction,seeds,x,y,z)
+                                || !forwardStep(direction,step))continue;
                         Probe found=Objects.requireNonNull(neighbors.read(node.target,x,y,z),"missing boundary proof");
                         if(found.status()==ProbeStatus.UNKNOWN){uncertain.add(node);unknown=true;continue;}
                         if(found.status()==ProbeStatus.PRESENT) {
@@ -368,6 +379,19 @@ public final class ForcePropagation {
         return new Result(shares,inputF,assigned,dampedF,Math.max(0,residual),candidate,
                 finalQ,Math.max(0,candidate-finalQ),end);
     }
+    /** No backward edge, including at an oblique normal. Perpendicular moves
+     * are allowed only where the global cone includes the destination. */
+    private static boolean forwardStep(Orientation direction,int[] step) {
+        if(!direction.verified())return true;
+        FrameMath.Vec n=direction.inward();
+        return n.x()*step[0]+n.y()*step[1]+n.z()*step[2]>=-GEOMETRY_EPS;
+    }
+
+    /** Multi-source contact cone in the frozen owner-local grid. Do not
+     * transform each node using a moving world pose: all signed positions and
+     * the validated normal refer to the SAME owner-local collision frame.
+     * Position offsets are in block cells; no translation is applied to a
+     * direction vector. Graph adjacency is always checked separately. */
     private static boolean withinField(Orientation direction,List<GameImpactCredit.Target> seeds,
                                        int x,int y,int z) {
         if(!direction.verified())return true;
@@ -377,13 +401,10 @@ public final class ForcePropagation {
             double dx=(double)x-Integer.parseInt(p[0]),dy=(double)y-Integer.parseInt(p[1]),
                     dz=(double)z-Integer.parseInt(p[2]);
             double parallel=dx*n.x()+dy*n.y()+dz*n.z();
-            if(parallel<0.49)continue;
-            double dist2=dx*dx+dy*dy+dz*dz;
-            // Permit the first signed axis of an oblique manifold, then a
-            // narrow expanding forward cone. Do not propagate backward.
-            if((dist2<=1.01 && parallel>=.5)
-                    || dist2-parallel*parallel<=.36*parallel*parallel+1e-10)
-                return true;
+            if(parallel < -GEOMETRY_EPS)continue;
+            double radial2=Math.max(0,dx*dx+dy*dy+dz*dz-parallel*parallel);
+            double radius=CONTACT_RADIUS+parallel*FORWARD_CONE_SLOPE;
+            if(radial2<=radius*radius+GEOMETRY_EPS)return true;
         }
         return false;
     }

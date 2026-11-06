@@ -66,7 +66,7 @@ class NativeEffectDirectionTest {
                         new FrameMath.Vec(0,0,0),true,null,7)),true);
         var result=NativeEffectDirection.verify(PAIR,List.of(contact),List.of(pre));
         assertTrue(result.owners().isEmpty());
-        assertEquals("PLOT_NORMAL_FRAME_ROTATION_UNVERIFIED",result.reason());
+        assertEquals("PLOT_NORMAL_LINEAR_FRAME_UNVERIFIED",result.reason());
     }
     @Test void obliqueManifoldKeepsVectorButDoesNotInventGridAxis() {
         double n=Math.sqrt(.5);
@@ -74,6 +74,35 @@ class NativeEffectDirectionTest {
                 contact(7,n,n,0,-n,-n,0,frame(0,1))));
         assertEquals(2,verified.owners().size());
         assertEquals(0,NativeEffectDirection.gridAxes(verified,10,41).size());
+    }
+    @Test void nonuniformScaleAndRotationMustUseInverseTransposeForOwnerLocalNormal() {
+        double half=Math.sqrt(.5);
+        var rotatedScaled=new NativeCollisionTelemetry.OwnerFrame(ID,
+                new FrameMath.Pose(new FrameMath.Vec(200,40,-95),new FrameMath.Vec(7,0,3),
+                        new FrameMath.Vec(2,1,3),0,0,half,half));
+        // With sx=2, sy=1, plot local (X+Y)/sqrt(2) transforms by
+        // inverse transpose, *then* rotates 90°: world (-2,1,0)/sqrt(5).
+        // World outward is the exact opposite, (+2,-1,0)/sqrt(5).
+        double a=1/Math.sqrt(2), b=1/Math.sqrt(5);
+        var actual=NativeEffectDirection.verify(PAIR,List.of(
+                contact(7,2*b,-b,0,a,a,0,rotatedScaled)));
+        assertEquals(2,actual.owners().size());
+        assertEquals(-a,actual.forOwner(PLOT).inward().x(),1e-9);
+        assertEquals(-a,actual.forOwner(PLOT).inward().y(),1e-9);
+        assertEquals(-2*b,actual.forOwner(WORLD).inward().x(),1e-9);
+        assertEquals(b,actual.forOwner(WORLD).inward().y(),1e-9);
+    }
+    @Test void scaleChangedBetweenNativeEffectAndPreSolverRejectsOwnerFrame() {
+        var nativeContact=contact(7,0,1,0,0,-1,0,frame(0,1));
+        var differentlyScaled=new FrameMath.Pose(new FrameMath.Vec(0,0,0),
+                new FrameMath.Vec(0,0,0),new FrameMath.Vec(1,1.1,1),0,0,0,1);
+        var pre=new CollisionFrame.Snapshot(41,10,DIM,CollisionFrame.Phase.PRE_SOLVER,
+                List.of(new CollisionFrame.Body(ID,0,15,0,15,differentlyScaled,
+                        new FrameMath.Vec(0,0,0),new FrameMath.Vec(0,0,0),
+                        new FrameMath.Vec(0,0,0),true,null,7)),true);
+        var result=NativeEffectDirection.verify(PAIR,List.of(nativeContact),List.of(pre));
+        assertTrue(result.owners().isEmpty());
+        assertEquals("PLOT_NORMAL_LINEAR_FRAME_UNVERIFIED",result.reason());
     }
     @Test void disagreementAcrossNativeRecordsRejectsDirection() {
         var witness=NativeEffectDirection.verify(PAIR,List.of(contact(7,0,1,0,0,-1,0,frame(0,1)),

@@ -4,7 +4,7 @@ import java.util.Objects;
 
 /** IDS 1.0.6 §24.1 game-Q planning only. No block mutation or committed damage. */
 public final class DamageModel {
-    public static final String ALGORITHM_REVISION = "PDD-IDS-1.0.6/0.4.0colFix2";
+    public static final String ALGORITHM_REVISION = "PDD-IDS-1.0.6/0.4.0colFix3";
     public static final double DIRECT_SHARE = 0.60;
     public static final double PLASTIC_SHARE = 0.15;
     public static final double STRESS_SHARE = 0.25;
