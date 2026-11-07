@@ -104,9 +104,21 @@ class NativeEffectDirectionTest {
         assertTrue(result.owners().isEmpty());
         assertEquals("PLOT_NORMAL_LINEAR_FRAME_UNVERIFIED",result.reason());
     }
-    @Test void disagreementAcrossNativeRecordsRejectsDirection() {
+    @Test void distinctManifoldDirectionsAreAveragedInTheSameOwnerLocalFrame() {
         var witness=NativeEffectDirection.verify(PAIR,List.of(contact(7,0,1,0,0,-1,0,frame(0,1)),
                 contact(7,1,0,0,-1,0,0,frame(0,1))));
+        assertEquals(2,witness.owners().size());
+        assertEquals("AVERAGED_OPPOSING_NORMALS",witness.reason());
+        assertEquals(2,witness.corroboratedRecords());
+        assertEquals(Math.sqrt(.5),witness.meanResultant(),1e-9);
+        assertEquals(Math.sqrt(.5),witness.minimumAlignment(),1e-9);
+        assertEquals(-Math.sqrt(.5),witness.forOwner(WORLD).inward().x(),1e-9);
+        assertEquals(-Math.sqrt(.5),witness.forOwner(WORLD).inward().y(),1e-9);
+    }
+    @Test void antiparallelManifoldMeanIsNotInvented() {
+        var witness=NativeEffectDirection.verify(PAIR,List.of(contact(7,0,1,0,0,-1,0,frame(0,1)),
+                contact(7,0,-1,0,0,1,0,frame(0,1))));
+        assertEquals("AVERAGE_NORMAL_DEGENERATE",witness.reason());
         assertTrue(witness.owners().isEmpty());
     }
 }

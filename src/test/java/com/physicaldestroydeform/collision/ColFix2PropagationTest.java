@@ -43,7 +43,8 @@ class ColFix2PropagationTest {
         var yes=run(PLOT,5,Set.of(1),new ForcePropagation.Orientation(new FrameMath.Vec(1,0,0),"NATIVE"));
         assertTrue(yes.shares().get(0).finalQ()<no.shares().get(0).finalQ());
         assertTrue(yes.shares().get(2).allocatedF()<no.shares().get(2).allocatedF());
-        assertEquals(100,yes.assignedF()+yes.dampedF()+yes.unresolvedF(),1e-8);
+        assertEquals(100,yes.assignedF()+yes.dampedF()+yes.unresolvedF()
+                +yes.audit().thresholdDiscardF(),1e-8);
     }
     @Test void unboundedStoneFloorTerminatesSafelyWithoutFalseEndpointOrBackwardsSpread() {
         ForcePropagation.NeighborReader floor=(from,x,y,z)->
@@ -56,9 +57,10 @@ class ColFix2PropagationTest {
         assertTrue(r.shares().size()<=ForcePropagation.MAX_NODES_PER_SIDE);
         assertTrue(r.shares().stream().noneMatch(s->Integer.parseInt(s.target().localBlock().split(",")[1])>0));
         assertTrue(!"VERIFIED_TERMINAL".equals(r.endReason()));
-        assertEquals(r.inputF(),r.assignedF()+r.dampedF()+r.unresolvedF(),1e-7);
+        assertEquals(r.inputF(),r.assignedF()+r.dampedF()+r.unresolvedF()
+                +r.audit().thresholdDiscardF(),1e-7);
     }
-    @Test void missingNormalUsesShortFallbackAndDoesNotInventTermination() {
+    @Test void missingNormalUsesBoundedWorkNotArtificialDepthTwoAndDoesNotInventTermination() {
         ForcePropagation.NeighborReader floor=(from,x,y,z)->
                 y<=0 && Math.abs(x)<30 && Math.abs(z)<30 && y>=-30
                     ?ForcePropagation.Probe.present(t(WORLD,x,y,z))
@@ -67,8 +69,9 @@ class ColFix2PropagationTest {
                 floor,fp->new MaterialProperties(24,32,25,22,false),F,D,
                 ForcePropagation.Orientation.unknown());
         assertTrue(r.shares().size()<=ForcePropagation.MAX_NODES_PER_SIDE);
-        assertTrue(!"VERIFIED_TERMINAL".equals(r.endReason()));
-        assertTrue(r.unresolvedF()>0);
+        assertTrue(r.audit().maxDepth()>2);
+        assertEquals(r.inputF(),r.assignedF()+r.dampedF()+r.unresolvedF()
+                +r.audit().thresholdDiscardF(),1e-7);
     }
     @Test void unknownChunkCannotReceiveRemainingF() {
         var r=ForcePropagation.plan(WORLD,List.of(t(WORLD,0,0,0)),100,

@@ -30,8 +30,8 @@ class ColFix3DirectionalPropagationTest {
                 new ForcePropagation.Orientation(inward,"VERIFIED_NATIVE_TEST"));
     }
     private static void conserved(ForcePropagation.Result r) {
-        assertEquals(100,r.assignedF()+r.dampedF()+r.unresolvedF(),1e-8);
-        assertEquals(r.candidateQ(),r.finalQ()+r.dampedQ(),1e-8);
+        assertEquals(100,r.assignedF()+r.dampedF()+r.unresolvedF()+r.audit().thresholdDiscardF(),1e-8);
+        assertEquals(r.candidateQ(),r.finalQ()+r.dampedQ()+r.audit().thresholdDiscardQ(),1e-8);
         assertEquals(r.shares().size(),r.shares().stream().map(s->s.target().localBlock()).distinct().count());
     }
     @Test void worldNormalGuidesForwardAndLaterSidewaysButNeverBackward() {

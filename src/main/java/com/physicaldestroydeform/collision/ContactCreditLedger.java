@@ -17,7 +17,7 @@ import java.util.Set;
  * F through owner-verified connected cells before deriving target Q.
  */
 public final class ContactCreditLedger {
-    public static final String ALGORITHM_REVISION = "PDD-IDS-1.0.6/0.4.0superFix";
+    public static final String ALGORITHM_REVISION = "PDD-IDS-1.0.7/0.4.0duperFix";
     // Native contact SEEDS (not propagated neighbors) remain capped at 32/side.
     public static final int MAX_TARGETS_PER_SIDE = 32;
     public static final int MAX_REGIONS = 2 * MAX_TARGETS_PER_SIDE;
@@ -78,12 +78,15 @@ public final class ContactCreditLedger {
     }
     private record Stored(Source source, long tick, Grant grant) {}
     private final Map<CreditId, Stored> recorded = new HashMap<>();
+    // Ephemeral and server-thread only: why the last proposed graph was rejected.
+    private String lastPropagationFailure="NONE";
+    public String lastPropagationFailure() {return lastPropagationFailure;}
     public int size() {return recorded.size();}
     public Grant lookup(CreditId id) {
         var item=recorded.get(Objects.requireNonNull(id));
         return item==null?null:item.grant();
     }
-    public void clear() {recorded.clear();}
+    public void clear() {recorded.clear();lastPropagationFailure="NONE";}
     public void invalidateOwner(String owner) {
         recorded.keySet().removeIf(k -> k.pair().a().stableKey().equals(owner)
                 || k.pair().b().stableKey().equals(owner));
@@ -186,8 +189,12 @@ public final class ContactCreditLedger {
                                  Map<String,ForcePropagation.Orientation> directions,
                                  java.util.function.Consumer<ForcePropagation.Trace> trace) {
         // Preserve every existing owner/region/episode validation and one-credit rule.
+        lastPropagationFailure="NONE";
         Grant base=issue(pair,decision,source,evidence);
-        if(!base.credited())return base;
+        if(!base.credited()) {
+            lastPropagationFailure="SOURCE_OR_EVIDENCE_GATE_"+base.status();
+            return base;
+        }
         List<ForcePropagation.Trace> traces=trace==null?null:new ArrayList<>();
         Grant issued;
         try {
@@ -216,6 +223,9 @@ public final class ContactCreditLedger {
             recorded.put(grant.id(),new Stored(source,base.tick(),grant));
             issued=grant;
         }catch(RuntimeException unsafe) {
+            // Diagnostic reason is not persisted; only verified plans can mint Q.
+            lastPropagationFailure=unsafe.getClass().getSimpleName()+":"+
+                    String.valueOf(unsafe.getMessage());
             // Nothing is committed to the preview or source on a failed plan.
             recorded.remove(base.id());
             return empty(base.id(),source,Status.INVALID_TARGET_SET,base.tick(),evidence.size());
@@ -230,7 +240,10 @@ public final class ContactCreditLedger {
         double factor=plan.finalQ()>sideQcap && plan.finalQ()>0?
                 Math.max(0,sideQcap/plan.finalQ()):1;
         var out=new ArrayList<Share>(plan.shares().size());
-        for(var node:plan.shares())out.add(new Share(node.target(),node.finalQ()*factor));
+        for(var node:plan.shares()) {
+            double q=node.finalQ()*factor;
+            out.add(new Share(node.target(),q<ForcePropagation.MIN_ISSUED_Q?0:q));
+        }
         return List.copyOf(out);
     }
 

@@ -3,6 +3,7 @@ package com.physicaldestroydeform.collision;
 import com.physicaldestroydeform.diagnostics.NativeCollisionTelemetry;
 import com.physicaldestroydeform.collision.FrameMath.Vec;
 import java.util.HashMap;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
@@ -11,19 +12,26 @@ import java.util.Map;
  * local_n1/local_n2 MANIFOLD normals. These are NOT measured impulse vectors.
  * The static (-1) rigid collider uses the world basis. Plot normals are in
  * its local collider basis, independently corroborated against the Sable
- * post-effect owner pose. All records of one approved body pair must agree.
- * A missing/rotating/malformed witness is UNKNOWN, never inferred by order.
+ * post-effect owner pose. Distinct simultaneous contact normals are averaged
+ * per owner in that owner's fixed local frame, after checking each pair's
+ * opposing world normals. A degenerate average is UNKNOWN, never an axis guess.
  * Effect arrays have no per-record solver substep/point identity: this result
  * only authorizes directional F prediction, never a block move.
  */
 public final class NativeEffectDirection {
     private NativeEffectDirection() {}
     private static final double MIN_OPPOSING_COS = .98;
-    private static final double MIN_AGREEMENT_COS = .98;
+    // A roughly symmetric multi-face impact has no defensible single inward
+    // direction; leave damage non-directional rather than inventing one.
+    private static final double MIN_MEAN_RESULTANT = .10;
 
     public record Result(Map<String, ForcePropagation.Orientation> owners,
-                         String reason, int corroboratedRecords) {
+                         String reason, int corroboratedRecords,
+                         double meanResultant, double minimumAlignment) {
         public Result { owners = Map.copyOf(owners); }
+        public Result(Map<String,ForcePropagation.Orientation> owners,String reason,int count) {
+            this(owners,reason,count,0,0);
+        }
         public ForcePropagation.Orientation forOwner(String owner) {
             return owners.getOrDefault(owner, ForcePropagation.Orientation.unknown());
         }
@@ -34,6 +42,7 @@ public final class NativeEffectDirection {
                                 List<NativeCollisionTelemetry.Contact> contacts) {
         if (pair == null || contacts == null || contacts.isEmpty()) return unknown("NO_NATIVE_WITNESSES");
         var candidates = new HashMap<String,Vec>();
+        var witnesses = new HashMap<String,List<Vec>>();
         int inspected=0;
         for(var c:contacts) {
             if(c==null || !pair.dimension().equals(c.dimension()) || c.capSaturated())
@@ -60,19 +69,33 @@ public final class NativeEffectDirection {
                 if(inA.dot(localA.times(-1))<0.999999
                         || inB.dot(localB.times(-1))<0.999999)
                     return unknown("NATIVE_NORMAL_FRAME_ROUNDTRIP_FAILED");
-                if(!add(candidates,a,inA) || !add(candidates,b,inB))
-                    return unknown("NATIVE_MANIFOLD_DIRECTION_CONFLICT");
+                witnesses.computeIfAbsent(a,k->new ArrayList<>()).add(inA);
+                witnesses.computeIfAbsent(b,k->new ArrayList<>()).add(inB);
                 inspected++;
             }catch(IllegalArgumentException invalid) {
                 return unknown("NONFINITE_OR_INVALID_NATIVE_NORMAL");
             }
         }
-        if(inspected==0 || candidates.size()!=2)return unknown("INCOMPLETE_NATIVE_NORMALS");
+        if(inspected==0 || witnesses.size()!=2)return unknown("INCOMPLETE_NATIVE_NORMALS");
+        double minResultant=1.0,minAlignment=1.0;
+        for(var entry:witnesses.entrySet()) {
+            Vec sum=new Vec(0,0,0);
+            for(var n:entry.getValue())sum=sum.plus(n);
+            double length=Math.sqrt(sum.squareLength());
+            double coherence=length/entry.getValue().size();
+            if(!Double.isFinite(coherence) || coherence<MIN_MEAN_RESULTANT)
+                return new Result(Map.of(),"AVERAGE_NORMAL_DEGENERATE",inspected,coherence,0);
+            Vec mean=sum.unit();
+            for(var n:entry.getValue())minAlignment=Math.min(minAlignment,mean.dot(n));
+            minResultant=Math.min(minResultant,coherence);
+            candidates.put(entry.getKey(),mean);
+        }
         var owners=new HashMap<String,ForcePropagation.Orientation>();
         for(var entry:candidates.entrySet())
             owners.put(entry.getKey(),new ForcePropagation.Orientation(entry.getValue(),
-                    "SABLE_RAPIER_LOCAL_MANIFOLD_NORMAL_EFFECT_PHASE"));
-        return new Result(owners,"OPPOSING_MANIFOLD_NORMALS_CORROBORATED",inspected);
+                    "AVERAGED_SABLE_RAPIER_LOCAL_MANIFOLD_EFFECT_PHASE"));
+        return new Result(owners,inspected>1?"AVERAGED_OPPOSING_NORMALS":"OPPOSING_NORMALS",
+                inspected,minResultant,minAlignment);
     }
     /** Additional production gate: an effect pose must not be promoted to a
      * native world direction when any captured pre-solver substep had an
@@ -140,14 +163,10 @@ public final class NativeEffectDirection {
             int[] signed={0,0,0};signed[axis]=a[axis]>0?1:-1;
             out.put(entry.getKey(),new DirectionEvidence(entry.getKey(),
                     "SABLE_RAPIER_LOCAL_MANIFOLD_NORMAL",
-                    "ALL_EFFECT_NORMALS_AND_PRE_POSE_CORROBORATED_SUBSTEP_UNKNOWN",
+                    "AVERAGED_EFFECT_NORMAL_AND_PRE_POSE_CORROBORATED_SUBSTEP_UNKNOWN",
                     tick,-1,preEpoch,signed[0],signed[1],signed[2]));
         }
         return Map.copyOf(out);
-    }
-    private static boolean add(Map<String,Vec> map,String owner,Vec normal) {
-        Vec previous=map.putIfAbsent(owner,normal);
-        return previous==null || previous.dot(normal)>=MIN_AGREEMENT_COS;
     }
     private static String owner(int id,NativeCollisionTelemetry.OwnerFrame frame,String dimension) {
         if(id==-1)return "WORLD:"+dimension;

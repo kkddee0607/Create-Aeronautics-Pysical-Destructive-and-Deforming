@@ -19,8 +19,12 @@ import java.util.function.Function;
  * Neither collision impulse nor world mutation is inferred from this graph.
  */
 public final class ForcePropagation {
-    public static final int MAX_NODES_PER_SIDE = 128;
+    // 128 truncated a radius-3.5 Plot and a small patch of terrain. The bound
+    // still prevents unbounded work on huge connected World colliders.
+    public static final int MAX_NODES_PER_SIDE = 2048;
     public static final double MIN_REMAINING_F = 1.0 / 256.0;
+    public static final double MIN_PROPAGATED_F = 1.0;
+    public static final double MIN_ISSUED_Q = 1.0;
     private static final int[][] DIRECTIONS = {{-1,0,0},{0,-1,0},{0,0,-1},{0,0,1},{0,1,0},{1,0,0}};
     private static final Comparator<GameImpactCredit.Target> TARGET_ORDER =
             Comparator.comparing(GameImpactCredit.Target::localBlock)
@@ -44,16 +48,34 @@ public final class ForcePropagation {
     public record Share(GameImpactCredit.Target target, double allocatedF,
                         double rawQ, double finalQ, int layer, int elasticityPercent) {}
     /** Ephemeral proof of an actual forwarded payment. Never store this in a persistent credit. */
-    public sealed interface Trace permits Edge, Receipt {}
+    public sealed interface Trace permits Edge, Receipt, Node, Cutoff {}
     public record Edge(GameImpactCredit.Target parent, GameImpactCredit.Target child,
                        int layer, double parentReceivedF, double parentLocalF,
                        double parentOutgoingF, double directionWeight, double sentF) implements Trace {}
     public record Receipt(GameImpactCredit.Target child, int layer, int parentCount,
                           double totalReceivedF, boolean processedOnce) implements Trace {}
+    public record Node(GameImpactCredit.Target target, int layer, double receivedF,
+                       double localF, double forwardedF, double dampedF, double terminalRecoveredF,
+                       double discardedF, double rawQ, double finalQ, int eligibleChildren,
+                       int paidChildren, String decision) implements Trace {}
+    public record Cutoff(GameImpactCredit.Target from, GameImpactCredit.Target to,
+                         int layer, double rejectedF, String reason) implements Trace {}
+    public record Audit(double thresholdDiscardF, double thresholdDiscardQ,
+                        double terminalRecoveredF, int terminalNodes, int maxDepth,
+                        int paidEdges, int mergedNodes, int safetyBlockedNodes) {}
     public record Result(List<Share> shares, double inputF, double assignedF,
                          double dampedF, double unresolvedF, double candidateQ,
-                         double finalQ, double dampedQ, String endReason) {
-        public Result { shares = List.copyOf(shares); }
+                         double finalQ, double dampedQ, String endReason, Audit audit) {
+        public Result {
+            shares = List.copyOf(shares);
+            Objects.requireNonNull(audit);
+        }
+        public Result(List<Share> shares, double inputF, double assignedF,
+                      double dampedF, double unresolvedF, double candidateQ,
+                      double finalQ, double dampedQ, String endReason) {
+            this(shares,inputF,assignedF,dampedF,unresolvedF,candidateQ,finalQ,dampedQ,
+                    endReason,new Audit(0,0,0,0,0,0,0,0));
+        }
     }
     private static final class Pending {
         final GameImpactCredit.Target target;
@@ -183,8 +205,10 @@ public final class ForcePropagation {
     }
     // Actual production geometry is bounded. Neither radius nor a safety cap is
     // a real block boundary, so no terminal remainder may be manufactured there.
-    public static final int MAX_UNKNOWN_DEPTH=2;
-    public static final int MAX_NATIVE_DEPTH=9;
+    // No depth-based loss. A node is visited once in an acyclic BFS; only the
+    // finite node cap and the explicit 1.0 F cutoff bound traversal.
+    public static final int MAX_UNKNOWN_DEPTH=Integer.MAX_VALUE;
+    public static final int MAX_NATIVE_DEPTH=Integer.MAX_VALUE;
     // Gameplay geometry policy, not a measured material/solver constant.
     // 30-degree forward expansion with a half-block opening. The opening lets
     // a later layer traverse sideways without manufacturing disconnected hits.
@@ -196,7 +220,9 @@ public final class ForcePropagation {
         final GameImpactCredit.Target target;
         final int x,y,z,depth,elasticity;
         final java.util.Map<Flow,Double> parents=new java.util.HashMap<>();
-        double incoming,localF,rawQ,finalQ;
+        double incoming,localF,rawQ,finalQ,forwarded,damped,terminalBonus,discarded;
+        int eligibleChildren,paidChildren;
+        String decision="UNPROCESSED";
         Flow(GameImpactCredit.Target t,int depth,int e) {
             this.target=t;this.depth=depth;this.elasticity=e;
             String[] p=t.localBlock().split(",",-1);
@@ -212,7 +238,7 @@ public final class ForcePropagation {
      * its upstream graph parents' provisional Q and its OWN outgoing F, not
      * unrelated sibling branches. No global mean transmission is used.
      *
-     * UNKNOWN direction is a deliberately short damage-only fallback. Native
+     * UNKNOWN direction uses an auditable equal-weight traversal with no depth cap. Native
      * inward direction defines a forward-expanding cone in the frozen owner
      * lattice, with no edge that retreats along the collision normal. A Plot
      * may move in world coordinates while its block-local positions stay fixed.
@@ -231,182 +257,178 @@ public final class ForcePropagation {
                               NeighborReader neighbors,Function<String,MaterialProperties> materials,
                               GameImpactCredit.Settings forces,DamageModel.Settings damage,
                               Orientation direction,java.util.function.Consumer<Trace> trace) {
-        Objects.requireNonNull(direction);
         Objects.requireNonNull(ownerKey);Objects.requireNonNull(seeds);
         Objects.requireNonNull(neighbors);Objects.requireNonNull(materials);
-        Objects.requireNonNull(forces);Objects.requireNonNull(damage);
+        Objects.requireNonNull(forces);Objects.requireNonNull(damage);Objects.requireNonNull(direction);
         if(!Double.isFinite(inputF)||inputF<0)throw new IllegalArgumentException("invalid F");
         if(inputF==0||seeds.isEmpty())return new Result(List.of(),inputF,0,0,inputF,0,0,0,
                 "NO_VERIFIED_SEEDS");
-        var seen=new java.util.HashMap<String,Flow>();
+        var seen=new HashMap<String,Flow>();
         for(var t:seeds) {
             if(t==null||!ownerKey.equals(t.ownerKey()))throw new IllegalArgumentException("invalid seed owner");
-            Flow old=seen.get(t.localBlock());
+            var old=seen.get(t.localBlock());
             if(old!=null) {
                 if(!old.target.fingerprint().equals(t.fingerprint()))
                     throw new IllegalArgumentException("conflicting seed fingerprint");
                 continue;
             }
-            var m=Objects.requireNonNull(materials.apply(t.fingerprint()),"missing material");
-            seen.put(t.localBlock(),new Flow(t,0,m.elasticityPercent()));
+            var material=Objects.requireNonNull(materials.apply(t.fingerprint()),"missing seed material");
+            seen.put(t.localBlock(),new Flow(t,0,material.elasticityPercent()));
         }
         if(seen.size()>MAX_NODES_PER_SIDE)throw new IllegalArgumentException("too many contact seeds");
         List<Flow> layer=new ArrayList<>(seen.values());
         layer.sort(Comparator.comparing(n->n.target.localBlock()));
-        for(var n:layer)n.incoming=inputF/layer.size();
+        for(var node:layer)node.incoming=inputF/layer.size();
         var all=new ArrayList<Flow>();
-        double assigned=0,dampedF=0,unresolved=0;
-        boolean capped=false,unknown=false,depthLimited=false,belowFloor=false;
+        double assigned=0,dampedF=0,unresolved=0,discardF=0,terminalF=0;
+        int terminalNodes=0,maxDepth=0,paidEdges=0,mergedNodes=0,blockedNodes=0;
+        boolean capped=false,unknown=false,belowFloor=false;
         while(!layer.isEmpty()) {
             int depth=layer.getFirst().depth;
-            // Build all next-layer edges BEFORE publishing any source Q.
-            var nextMap=new java.util.HashMap<String,Flow>();
-            var links=new java.util.HashMap<Flow,List<Flow>>();
-            var uncertain=new java.util.HashSet<Flow>();
-            boolean depthCap=depth >= (direction.verified()?MAX_NATIVE_DEPTH:MAX_UNKNOWN_DEPTH);
+            maxDepth=Math.max(maxDepth,depth);
+            var nextMap=new HashMap<String,Flow>();
+            var links=new HashMap<Flow,List<Flow>>();
+            var blocked=new HashMap<Flow,String>();
+            // Freeze the entire level's reachable graph before calculating Q.
             for(var node:layer) {
                 var children=new ArrayList<Flow>();
-                if(!depthCap) for(var step:DIRECTIONS) {
+                links.put(node,children);
+                if(node.incoming<MIN_PROPAGATED_F)continue;
+                for(var step:DIRECTIONS) {
                     int x,y,z;
                     try {
-                        x=Math.addExact(node.x,step[0]);y=Math.addExact(node.y,step[1]);z=Math.addExact(node.z,step[2]);
-                    }catch(ArithmeticException overflow) {uncertain.add(node);continue;}
-                    if(!withinField(direction,seeds,x,y,z)
-                            || !forwardStep(direction,step))continue;
-                    Probe found=Objects.requireNonNull(neighbors.read(node.target,x,y,z),"missing proof");
-                    if(found.status()==ProbeStatus.UNKNOWN){uncertain.add(node);continue;}
-                    if(found.status()==ProbeStatus.EMPTY)continue;
-                    var target=found.target();
-                    if(!ownerKey.equals(target.ownerKey())||!target.localBlock().equals(x+","+y+","+z))
-                        throw new IllegalArgumentException("neighbor owner/coordinate mismatch");
-                    var prior=seen.get(target.localBlock());
-                    if(prior!=null) {
-                        if(!prior.target.fingerprint().equals(target.fingerprint()))
-                            throw new IllegalArgumentException("changed neighbor fingerprint");
+                        x=Math.addExact(node.x,step[0]);y=Math.addExact(node.y,step[1]);
+                        z=Math.addExact(node.z,step[2]);
+                    }catch(ArithmeticException overflow){blocked.put(node,"COORDINATE_OVERFLOW");continue;}
+                    if(!withinField(direction,seeds,x,y,z)||!forwardStep(direction,step))continue;
+                    Probe proof=Objects.requireNonNull(neighbors.read(node.target,x,y,z),"missing neighbor proof");
+                    if(proof.status()==ProbeStatus.UNKNOWN){blocked.put(node,"UNKNOWN_NEIGHBOR");unknown=true;continue;}
+                    if(proof.status()!=ProbeStatus.PRESENT)continue;
+                    var t=proof.target();
+                    if(!ownerKey.equals(t.ownerKey())||!t.localBlock().equals(x+","+y+","+z))
+                        throw new IllegalArgumentException("neighbor owner/coordinates mismatch");
+                    var prior=seen.get(t.localBlock());
+                    if(prior!=null){
+                        if(!prior.target.fingerprint().equals(t.fingerprint()))
+                            throw new IllegalArgumentException("changed visited material fingerprint");
                         continue;
                     }
-                    var child=nextMap.get(target.localBlock());
+                    var child=nextMap.get(t.localBlock());
                     if(child==null) {
-                        if(seen.size()+nextMap.size()>=MAX_NODES_PER_SIDE) {
-                            capped=true;uncertain.add(node);continue;
+                        if(seen.size()+nextMap.size()>=MAX_NODES_PER_SIDE){
+                            capped=true;blocked.put(node,"NODE_WORK_BUDGET");continue;
                         }
-                        var m=Objects.requireNonNull(materials.apply(target.fingerprint()),"missing neighbor material");
-                        child=new Flow(target,depth+1,m.elasticityPercent());
-                        nextMap.put(target.localBlock(),child);
-                    } else if(!child.target.fingerprint().equals(target.fingerprint()))
+                        var material=Objects.requireNonNull(materials.apply(t.fingerprint()),"missing neighbor material");
+                        child=new Flow(t,depth+1,material.elasticityPercent());
+                        nextMap.put(t.localBlock(),child);
+                    } else if(!child.target.fingerprint().equals(t.fingerprint()))
                         throw new IllegalArgumentException("conflicting branch fingerprint");
                     children.add(child);
                 }
-                if(depthCap) {
-                    // The search radius is not a physical endpoint. Still
-                    // inspect the immediate frontier: if it is truly EMPTY,
-                    // grant a real terminal; otherwise keep the remainder
-                    // unresolved instead of assigning it to this node.
-                    for(var step:DIRECTIONS) {
-                        int x,y,z;
-                        try {
-                            x=Math.addExact(node.x,step[0]);y=Math.addExact(node.y,step[1]);z=Math.addExact(node.z,step[2]);
-                        }catch(ArithmeticException overflow){uncertain.add(node);continue;}
-                        if(!withinField(direction,seeds,x,y,z)
-                                || !forwardStep(direction,step))continue;
-                        Probe found=Objects.requireNonNull(neighbors.read(node.target,x,y,z),"missing boundary proof");
-                        if(found.status()==ProbeStatus.UNKNOWN){uncertain.add(node);unknown=true;continue;}
-                        if(found.status()==ProbeStatus.PRESENT) {
-                            var t=found.target();
-                            if(!ownerKey.equals(t.ownerKey()) || !t.localBlock().equals(x+","+y+","+z))
-                                throw new IllegalArgumentException("boundary owner/coordinate mismatch");
-                            var already=seen.get(t.localBlock());
-                            if(already!=null && !already.target.fingerprint().equals(t.fingerprint()))
-                                throw new IllegalArgumentException("boundary fingerprint changed");
-                            if(already==null){uncertain.add(node);depthLimited=true;}
-                        }
-                    }
-                }
-                links.put(node,children);
+                children.sort(Comparator.comparing(n->n.target.localBlock()));
             }
-            List<Flow> next=new ArrayList<>(nextMap.values());
-            next.sort(Comparator.comparing(n->n.target.localBlock()));
-            // Nodes that could have undiscovered edges cannot redirect that
-            // unproved budget to whichever neighbors happened to be scanned.
             for(var node:layer) {
-                List<Flow> children=links.get(node);
-                boolean blocked=uncertain.contains(node);
-                boolean terminal=children.isEmpty()&&!blocked;
-                double local=terminal?node.incoming:node.incoming/2;
-                node.localF=local;
-                node.rawQ=forces.candidate(local);
-                node.finalQ=node.rawQ;
-                assigned+=local;
-                all.add(node);
-                if(blocked) {
-                    unresolved+=node.incoming-local;
-                    unknown=true;
-                    continue;
-                }
-                if(children.isEmpty())continue;
-                double transmit=DamageModel.elasticityTransmissionPercent(node.elasticity,damage);
-                double onward=(node.incoming-local);
-                double forward=onward*transmit;
-                dampedF+=onward-forward;
-                // Skip subthreshold expansion after an intact node has been
-                // accounted. This is a gameplay Q floor, NOT a terminal.
-                if(forward/children.size()<forces.forceFloor() && depth>=3) {
-                    unresolved+=forward;
+                if(node.incoming<MIN_PROPAGATED_F){
+                    discardF+=node.incoming;
+                    node.discarded=node.incoming;
+                    node.decision="F_BELOW_ONE";
                     belowFloor=true;
+                    if(trace!=null)trace.accept(new Cutoff(node.target,null,depth,node.incoming,"NODE_F_BELOW_ONE"));
                     continue;
                 }
-                // Geometry filters eligible face-connected children first. A
-                // verified oblique normal biases their shares by projection;
-                // quantize only the WEIGHTS (0.1), never the native normal.
-                // UNKNOWN retains the existing equal F split unchanged.
+                List<Flow> children=links.get(node);
+                node.eligibleChildren=children.size();
+                boolean unsafe=blocked.containsKey(node);
+                boolean terminal=children.isEmpty()&&!unsafe;
+                node.localF=terminal?node.incoming:node.incoming/2;
+                node.terminalBonus=terminal?node.incoming/2:0;
+                assigned+=node.localF;
+                if(terminal){terminalF+=node.terminalBonus;terminalNodes++;}
+                node.rawQ=forces.candidate(node.localF);
+                node.finalQ=node.rawQ;
+                all.add(node);
+                if(unsafe){
+                    double withheld=node.incoming-node.localF;
+                    unresolved+=withheld;
+                    blockedNodes++;
+                    node.decision="SAFETY_"+blocked.get(node);
+                    if(trace!=null)trace.accept(new Cutoff(node.target,null,depth,withheld,node.decision));
+                    continue;
+                }
+                if(terminal){node.decision="VERIFIED_TERMINAL";continue;}
+                // Elasticity subtracts from the outgoing HALF, never from localF.
+                double pending=node.incoming-node.localF;
+                double forward=pending*DamageModel.elasticityTransmissionPercent(node.elasticity,damage);
+                node.damped=pending-forward;
+                dampedF+=node.damped;
                 double[] weights=directionWeights(direction,children,node);
                 double sent=0;
                 for(int i=0;i<children.size();i++) {
                     var child=children.get(i);
                     double part=i==children.size()-1?forward-sent:forward*weights[i];
                     sent+=part;
+                    // Never create an F<1 edge. Do not silently reassign it
+                    // to the remaining children or invent a physical terminal.
+                    if(part<MIN_PROPAGATED_F){
+                        discardF+=part;node.discarded+=part;belowFloor=true;
+                        if(trace!=null)trace.accept(new Cutoff(node.target,child.target,
+                                depth,part,"EDGE_F_BELOW_ONE"));
+                        continue;
+                    }
                     child.incoming+=part;
                     child.parents.merge(node,part,Double::sum);
+                    node.forwarded+=part;node.paidChildren++;paidEdges++;
                     if(trace!=null)trace.accept(new Edge(node.target,child.target,depth,
                             node.incoming,node.localF,forward,weights[i],part));
                 }
+                node.decision=node.paidChildren>0?"FORWARDED":"F_BELOW_ONE";
             }
-            if(trace!=null)for(var child:next)if(!child.parents.isEmpty())
-                trace.accept(new Receipt(child.target,child.depth,child.parents.size(),
-                        child.incoming,true));
-            // Applying a child's elasticity to each actual predecessor keeps
-            // unrelated branches independent; a join contributes one Q only.
-            var sums=new java.util.HashMap<Flow,Double>();
-            var weighted=new java.util.HashMap<Flow,Double>();
+            // No unpaid candidate gets an entry or a phantom child Q discount.
+            var next=new ArrayList<Flow>();
+            for(var child:nextMap.values())if(child.incoming>=MIN_PROPAGATED_F)next.add(child);
+            next.sort(Comparator.comparing(n->n.target.localBlock()));
+            if(trace!=null)for(var child:next)trace.accept(new Receipt(child.target,
+                    child.depth,child.parents.size(),child.incoming,true));
+            for(var child:next)if(child.parents.size()>1)mergedNodes++;
+            // Only paid child edges may discount their actual parents' pending Q.
+            var sum=new HashMap<Flow,Double>();
+            var weighted=new HashMap<Flow,Double>();
             for(var child:next) {
-                double transmission=DamageModel.elasticityTransmissionPercent(child.elasticity,damage);
+                double t=DamageModel.elasticityTransmissionPercent(child.elasticity,damage);
                 for(var entry:child.parents.entrySet()) {
-                    sums.merge(entry.getKey(),entry.getValue(),Double::sum);
-                    weighted.merge(entry.getKey(),entry.getValue()*transmission,Double::sum);
+                    sum.merge(entry.getKey(),entry.getValue(),Double::sum);
+                    weighted.merge(entry.getKey(),entry.getValue()*t,Double::sum);
                 }
             }
-            for(var entry:sums.entrySet())
-                if(entry.getValue()>0)entry.getKey().finalQ*=weighted.get(entry.getKey())/entry.getValue();
-            seen.putAll(nextMap);
-            layer=next.stream().filter(n->n.incoming>0).toList();
-            if(depthCap)break;
+            for(var entry:sum.entrySet())if(entry.getValue()>0)
+                entry.getKey().finalQ*=weighted.get(entry.getKey())/entry.getValue();
+            for(var child:next)seen.put(child.target.localBlock(),child);
+            layer=next;
         }
         var shares=new ArrayList<Share>(all.size());
-        double candidate=0,finalQ=0;
+        double candidateQ=0,finalQ=0,dampedQ=0,discardQ=0;
         for(var n:all) {
-            candidate+=n.rawQ;finalQ+=n.finalQ;
+            candidateQ+=n.rawQ;
+            double pathDiscount=n.rawQ-n.finalQ;
+            dampedQ+=pathDiscount;
+            if(n.finalQ<MIN_ISSUED_Q){discardQ+=n.finalQ;n.finalQ=0;}
+            finalQ+=n.finalQ;
             shares.add(new Share(n.target,n.localF,n.rawQ,n.finalQ,n.depth,n.elasticity));
+            if(trace!=null)trace.accept(new Node(n.target,n.depth,n.incoming,
+                    n.localF,n.forwarded,n.damped,n.terminalBonus,n.discarded,
+                    n.rawQ,n.finalQ,n.eligibleChildren,n.paidChildren,n.decision));
         }
-        String end=capped?"UNVERIFIED_BOUNDARY":depthLimited?"DIRECTION_DEPTH_LIMIT"
-                :unknown?"UNVERIFIED_BOUNDARY":belowFloor?"BELOW_Q_FLOOR":"VERIFIED_TERMINAL";
-        double residual=inputF-assigned-dampedF;
-        if(residual<0&&residual>-1e-7*Math.max(1,inputF))residual=0;
-        if(!Double.isFinite(residual)||residual<-1e-7*Math.max(1,inputF)||
-                Math.abs((assigned+dampedF+residual)-inputF)>1e-7*Math.max(1,inputF)||
-                finalQ>candidate+1e-7||finalQ<0||!Double.isFinite(finalQ))
-            throw new IllegalStateException("directed F/Q budget mismatch");
-        return new Result(shares,inputF,assigned,dampedF,Math.max(0,residual),candidate,
-                finalQ,Math.max(0,candidate-finalQ),end);
+        double accounted=assigned+dampedF+discardF+unresolved;
+        double tolerance=1e-7*Math.max(1,inputF);
+        if(!Double.isFinite(accounted)||Math.abs(accounted-inputF)>tolerance||
+                !Double.isFinite(finalQ)||Math.abs(candidateQ-finalQ-dampedQ-discardQ)>tolerance||
+                candidateQ<0||finalQ<0||discardF<0||unresolved<0)
+            throw new IllegalStateException("duperFix F/Q ledger mismatch");
+        String end=capped?"NODE_WORK_BUDGET":unknown?"UNVERIFIED_BOUNDARY":
+                unresolved>0?"SAFETY_BOUNDARY":belowFloor?"F_BELOW_ONE":"VERIFIED_TERMINAL";
+        return new Result(shares,inputF,assigned,dampedF,unresolved,candidateQ,finalQ,dampedQ,
+                end,new Audit(discardF,discardQ,terminalF,terminalNodes,maxDepth,
+                        paidEdges,mergedNodes,blockedNodes));
     }
     /** A deterministic tenths partition. Every graph-valid child gets at least
      * 0.1; remaining tenths follow positive axial projection with a small

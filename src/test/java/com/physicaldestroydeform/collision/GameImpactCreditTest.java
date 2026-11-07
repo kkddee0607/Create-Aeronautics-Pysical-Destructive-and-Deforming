@@ -53,6 +53,16 @@ final class GameImpactCreditTest {
         assertEquals(0.161*(100000-2),d.candidate(100000),1e-9);
         assertTrue(d.candidate(3849.28271484375)<d.candidate(30181.88671875));
     }
+    @Test void sourceQBelowOneIsNotIssuedAndDoesNotConsumeTheArmedEpisode() {
+        var policy=new GameImpactCredit(GameImpactCredit.Settings.provisional());
+        policy.step(frame(1,List.of(),true,false,null,null));
+        policy.step(frame(2,List.of(),true,false,null,null));
+        var low=policy.step(frame(3,List.of(new ObservedForce(-1,7,5,0)),false,true,TA,TB));
+        assertEquals(Reason.BELOW_THRESHOLD,low.reason());
+        assertEquals(0,low.issuedQ(),0);
+        var higher=policy.step(frame(4,MANY,false,true,TA,TB));
+        assertTrue(higher.credited());
+    }
     @Test void duplicateForcePointsProduceOneGroupPeak() {
         assertEquals(42.0,GameImpactCredit.peak(MANY));
         var e=new GameImpactCredit(new GameImpactCredit.Settings(2,2,0.25,64,2,4096,600));

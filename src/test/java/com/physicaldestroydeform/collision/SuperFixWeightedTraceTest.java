@@ -35,8 +35,8 @@ class SuperFixWeightedTraceTest {
                 .map(t->(ForcePropagation.Receipt)t).toList();
     }
     private static void conserved(ForcePropagation.Result r) {
-        assertEquals(r.inputF(),r.assignedF()+r.dampedF()+r.unresolvedF(),1e-8);
-        assertEquals(r.candidateQ(),r.finalQ()+r.dampedQ(),1e-8);
+        assertEquals(r.inputF(),r.assignedF()+r.dampedF()+r.unresolvedF()+r.audit().thresholdDiscardF(),1e-8);
+        assertEquals(r.candidateQ(),r.finalQ()+r.dampedQ()+r.audit().thresholdDiscardQ(),1e-8);
     }
     @Test void diagonal45SplitsEquallyWithoutRoundingNativeVector() {
         for(String owner:List.of(PLOT,WORLD)) {
@@ -111,6 +111,7 @@ class SuperFixWeightedTraceTest {
                 new ForcePropagation.Orientation(new FrameMath.Vec(0,1,0),"NATIVE_TEST"),unknownTrace::add);
         assertEquals("UNVERIFIED_BOUNDARY",u.endReason());
         assertEquals(50,u.unresolvedF(),1e-8);
-        assertTrue(unknownTrace.isEmpty());
+        assertTrue(edges(unknownTrace).isEmpty());
+        assertTrue(unknownTrace.stream().anyMatch(t->t instanceof ForcePropagation.Cutoff));
     }
 }

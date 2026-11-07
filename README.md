@@ -1,91 +1,17 @@
-# PDD 0.4.0superFix — Physical Destruction and Deforming
+# PDD 0.4.0duperFix — Physical Destruction and Deforming
 
-## Release 0.4.0superFix — 0.1-quantized oblique F sharing and receipt diagnostics
+## duperFix (0.4.0) — final diagnostic candidate
 
-- Verified owner-local Sable inward normal stays full precision and is **never** rounded. Six-face graph adjacency, existing 30-degree expanding envelope and strict no-backward BFS are preserved.
-- Only eligible children share each parent's already approved, elastically attenuated outgoing F. Verified normal projections are quantized to **0.1 weight increments**, with an equal-or-greater 0.1 share per reachable child and deterministic largest-remainder assignment. The sum of child weights is exactly 1.0. UNKNOWN direction continues using the legacy unquantized equal split.
-- New per-credit `[PDD-F-EDGE]` records parent/child/owner/layer, input/local/outgoing F, directional fraction and actual sent F; `[PDD-F-MERGE]` records the unique child's parent count and summed F, and `[PDD-F-TRACE]` reports truncated diagnostic lines. Only accepted ledger credits emit these traces; no trace data is retained in the credit ledger.
-- Per-tick trace limit 128 lines; per-credited-event limit 96 lines. Use JVM `-Dpdd.f.trace.enabled=false` to disable. Truncation counts are reported for every credited event while enabled.
-- Keeps Sable callbacks, F/Q global envelopes, Elasticity/H/T/D material coefficients, Plot/World frame validation, owner IDs, preview-only world mutation OFF and all previous JUnit tests unchanged.
-- **Explicitly excluded:** reinforced-deepslate material/threshold edits, actual block destruction/deformation, new Sable API dependencies, per-layer moving Plot world-pose resampling. Checkpoint name changed to avoid treating old policy's preview estimates as directly comparable.
+This build is **read-only** (`worldMutation=OFF`) and keeps the existing Sable original callback path, material definitions, F/Q gain, and previous test sources. It is not a verified real-world solver impulse or a world-destruction build. Baseline: GitHub main `bc0267464f9ebd3f63f76a124979df2c549b642b`, from 0.4.0superFix.
 
-**Verification and in-game log protocol:** `docs/verification/0.4.0superFix.md`.
+1. **Mean manifold normal:** per record corroborate opposite world-frame normals; convert each inward normal to its owner's stable local frame; normalize the vector sum of valid unit normals. Record count, resultant magnitude, weakest alignment and sampled raw normals; refuse an undefined near-zero resultant (<0.10) instead of choosing a fabricated direction. UNKNOWN direction falls back to equal-weight F sharing without a shallow fixed depth cap. Pre-solver/effect-pose and owner-generation checks remain.
+2. **Bounded exhaustive propagation:** no arbitrary 2/9-layer depth termination; follow current verified six-face neighbors once per owner-local block, with the existing 30-degree direction cone and 0.1 weighted sharing for corroborated normals. Work cap increases 128→2,048 nodes per side. Unknown/unloaded neighbor or work cap is *not* a verified terminal: residual is reported as `unresolvedF` rather than turned into fake Q. Fully verified boundaries recover their unused half-F into the terminal node's own Q calculation. Attenuation is calculated once from the actual parent's elasticity and child payment path.
+3. **Hard F/Q floor:** no F node or edge below 1 is propagated, no Q below 1 is issued. `thresholdDiscardF` and `thresholdDiscardQ` explicitly reconcile subunit cutoffs so they are not misreported as unresolved work. Source events whose total Q is below 1 do not consume the armed episode. The source Q envelope, per-side caps, and preview persistence remain authoritative.
+4. **Detailed forensic log:** `[PDD-NATIVE-NORMAL]`, `[PDD-NORMAL-SAMPLE]`, `[PDD-F-EDGE]`, `[PDD-F-MERGE]`, `[PDD-F-NODE]`, `[PDD-F-CUTOFF]`, `[PDD-F-LEDGER]`, `[PDD-F-INVARIANT]`, `[PDD-F-PERF]`, `[PDD-MATERIAL-PLAN]`, `[PDD-F-TRACE]` with suppression counts. Diagnostics are emitted for authorized credits only, never persisted as gameplay state. Default per-credit F trace 4,096 lines and per-tick 8,192; overridable via `pdd.f.trace.maxPerCredit` and `pdd.f.trace.maxPerTick`; use `-Dpdd.f.trace.enabled=false` to disable for ordinary server play.
 
----
+**Explicitly NOT changed:** reinforced deepslate material values, actual world edits, NeoForge/Sable/Create dependency versions, Sable callbacks or GitHub Actions / Apply ZIP contract. The historical documentation follows unchanged.
 
-## Historical release — PDD 0.4.0colFix3
-
-## Release 0.4.0colFix3 — multi-contact normal-directed F propagation (design priority: confirmed conversation contract)
-
-- Preserves Sable's native collision handling, owner/episode authorization, F-first Q envelope, material coefficients, elastic parent-Q/child-F attenuation and `worldMutation=OFF`.
-- Direction is corroborated from Sable manifold **owner-local vectors** using the captured effect pose (inverse-transpose for non-uniform scale). All pre-solver snapshot rotations **and scales** must agree; otherwise fallback is `UNKNOWN`.
-- Normal-based forwarding now uses a 30° expanding forward field with half-block initial width in each owner-local lattice. A permitted grid edge cannot point backward along the inward normal. **No nearest-axis rounding** and no world-coordinate reprojection between BFS layers.
-- Multi-source seeds each receive an equal fraction of source F. A later cell can accumulate valid contributions from several distinct parents, yet its Q is computed only once. Earlier or same-depth cells cannot receive F again.
-- During one grant, the Plot storage center is frozen as an identity check; movement/reallocation during traversal yields an `UNKNOWN` neighbor, not an invented position. This does not change the contact-time rotation or the local cell indices.
-- Normal-free bounded fallback and prior tests remain. New regression tests cover tilted normals, four roots, joining paths, nonuniform scale, epoch mismatch and unknown boundaries.
-- Preview checkpoint names are version-namespaced (`colFix3`). Old preview files remain intact; no previous game state is replayed across changed policies.
-
-**Source review and rollout:** `docs/verification/0.4.0colFix3.md`. The 30°/0.5-cell directional envelope is a *provisional gameplay policy* rather than a measured Rapier contact cone. No exact native impulse is claimed.
-
----
-
-## Previous release — PDD 0.4.0colFix2
-
-### Release 0.4.0colFix2 — native-direction-gated and branch-accounted F-first preview (IDS 1.0.6 + F propagation v0.2)
-
-- New **server-side F-first** impact preview: Sable observed peak F -> World/Plot 50% side budgets -> owner-local verified first-contact seeds -> six-face connected propagation; each layer keeps half the surviving F, except the PROVED terminal receives everything. Target Q is computed **after** its F is assigned. Equal-depth simultaneous contact targets share that layer's F equally (provisional branch resolution, not measured contact timing).
-- **Elasticity:** branch-local elastic descendants attenuate each actual predecessor's provisional Q, and each node attenuates its OWN outgoing F. After F-to-Q issuance, a node's own E absorbs its local Q once in `DamageModel`; this is separate from its effect on a different node. Same-episode prior persisted damage is never retroactively changed. Sable motion/solver is not modified.
-- Per-owner six-neighbor World and Plot verification uses `OwnerResolver` loaded block-state and Sable Plot access; same credit never visits one cell twice, and the 128-node owner budget is fail-closed. Unknown/unloaded/bounded branches must not masquerade as a terminal. Logs: `[PDD-F-LEDGER]`, `[PDD-F-PROPAGATION]`.
-- **Still 0.4.0 preview-only.** No World or Plot block destruction, structural splits or permanent physical deformation (`worldMutation=OFF`), per the IDS 1.0.6 version gates. Distinct 0.4.0colFix2 preview checkpoint, preserving older file names.
-- **Native direction:** actual 15-double `clearCollisions` manifold normals are retained. WORLD (-1) is in the fixed-collider/world frame; Plot uses Sable's effect owner pose and owner-local frame; opposite normals, owner identity, multiple records and all captured pre-step pose orientations must agree. Native effect direction is valid for F-path planning, NOT proof of an exact solver impulse/contact substep or authorization to mutate blocks. Missing evidence uses a three-layer maximum (depth 0..2) bounded isotropic fallback, never a fabricated normal.
-- **Finite branching:** each parent sends F only to its own child targets; joins aggregate F once, siblings cannot damp each other, unknown/chunk/cap/depth limit cannot receive a manufactured terminal remainder. Verified path endpoints receive all remaining F. The affected owner-local graph is limited to 128 nodes, an inward 0.6-slope native normal cone, a native depth of 9, plus Q-floor early retirement. These are gameplay/CPU policy caps, not Newtonian propagation laws.
-- **Elastic block survivability:** the explicit slime profile has `T >= 64` while retaining its existing H/D/E (0/80/100 at default hardness). Its own elastic local Q absorption is calculated exactly once; high elasticity does not grant invulnerability. Material overrides remain authoritative.
-- Existing 0.4.0scaleFix2 calibration, source-gate and original Sable callback contract are preserved. See `docs/PDD-0.4.0-F-First-Impact-Propagation-Design-v0.1.md`, `docs/PDD-0.4.0-F-First-Impact-Propagation-Design-v0.2.md`, and `docs/verification/0.4.0colFix2.md`.
-
-## Previous release: 0.4.0scaleFix2 (PDD IDS 1.0.6, experimental calibration)
-
-Based on GitHub main `a7b3c1b3854bb6a2d6e7bad1a6d0b5d600b26094` (latest verified at packaging). Source tree matches the main `src` / `docs` / `scripts` Git trees. **World/Plot mutation remains OFF.** This release does not make real blocks break.
-
-- Retains `Q = min(maxGroupQ, forceGain * max(0, F - forceFloor))`, 0.161 force gain, 65,536 group cap, and 2.6 default damage gain. This is **not measured Sable force**.
-- Rejects conflicting block fingerprints for a single owner-local cell in an impact Credit; duplicates with identical fingerprints remain one target.
-- Snapshot `-Dpdd.material.damageGain=<positive finite number>` once per bridge instance, invalid property falls back to 2.6; original `-Dpdd.realfix.forceGain`, `-Dpdd.realfix.maxGroupQ` knobs remain. Force gain is limited to [0, 1] by IDS P-16.
-- Previous scaleFix2 isolated non-authoritative preview checkpoints by release and a stable policy/material-cache identity (file name begins `pdd-0.4.0scaleFix2-preview-only-`), leaving old checkpoints untouched. A datapack/policy change during the session skips the old-policy checkpoint save. Current calibration is reported under `[PDD-POLICY]`.
-- Corrects stale JUnit expectations from preceding calibration changes. The earlier moreFix implementation and reports remain as historical evidence.
-- Does not alter the Sable callback, collision episode/owner proofs, per-side 32 target cap, runtime R2 256 shape-read bound, or Apply/Actions contracts.
-
-Details: `docs/verification/0.4.0scaleFix2.md`.
-
-## Historical release 0.4.0moreFix (IDS 1.0.6)
-
-This is the **read-only R2 audit improvement** based on the verified 0.4.0Fix ZIP; the newest GitHub main SHA could not be verified from this environment. The 0.4.0Fix basis was on the actual GitHub `main` SHA `34739bb665d7c0ce5da2d2b0e6f9aae0abae1bb5` (2026-11-03T14:45:13Z). It preserves the full 0.4.0 codebase and unchanged Sable collision/FSM/Q behavior. See [0.4.0Fix verification, source, and two-session in-game protocol](docs/verification/0.4.0Fix.md).
-
-**New**: Read-only cumulative 1/256 fixed-damage shadow state per stable owner/coordinate/fingerprint; bounded credit-ID dedup; runtime SparseStateCodec CRC roundtrip and deliberate corruption rejection; optional restart checkpoint at `pdd-0.4.0Fix-preview-only.bin` in the world folder (diagnostic only, enabled by default, disable via JVM `-Dpdd.preview.checkpoint=false`); per-credit Plot/Plot owner-local native normal evidence gated by pre-substep agreement, owner epochs and grid axis. Unknown World normal remains UNKNOWN. Checkpoint contents are **not authoritative world damage** and are never applied to blocks. No actual damage, stress, plastic deformation, or world mutation in this release.
-
-0.4.0moreFix changes neither the native 100-record cap nor Q/ledger/rearm safety policies. Gradle/JUnit/Actions and in-game testing still require user execution.
-
----
-
-## Previous release: PDD 0.4.0 (historical notes, IDS 1.0.6)
-
-**GitHub baseline:** `main` `bb064c58381bac8bafae3da36fd591567acc3fb2` (2026-11-03). Original 134 Apply-eligible source files verified against their Git blob SHA values. Read the [0.4.0 implementation and test report](docs/verification/0.4.0.md) for exact feature gates.
-
-**Complete 0.4.0 planning core:** H/T/D/E material profiles and immutable generation snapshots; explicit vanilla anchors and priority overrides, registered-block/recipe and relevant BlockState inference; hardness/elasticity curves, first-pass Direct/Plastic/Stress budget accounting, fixed-point 1/256 damage remainder; verified Credit-to-target material planning; optional verified directional evidence; sparse owner-local key, value and CRC-checked versioned serializer. The original duperFix Q/owner/rearm FSM and Sable post-effect observer stay unchanged.
-
-**No block mutation:** 0.4.0 calculates and logs `PREVIEW_ONLY` plans, never actual damage, stress propagation, deformation, destruction, client visuals, drops or storage writes. These are explicitly later-version features under IDS 1.0.6. The repo's existing protected Apply/Actions files remain in GitHub and are not included in the Apply ZIP.
-
-**Example overrides:** [pdd-materials.example.json](pdd-materials.example.json) defines H, T, D, E, `yieldThreshold`, exact per-BlockState selectors, and optional `unbreakable=true`. Place the user copy under `config/pdd-materials.json`. Disabled Plastic/Stress branches are accounted as unused, not added to Direct.
-
----
-
-## Historical release 0.3.1duperFix (IDS 1.0.6)
-
-**GitHub source:** `main` at `9563c2c16052a8b42e29b62bc5067bfacb09e085`, November 3, 2026. Source is the existing superFix full Apply-eligible ZIP, with Java/Gradle and IDS blob hashes matched to GitHub main. Do not infer source from a JAR.
-
-**Root fixes:** pre-contact Plot/Plot tracking expiry now uses `lastProcessed` instead of `lastSeen=-1`, preserving proven separation evidence for contact after 600+ ticks. Runtime developer-provisional `forceGain` is now `0.001` instead of `0.25`, preserving the Q=64 cap and linear first-approved force model but avoiding early saturation for observed forces ~3,849–52,421. Original `GameImpactCredit` FSM and `ContactCreditLedger` are unchanged except revision identifiers. No new physics API call or dependency.
-
-**Runtime:** MC Java 1.21.1, NeoForge 21.1.x, Create 6.0.10, Create Aeronautics 1.3.2, Sable 2.0.6. Read-only: `worldMutation=OFF`.
-
-**Design:** [IDS 1.0.6](docs/PDD-1.0.6-Integrated-Design-Specification.md). The gain change is a version-specific `DEV_PROVISIONAL` policy revision under §23; previous defaults remain visible in historical docs and explicit legacy tests. [DuperFix report and two-session game test](docs/verification/0.3.1duperFix.md); [superFix history](docs/verification/0.3.1superFix.md).
+**Verification and two-pass in-game protocol:** [`docs/verification/0.4.0duperFix.md`](docs/verification/0.4.0duperFix.md). Actual Gradle/JUnit, Actions, and game results are not implied by stand-alone Java checks.
 
 ## 0.3.1QFix changes
 

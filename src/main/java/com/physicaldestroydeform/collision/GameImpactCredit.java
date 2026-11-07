@@ -15,7 +15,7 @@ import java.util.Objects;
  * No Minecraft/Sable mutable object crosses this boundary.</p>
  */
 public final class GameImpactCredit {
-    public static final String POLICY_REVISION = "PDD-IDS-1.0.6/0.4.0colFix3";
+    public static final String POLICY_REVISION = "PDD-IDS-1.0.7/0.4.0duperFix";
 
     public record Settings(double forceEnter, double forceFloor, double forceGain,
                            double maxGroupQ, int separatedFrames, int maxEntries,
@@ -274,7 +274,9 @@ public final class GameImpactCredit {
         if (frame.targetA() == null && frame.targetB() == null)
             return decision(s,Reason.TARGET_UNVERIFIED,frame,0);
         final double q=config.candidate(frame.forcePeak());
-        if (q <= 0) return decision(s,Reason.BELOW_THRESHOLD,frame,0);
+        // A sub-unit source Q is not a credit and must not consume the armed
+        // episode. This is separate from the old G(F) forceFloor offset.
+        if (q < 1.0) return decision(s,Reason.BELOW_THRESHOLD,frame,0);
         s.pendingApproach=false; // one-credit, including the burst's following frames
         s.episode++;
         return decision(s,Reason.APPROVED,frame,q);
