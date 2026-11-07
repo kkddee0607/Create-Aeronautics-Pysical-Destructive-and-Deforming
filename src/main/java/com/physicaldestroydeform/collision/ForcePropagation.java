@@ -279,6 +279,10 @@ public final class ForcePropagation {
         List<Flow> layer=new ArrayList<>(seen.values());
         layer.sort(Comparator.comparing(n->n.target.localBlock()));
         for(var node:layer)node.incoming=inputF/layer.size();
+        // Parse source coordinates ONCE. The cone is queried up to six times
+        // for every visited node, and localBlock() is a string identifier.
+        var seedCells=new ArrayList<int[]>(layer.size());
+        for(var node:layer)seedCells.add(new int[]{node.x,node.y,node.z});
         var all=new ArrayList<Flow>();
         double assigned=0,dampedF=0,unresolved=0,discardF=0,terminalF=0;
         int terminalNodes=0,maxDepth=0,paidEdges=0,mergedNodes=0,blockedNodes=0;
@@ -300,7 +304,7 @@ public final class ForcePropagation {
                         x=Math.addExact(node.x,step[0]);y=Math.addExact(node.y,step[1]);
                         z=Math.addExact(node.z,step[2]);
                     }catch(ArithmeticException overflow){blocked.put(node,"COORDINATE_OVERFLOW");continue;}
-                    if(!withinField(direction,seeds,x,y,z)||!forwardStep(direction,step))continue;
+                    if(!forwardStep(direction,step)||!withinField(direction,seedCells,x,y,z))continue;
                     Probe proof=Objects.requireNonNull(neighbors.read(node.target,x,y,z),"missing neighbor proof");
                     if(proof.status()==ProbeStatus.UNKNOWN){blocked.put(node,"UNKNOWN_NEIGHBOR");unknown=true;continue;}
                     if(proof.status()!=ProbeStatus.PRESENT)continue;
@@ -486,14 +490,12 @@ public final class ForcePropagation {
      * the validated normal refer to the SAME owner-local collision frame.
      * Position offsets are in block cells; no translation is applied to a
      * direction vector. Graph adjacency is always checked separately. */
-    private static boolean withinField(Orientation direction,List<GameImpactCredit.Target> seeds,
+    private static boolean withinField(Orientation direction,List<int[]> seeds,
                                        int x,int y,int z) {
         if(!direction.verified())return true;
         FrameMath.Vec n=direction.inward();
-        for(var seed:seeds) {
-            var p=seed.localBlock().split(",",-1);
-            double dx=(double)x-Integer.parseInt(p[0]),dy=(double)y-Integer.parseInt(p[1]),
-                    dz=(double)z-Integer.parseInt(p[2]);
+        for(var p:seeds) {
+            double dx=(double)x-p[0],dy=(double)y-p[1],dz=(double)z-p[2];
             double parallel=dx*n.x()+dy*n.y()+dz*n.z();
             if(parallel < -GEOMETRY_EPS)continue;
             double radial2=Math.max(0,dx*dx+dy*dy+dz*dz-parallel*parallel);

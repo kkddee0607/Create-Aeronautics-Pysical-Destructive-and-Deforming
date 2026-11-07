@@ -121,4 +121,46 @@ class NativeEffectDirectionTest {
         assertEquals("AVERAGE_NORMAL_DEGENERATE",witness.reason());
         assertTrue(witness.owners().isEmpty());
     }
+    @Test void nativeHundredRecordCapPreservesVerifiedSampleMeanWithoutPretendingCompleteness() {
+        var samples=new java.util.ArrayList<NativeCollisionTelemetry.Contact>();
+        var pose=frame(0,1);
+        for(int i=0;i<100;i++) {
+            var n=i<50?contact(7,0,1,0,0,-1,0,pose):contact(7,1,0,0,-1,0,0,pose);
+            samples.add(new NativeCollisionTelemetry.Contact(n.idA(),n.idB(),n.rawImpactScalar(),
+                    n.ax(),n.ay(),n.az(),n.bx(),n.by(),n.bz(),
+                    n.contactAX(),n.contactAY(),n.contactAZ(),
+                    n.contactBX(),n.contactBY(),n.contactBZ(),n.dimension(),
+                    n.serverTick(),n.frameA(),n.frameB(),true));
+        }
+        var sampled=NativeEffectDirection.verify(PAIR,samples);
+        assertEquals(2,sampled.owners().size());
+        assertEquals(100,sampled.corroboratedRecords());
+        assertEquals("AVERAGED_OPPOSING_NORMALS_NATIVE_100_CAP_SAMPLED",sampled.reason());
+        assertEquals(Math.sqrt(.5),sampled.meanResultant(),1e-9);
+        assertEquals(-Math.sqrt(.5),sampled.forOwner(WORLD).inward().x(),1e-9);
+        assertEquals(-Math.sqrt(.5),sampled.forOwner(WORLD).inward().y(),1e-9);
+        assertTrue(NativeEffectDirection.gridAxes(sampled,10,41).isEmpty());
+        var pre=new CollisionFrame.Snapshot(41,10,DIM,CollisionFrame.Phase.PRE_SOLVER,
+                List.of(new CollisionFrame.Body(ID,0,15,0,15,pose.pose(),
+                        new FrameMath.Vec(0,0,0),new FrameMath.Vec(0,0,0),
+                        new FrameMath.Vec(0,0,0),true,null,7)),true);
+        assertEquals(100,NativeEffectDirection.verify(PAIR,samples,List.of(pre)).corroboratedRecords());
+        // A saturated poll is NOT permission to accept unverified pose epochs.
+        var shifted=frame(Math.sqrt(.5),Math.sqrt(.5));
+        var other=new CollisionFrame.Snapshot(41,10,DIM,CollisionFrame.Phase.PRE_SOLVER,
+                List.of(new CollisionFrame.Body(ID,0,15,0,15,shifted.pose(),
+                        new FrameMath.Vec(0,0,0),new FrameMath.Vec(0,0,0),
+                        new FrameMath.Vec(0,0,0),true,null,7)),true);
+        assertEquals("PLOT_NORMAL_LINEAR_FRAME_UNVERIFIED",
+                NativeEffectDirection.verify(PAIR,samples,List.of(other)).reason());
+    }
+    @Test void saturatedPollStillRejectsInvalidOpposingNormal() {
+        var sample=contact(7,1,0,0,1,0,0,frame(0,1));
+        var capped=new NativeCollisionTelemetry.Contact(sample.idA(),sample.idB(),sample.rawImpactScalar(),
+                sample.ax(),sample.ay(),sample.az(),sample.bx(),sample.by(),sample.bz(),
+                0,0,0,0,0,0,DIM,10,sample.frameA(),sample.frameB(),true);
+        var result=NativeEffectDirection.verify(PAIR,List.of(capped));
+        assertTrue(result.owners().isEmpty());
+        assertEquals("NATIVE_OPPOSING_NORMALS_DISAGREE",result.reason());
+    }
 }

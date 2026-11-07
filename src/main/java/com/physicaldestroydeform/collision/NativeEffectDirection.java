@@ -44,9 +44,14 @@ public final class NativeEffectDirection {
         var candidates = new HashMap<String,Vec>();
         var witnesses = new HashMap<String,List<Vec>>();
         int inspected=0;
+        boolean capSampled=false;
         for(var c:contacts) {
-            if(c==null || !pair.dimension().equals(c.dimension()) || c.capSaturated())
-                return unknown("BAD_OR_SATURATED_NATIVE_RECORD");
+            if(c==null || !pair.dimension().equals(c.dimension()))
+                return unknown("BAD_NATIVE_RECORD");
+            // Rapier truncates the POST-EFFECT poll at 100 records. It is a
+            // representative observation, not proof of any omitted direction.
+            // Validate every available opposing pair; mark the result sampled.
+            capSampled|=c.capSaturated();
             String a=owner(c.idA(),c.frameA(),c.dimension());
             String b=owner(c.idB(),c.frameB(),c.dimension());
             if(a==null || b==null || a.equals(b)
@@ -94,8 +99,9 @@ public final class NativeEffectDirection {
         for(var entry:candidates.entrySet())
             owners.put(entry.getKey(),new ForcePropagation.Orientation(entry.getValue(),
                     "AVERAGED_SABLE_RAPIER_LOCAL_MANIFOLD_EFFECT_PHASE"));
-        return new Result(owners,inspected>1?"AVERAGED_OPPOSING_NORMALS":"OPPOSING_NORMALS",
-                inspected,minResultant,minAlignment);
+        String evidence=inspected>1?"AVERAGED_OPPOSING_NORMALS":"OPPOSING_NORMALS";
+        if(capSampled)evidence+="_NATIVE_100_CAP_SAMPLED";
+        return new Result(owners,evidence,inspected,minResultant,minAlignment);
     }
     /** Additional production gate: an effect pose must not be promoted to a
      * native world direction when any captured pre-solver substep had an
@@ -106,10 +112,19 @@ public final class NativeEffectDirection {
         Result result=verify(pair,contacts);
         if(result.owners().isEmpty())return result;
         if(preFrames==null || preFrames.isEmpty())return unknown("MISSING_PRE_SOLVER_POSE");
+        // Identical effect owner frames are repeated by every manifold point.
+        // A per-verification cache avoids rescanning all pre-solver bodies for
+        // each of 100 native samples without weakening the all-substep gate.
+        record FrameKey(int id,NativeCollisionTelemetry.OwnerFrame frame,String dimension,long tick) {}
+        Map<FrameKey,Boolean> verified=new HashMap<>();
         for(var c:contacts) {
-            if(c.idA()>=0 && !sameLinearFrameAcrossSubsteps(c.idA(),c.frameA(),c.dimension(),c.serverTick(),preFrames))
+            if(c.idA()>=0 && !verified.computeIfAbsent(
+                    new FrameKey(c.idA(),c.frameA(),c.dimension(),c.serverTick()),
+                    k->sameLinearFrameAcrossSubsteps(k.id(),k.frame(),k.dimension(),k.tick(),preFrames)))
                 return unknown("PLOT_NORMAL_LINEAR_FRAME_UNVERIFIED");
-            if(c.idB()>=0 && !sameLinearFrameAcrossSubsteps(c.idB(),c.frameB(),c.dimension(),c.serverTick(),preFrames))
+            if(c.idB()>=0 && !verified.computeIfAbsent(
+                    new FrameKey(c.idB(),c.frameB(),c.dimension(),c.serverTick()),
+                    k->sameLinearFrameAcrossSubsteps(k.id(),k.frame(),k.dimension(),k.tick(),preFrames)))
                 return unknown("PLOT_NORMAL_LINEAR_FRAME_UNVERIFIED");
         }
         return result;

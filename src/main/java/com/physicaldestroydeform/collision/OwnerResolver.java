@@ -173,10 +173,76 @@ public final class OwnerResolver {
      * physics normal was frozen at the effect epoch; the owner-local lattice
      * must not silently jump to a different Sable storage allocation while
      * traversing its children. Do not reproject later layers from world pose. */
+    private record LocalCell(String owner,int x,int y,int z) {}
+    private record PlotSnapshot(UUID id,BlockPos center) {}
+    /** One approved credit, one immutable-read epoch on the SERVER thread.
+     * Cache the owner/coordinate proof, not an across-tick world view. Each
+     * first visit still executes the complete Sable chunk/plot/shape audit.
+     * No guessed emptiness, no forced chunk load, no cross-owner reuse. */
     public static ForcePropagation.NeighborReader propagationSnapshot(
             MinecraftServer server,String dimension) {
-        Map<String,BlockPos> centers=new HashMap<>();
-        return (from,x,y,z)->propagationNeighbor(server,dimension,from,x,y,z,centers);
+        if(server==null || dimension==null)return (from,x,y,z)->ForcePropagation.Probe.unknown();
+        ServerLevel found=null;
+        for(var level:server.getAllLevels())if(level.dimension().location().toString().equals(dimension)) {
+            found=level;break;
+        }
+        if(found==null)return (from,x,y,z)->ForcePropagation.Probe.unknown();
+        final ServerLevel level=found;
+        final dev.ryanhcode.sable.api.sublevel.ServerSubLevelContainer container;
+        try {container=SubLevelContainer.getContainer(level);}
+        catch(RuntimeException unavailable){return (from,x,y,z)->ForcePropagation.Probe.unknown();}
+        if(container==null)return (from,x,y,z)->ForcePropagation.Probe.unknown();
+        return new ForcePropagation.NeighborReader() {
+            private final Map<String,PlotSnapshot> plots=new HashMap<>();
+            private final Map<LocalCell,ForcePropagation.Probe> cells=new HashMap<>();
+            @Override public ForcePropagation.Probe read(GameImpactCredit.Target from,int x,int y,int z) {
+                if(from==null)return ForcePropagation.Probe.unknown();
+                String owner=from.ownerKey();
+                LocalCell key=new LocalCell(owner,x,y,z);
+                ForcePropagation.Probe cached=cells.get(key);
+                if(cached!=null)return cached;
+                ForcePropagation.Probe value=inspect(owner,x,y,z);
+                cells.put(key,value);
+                return value;
+            }
+            private ForcePropagation.Probe inspect(String owner,int x,int y,int z) {
+                try {
+                    BlockTarget candidate;
+                    if(owner.equals("WORLD:"+dimension)) {
+                        candidate=new BlockTarget(Space.STATIC_WORLD,dimension,null,x,y,z,
+                                true,"SABLE_EFFECT_CONSUMER_ALLOCATED_GRID");
+                    } else if(owner.startsWith("PLOT:")) {
+                        PlotSnapshot plot=plots.get(owner);
+                        if(plot==null) {
+                            UUID id=UUID.fromString(owner.substring(5));
+                            var sub=container.getSubLevel(id);
+                            if(!(sub instanceof ServerSubLevel actual) || actual.isRemoved()
+                                    || actual.getLevel()!=level || !actual.getUniqueId().equals(id)
+                                    || actual.getPlot()==null)return ForcePropagation.Probe.unknown();
+                            plot=new PlotSnapshot(id,actual.getPlot().getCenterBlock());
+                            plots.put(owner,plot);
+                        }
+                        candidate=new BlockTarget(Space.SABLE_PLOT,dimension,plot.id(),
+                                Math.addExact(plot.center().getX(),x),
+                                Math.addExact(plot.center().getY(),y),
+                                Math.addExact(plot.center().getZ(),z),true,
+                                "SABLE_EFFECT_CONSUMER_ALLOCATED_GRID");
+                    } else return ForcePropagation.Probe.unknown();
+                    Check checked=check(level,container,candidate,null);
+                    if(checked.verified()) {
+                        var target=checked.key();
+                        return ForcePropagation.Probe.present(new GameImpactCredit.Target(owner,
+                                target.x()+","+target.y()+","+target.z(),target.fingerprint()));
+                    }
+                    if(checked.status()==Status.BLOCK_UNAVAILABLE && (
+                            checked.detail().equals("BLOCK_MISSING_OR_AIR")
+                            || checked.detail().equals("WORLD_SHAPE_EMPTY")
+                            || checked.detail().equals("PLOT_SHAPE_EMPTY")))
+                        return ForcePropagation.Probe.empty();
+                    return ForcePropagation.Probe.unknown();
+                } catch(RuntimeException unsafe) {return ForcePropagation.Probe.unknown();}
+            }
+        };
     }
     public static ForcePropagation.Probe propagationNeighbor(MinecraftServer server,String dimension,
                                                               GameImpactCredit.Target from,

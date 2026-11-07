@@ -17,7 +17,7 @@ import java.util.Set;
  * F through owner-verified connected cells before deriving target Q.
  */
 public final class ContactCreditLedger {
-    public static final String ALGORITHM_REVISION = "PDD-IDS-1.0.7/0.4.0duperFix";
+    public static final String ALGORITHM_REVISION = "PDD-IDS-1.0.7/0.4.0finalFix";
     // Native contact SEEDS (not propagated neighbors) remain capped at 32/side.
     public static final int MAX_TARGETS_PER_SIDE = 32;
     public static final int MAX_REGIONS = 2 * MAX_TARGETS_PER_SIDE;

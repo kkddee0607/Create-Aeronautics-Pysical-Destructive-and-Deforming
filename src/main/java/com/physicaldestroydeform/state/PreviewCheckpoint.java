@@ -7,7 +7,7 @@ import java.nio.file.StandardCopyOption;
 
 /** Non-authoritative validation artifact. Never used by World/Plot commit or damage gameplay. */
 public final class PreviewCheckpoint {
-    private static final String NAME="pdd-0.4.0duperFix-preview-only.bin";
+    private static final String NAME="pdd-0.4.0finalFix-preview-only.bin";
     private PreviewCheckpoint() {}
     public static boolean enabled(){return Boolean.parseBoolean(
             System.getProperty("pdd.preview.checkpoint","true"));}

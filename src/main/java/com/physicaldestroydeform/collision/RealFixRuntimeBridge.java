@@ -50,7 +50,7 @@ public final class RealFixRuntimeBridge {
             Integer.getInteger("pdd.verf.maxLogPerTick",1024)));
     // Diagnostic-only trace, capped independently from collision evidence logs.
     private static final boolean F_TRACE_ENABLED=Boolean.parseBoolean(
-            System.getProperty("pdd.f.trace.enabled","true"));
+            System.getProperty("pdd.f.trace.enabled","false"));
     // Verification release: a radius-3.5 Plot previously lost 193/289 F
     // receipts. Keep explicit operator caps for high-traffic production use.
     private static final int MAX_F_TRACE_PER_TICK=Math.max(256,Math.min(16384,
@@ -58,9 +58,9 @@ public final class RealFixRuntimeBridge {
     private static final int MAX_F_TRACE_PER_CREDIT=Math.max(256,Math.min(16384,
             Integer.getInteger("pdd.f.trace.maxPerCredit",4096)));
     private static final int MAX_NATIVE_NORMAL_SAMPLES=Math.max(0,Math.min(100,
-            Integer.getInteger("pdd.normal.samples.maxPerCredit",64)));
+            Integer.getInteger("pdd.normal.samples.maxPerCredit",8)));
     private static final int MAX_MATERIAL_LOGS_PER_TICK=Math.max(16,Math.min(4096,
-            Integer.getInteger("pdd.material.trace.maxPerTick",512)));
+            Integer.getInteger("pdd.material.trace.maxPerTick",16)));
     // Verification-build-only instrumentation; never changes credit, owner or Q logic.
     private static final boolean VERF_ENABLED=Boolean.parseBoolean(
             System.getProperty("pdd.verf.enabled","true"));
@@ -233,7 +233,7 @@ public final class RealFixRuntimeBridge {
         var material=MaterialRegistry.snapshot();
         String policy=GameImpactCredit.POLICY_REVISION+"|"+credit.settings()+"|"+
                 DamageModel.ALGORITHM_REVISION+"|"+damageSettings+"|"+
-                ContactCreditLedger.ALGORITHM_REVISION+"|F-FIRST-0.4.0duperFix|"+
+                ContactCreditLedger.ALGORITHM_REVISION+"|F-FIRST-0.4.0finalFix|"+
                 material.algorithmRevision()+"|"+material.definitions().hashCode()+"|"+
                 material.stateSpecific().hashCode();
         return UUID.nameUUIDFromBytes(policy.getBytes(StandardCharsets.UTF_8)).toString();
@@ -328,10 +328,18 @@ public final class RealFixRuntimeBridge {
                 // native records and advance FSM, but skip expensive shape I/O.
                 boolean auditEligible=beforeAudit.phase()!=Phase.ACTIVE
                         || beforeAudit.hasUnspentAuthorization();
+                long r2Start=auditEligible?System.nanoTime():0;
                 var massSafe=auditEligible?massEpochs.validate(stamp.dimension,stamp.tick,records):null;
                 var regions=auditEligible?SableContactRegions.audit(server,stamp.dimension,pair,massSafe.contacts())
                         :SableContactRegions.skippedDuplicate();
-                if(auditEligible){r2Audits++;r2ShapeChecks+=regions.checksA()+regions.checksB();}
+                long r2Nanos=auditEligible?System.nanoTime()-r2Start:0;
+                if(auditEligible){
+                    r2Audits++;r2ShapeChecks+=regions.checksA()+regions.checksB();
+                    log.info("[PDD-R2-PERF] pair={}/{} phase=AUTHORIZED_AUDIT nanos={} records={} " +
+                                    "checkedA={} checkedB={} regions={} status={} mutation=OFF",
+                            pair.a().stableKey(),pair.b().stableKey(),r2Nanos,records.size(),
+                            regions.checksA(),regions.checksB(),regions.regions().size(),regions.status());
+                }
                 else r2SkippedDuplicate++;
                 boolean saturatedPoll=records.stream().anyMatch(NativeCollisionTelemetry.Contact::capSaturated);
                 Target a=regions.verified()?regions.firstA():null;
@@ -508,10 +516,12 @@ public final class RealFixRuntimeBridge {
                     // Sable 2.0.6 exports opposing local manifold normals per
                     // native record. Validate each pair, then average all
                     // witnesses in the SAME owner-local effect frame.
-                    var nativeNormal=(!result.credited() || saturatedPoll || massSafe==null
+                    long normalStart=System.nanoTime();
+                    var nativeNormal=(!result.credited() || massSafe==null
                             || massSafe.maskedFrames()>0)
                             ?NativeEffectDirection.unknown("NATIVE_FRAME_OR_EFFECT_UNVERIFIED")
                             :NativeEffectDirection.verify(pair,massSafe.contacts(),pre);
+                    long normalNanos=System.nanoTime()-normalStart;
                     // Trace only accepted credits. The ledger buffers edge receipts
                     // transiently, emits after validation and never persists them.
                     final int[] traceCounts={0,0,0,0,0}; // edges, receipts, emitted, nodes, cutoffs
@@ -573,9 +583,14 @@ public final class RealFixRuntimeBridge {
                     if(granted) {
                         log.info("[PDD-F-PERF] credit={} planNanos={} ownerCount=2 " +
                                         "maxNodesPerSide={} eventF={} eventQCap={} " +
-                                        "normalMode={} mutation=OFF",
+                                        "normalMode={} traceEnabled={} includesTraceOutput={} mutation=OFF",
                                 grant.id(),propagationNanos,ForcePropagation.MAX_NODES_PER_SIDE,
-                                result.peakForce(),result.issuedQ(),nativeNormal.reason());
+                                result.peakForce(),result.issuedQ(),nativeNormal.reason(),
+                                F_TRACE_ENABLED,F_TRACE_ENABLED);
+                        log.info("[PDD-NORMAL-PERF] credit={} verifyNanos={} availableRecords={} " +
+                                        "capSampled={} verified={} mutation=OFF",
+                                grant.id(),normalNanos,massSafe==null?0:massSafe.contacts().size(),
+                                saturatedPoll,nativeNormal.owners().size()==2);
                         if(F_TRACE_ENABLED)log.info("[PDD-F-TRACE] credit={} edges={} receipts={} " +
                                         "nodes={} cutoffs={} " +
                                         "emitted={} suppressed={} maxPerTick={} maxPerCredit={} " +
@@ -585,11 +600,12 @@ public final class RealFixRuntimeBridge {
                                 MAX_F_TRACE_PER_TICK,MAX_F_TRACE_PER_CREDIT);
                         if(VERF_ENABLED)log.info("[PDD-NATIVE-NORMAL] credit={} status={} " +
                                         "reason={} records={} meanResultant={} minimumAlignment={} " +
-                                        "meanPolicy=UNIT_NORMAL_EQUAL_RECORD_WEIGHT ownerVectors={} effectPhase=true " +
+                                        "meanPolicy=UNIT_NORMAL_EQUAL_RECORD_WEIGHT ownerVectors={} nativeCapSampled={} effectPhase=true " +
                                         "exactSolverContact=false deformationAuthorized=false mutation=OFF",
                                 grant.id(),nativeNormal.owners().size()==2?"CORROBORATED":"UNKNOWN",
                                 nativeNormal.reason(),nativeNormal.corroboratedRecords(),
-                                nativeNormal.meanResultant(),nativeNormal.minimumAlignment(),nativeNormal.owners());
+                                nativeNormal.meanResultant(),nativeNormal.minimumAlignment(),nativeNormal.owners(),
+                                saturatedPoll);
                         if(VERF_ENABLED&&massSafe!=null) {
                             int shown=0;
                             for(var sample:massSafe.contacts()) {
@@ -670,10 +686,7 @@ public final class RealFixRuntimeBridge {
                         // Plot/Plot all-substep gate must prove orientation consistency;
                         // Plot/World is intentionally UNKNOWN until World normal frame is verified.
                         NativePlotDirection.Prepared.DirectionResult witness;
-                        if(saturatedPoll) {
-                            witness=new NativePlotDirection.Prepared.DirectionResult(
-                                    Map.of(),"NATIVE_EFFECT_100_RECORD_CAP",0);
-                        } else if(massSafe==null || massSafe.maskedFrames()>0
+                        if(massSafe==null || massSafe.maskedFrames()>0
                                 || massSafe.contacts().stream().anyMatch(c->
                                 (c.idA()>=0&&c.frameA()==null) || (c.idB()>=0&&c.frameB()==null))) {
                             witness=new NativePlotDirection.Prepared.DirectionResult(
@@ -691,23 +704,37 @@ public final class RealFixRuntimeBridge {
                                     .min().orElse(-1);
                             var axes=NativeEffectDirection.gridAxes(nativeNormal,stamp.tick,earliest);
                             witness=new NativePlotDirection.Prepared.DirectionResult(axes,
-                                    axes.isEmpty()?"NATIVE_VECTOR_NONAXIAL":nativeNormal.reason(),
+                                    axes.isEmpty()?"F_VECTOR_VALID_GRID_AXIS_NOT_APPLICABLE":nativeNormal.reason(),
                                     nativeNormal.corroboratedRecords());
                         } else witness=new NativePlotDirection.Prepared.DirectionResult(
                                 Map.of(),nativeNormal.reason(),0);
-                        if(witness.owners().isEmpty())directionUnknown++;
-                        else directionApproved++;
+                        // An oblique averaged vector is VALID for F; absence of
+                        // a signed grid axis is not a failure of that evidence.
+                        // Future voxel movement still requires separate exact
+                        // axis/contact proof; do NOT round a diagonal normal.
+                        boolean fVectorValid=nativeNormal.owners().size()==2;
+                        if(fVectorValid)directionApproved++;
+                        else directionUnknown++;
                         if(VERF_ENABLED)log.info("[PDD-DIRECTION] credit={} status={} reason={} " +
+                                "fVectorStatus={} fVectorReason={} gridAxisStatus={} " +
                                 "auditedPreFrames={} witnesses={} exactContact=false " +
                                 "deformationAuthorized=false mutation=OFF",
-                                grant.id(),witness.owners().isEmpty()?"UNKNOWN":"OWNER_AXIS_CORROBORATED",
-                                witness.reason(),witness.auditedFrames(),witness.owners());
+                                grant.id(),fVectorValid?"F_VECTOR_CORROBORATED":"UNKNOWN",
+                                witness.reason(),fVectorValid?"CORROBORATED":"UNKNOWN",nativeNormal.reason(),
+                                witness.owners().isEmpty()?"NONAXIAL_OR_UNVERIFIED":"AXIS_CORROBORATED",
+                                witness.auditedFrames(),witness.owners());
                         try {
                             var materials=materialSnapshot;
+                            long materialStart=System.nanoTime();
                             var previewResult=preview.record(grant,materials.generation(),now,
                                     materials::resolveFingerprint,damageSettings,
                                     key->java.util.Optional.ofNullable(witness.owners().get(
                                             key.ownerSpace()+":"+key.ownerId())));
+                            long materialNanos=System.nanoTime()-materialStart;
+                            log.info("[PDD-MATERIAL-PERF] credit={} previewNanos={} targetsA={} " +
+                                            "targetsB={} status={} mutation=OFF",
+                                    grant.id(),materialNanos,grant.a().size(),grant.b().size(),
+                                    previewResult.status());
                             if(previewResult.status()!=PreviewDamageLedger.ResultStatus.ACCEPTED) {
                                 previewFailures++;
                                 log.warn("[PDD-MATERIAL-PLAN] credit={} status={} " +
@@ -861,7 +888,7 @@ public final class RealFixRuntimeBridge {
             // had a contact. Expiring on lastSeen (-1) discards its verified
             // clearance/AABB evidence while GameImpactCredit stays ARMED.
             tracked.entrySet().removeIf(e->trackedIdleExpired(now,e.getValue().lastProcessed));
-            log.info("[PDD-0.4.0duperFix] phase=SUMMARY observed={} credited={} zero={} ownerMissing={} targetMissing={} ambiguous={} trackedPairs={} r2Verified={} r2Rejected={} r3Verified={} prearmed={} r1Fallback={} regionGroups={} regionCount={} regionTooBroad={} ledgerRejected={} activeCredits={} observerErrors={} nativeDropped={} nativeMalformed={} nativeCapSaturatedPolls={} r2Audits={} r2SkippedDuplicate={} r2ActualShapeChecks={} callbackDropped={} preHistoryDropped={} generation=IDS-1.0.7 mutation=OFF",
+            log.info("[PDD-0.4.0finalFix] phase=SUMMARY observed={} credited={} zero={} ownerMissing={} targetMissing={} ambiguous={} trackedPairs={} r2Verified={} r2Rejected={} r3Verified={} prearmed={} r1Fallback={} regionGroups={} regionCount={} regionTooBroad={} ledgerRejected={} activeCredits={} observerErrors={} nativeDropped={} nativeMalformed={} nativeCapSaturatedPolls={} r2Audits={} r2SkippedDuplicate={} r2ActualShapeChecks={} callbackDropped={} preHistoryDropped={} generation=IDS-1.0.7 mutation=OFF",
                     observed,credited,zero,missingOwner,missingTarget,ambiguousOwners,tracked.size(),
                     r2Verified,r2Rejected,r3Verified,prearmed,r1Fallback,
                     multiGroupCredits,multiRegions,multiTooBroad,ledgerRejected,regionLedger.size(),
