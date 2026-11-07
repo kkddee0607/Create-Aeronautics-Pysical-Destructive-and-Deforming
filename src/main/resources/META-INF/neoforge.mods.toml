@@ -4,10 +4,10 @@ license="MIT"
 
 [[mods]]
 modId="physical_destroy_deform"
-version="0.4.0finalFix"
+version="0.4.1"
 displayName="Create Aeronautics: Physical Destruction and Deforming"
 authors="PDD contributors"
-description='''PDD 0.4.0finalFix: F-first World and Plot impact propagation with elastic attenuation, unique block visits, bounded terminal transfer and preview-only damage planning. World mutation OFF.'''
+description='''PDD 0.4.1: F-first World and Plot impact propagation with elastic attenuation, unique block visits, bounded terminal transfer and preview-only damage planning. World static mutation enabled with bounded WAL receipts; Plot mutation deferred.'''
 
 [[mixins]]
 config="pdd.mixins.json"

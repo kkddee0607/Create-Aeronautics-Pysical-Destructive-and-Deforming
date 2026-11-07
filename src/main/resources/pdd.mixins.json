@@ -6,7 +6,8 @@
   "mixins": [
     "RapierCollisionTelemetryMixin",
     "SableUniversalCallbackMixin",
-    "SableStepSnapshotMixin"
+    "SableStepSnapshotMixin",
+    "WorldBlockReplacementMixin"
   ],
   "injectors": {
     "defaultRequire": 1

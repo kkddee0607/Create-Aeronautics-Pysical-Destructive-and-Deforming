@@ -4,6 +4,7 @@ import com.physicaldestroydeform.diagnostics.NativeCollisionTelemetry;
 import com.physicaldestroydeform.material.MaterialPlanner;
 import com.physicaldestroydeform.material.MaterialRegistry;
 import com.physicaldestroydeform.material.PreviewDamageLedger;
+import com.physicaldestroydeform.world.WorldCommitService;
 import com.physicaldestroydeform.state.PreviewCheckpoint;
 import com.physicaldestroydeform.DamageModel;
 import com.physicaldestroydeform.diagnostics.RawObservation;
@@ -73,6 +74,9 @@ public final class RealFixRuntimeBridge {
     private final WorldClearanceVerifier worldClearance=new WorldClearanceVerifier();
     private final ForceCalibration forceCalibration=new ForceCalibration();
     private final PreviewDamageLedger preview=new PreviewDamageLedger();
+    private WorldCommitService worldCommit;
+    /** Side-effect commit is intentionally outside physics/native callback. */
+    public void setWorldCommitService(WorldCommitService next){this.worldCommit=next;}
     private long directionApproved,directionUnknown,previewFailures;
     private boolean previewCheckpointWritable=true;
     private String previewPolicyId;
@@ -161,6 +165,7 @@ public final class RealFixRuntimeBridge {
         materialPlanned=materialMissing=materialRejected=0;
         directionApproved=directionUnknown=previewFailures=0;
         preview.clear();
+        worldCommit=null;
         previewCheckpointWritable=true;
         previewPolicyId=null;
     }
@@ -787,6 +792,13 @@ public final class RealFixRuntimeBridge {
                             materialRejected++;
                             log.warn("[PDD-MATERIAL-PLAN] reason=PLAN_REJECTED " +
                                     "credit={} Q={} applied=false mutation=OFF",grant.id(),grant.issuedQ(),invalidMaterialPlan);
+                        }
+                        if(worldCommit!=null) {
+                            try {worldCommit.offer(grant,materialSnapshot);}
+                            catch(RuntimeException commitError) {
+                                log.error("[PDD-COMMIT] phase=OFFER status=ABORTED " +
+                                        "credit={} reason=UNEXPECTED_ADAPTER_ERROR",grant.id(),commitError);
+                            }
                         }
                     } else {
                         zero++;
