@@ -82,7 +82,8 @@ public final class WorldCommitCore {
         if(!world.isServerThread())throw new IllegalStateException("server thread required");
         if(ioFault)return List.of(new Decision(Outcome.QUARANTINED,"IO_FAULT",null));
         var results=new ArrayList<Decision>();
-        int attemptedBreaks=0,operations=0,limit=Math.min(MAX_QUEUED,Math.max(128,breakCapPerTick*8));
+        // One WAL fsync per receipt: bound the entire operation batch, not only breaks.
+        int attemptedBreaks=0,operations=0,limit=Math.min(MAX_QUEUED,Math.max(64,breakCapPerTick));
         while(!queue.isEmpty() && operations++<limit) {
             Intent intent=queue.removeFirst();queuedIds.remove(intent.applyId());
             if(tick>intent.eventTick() && tick-intent.eventTick()>MAX_DEFER_TICKS){

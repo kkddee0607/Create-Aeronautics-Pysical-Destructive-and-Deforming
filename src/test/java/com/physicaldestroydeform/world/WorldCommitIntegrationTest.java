@@ -113,6 +113,29 @@ final class WorldCommitIntegrationTest {
         assertTrue(engine.tick(new FakeWorld(),202).stream()
                 .anyMatch(x->x.result()==WorldCommitCore.Outcome.APPLIED_BREAK));
     }
+    @Test void damageOnlyDoesNotRequestBreakAuthorizationAndBreakVetoIsFinal() throws Exception {
+        var journal=new WorldReceiptJournal(Files.createTempDirectory("pdd-break-event-").resolve("world.wal"));
+        var engine=new WorldCommitCore(journal,DamageModel.Settings.defaults(),64);
+        var world=new FakeWorld() {
+            int breakPermissionCalls;
+            @Override public WorldCommitCore.Permission canBreak(SparseStateKey key,
+                    WorldCommitCore.Observation expected) {
+                breakPermissionCalls++;
+                return WorldCommitCore.Permission.DENY; // simulate canceled BreakEvent
+            }
+        };
+        var key=at(49);
+        engine.submit(intent("damage-only",key,0.75));
+        assertEquals(WorldCommitCore.Outcome.APPLIED_DAMAGE,engine.tick(world,201).getFirst().result());
+        assertEquals(0,world.breakPermissionCalls,"damage-only plan must not emit BreakEvent");
+        assertNotNull(journal.get(key));
+        engine.submit(intent("break-veto",key,2000));
+        assertEquals(WorldCommitCore.Outcome.ABORTED,engine.tick(world,202).getFirst().result());
+        assertNotNull(journal.get(key),"failed break must not clear already stored damage");
+        assertEquals(0,world.breaks);
+        assertEquals(0,world.drops);
+        assertEquals(1,world.breakPermissionCalls,"break authorization must be evaluated once");
+    }
     @Test void baselineStandaloneRegressionsRemainApplicable() throws Exception {
         WorldCommitCoreSelfTest.main(new String[0]);
         WorldIntentMapperSelfTest.main(new String[0]);

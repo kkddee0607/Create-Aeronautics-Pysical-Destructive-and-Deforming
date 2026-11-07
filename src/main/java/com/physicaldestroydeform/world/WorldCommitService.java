@@ -31,6 +31,7 @@ public final class WorldCommitService {
     private final NeoForgeWorldGateway gateway;
     private final Map<Cell,Long> revisions=new HashMap<>();
     private final Set<Cell> watched=new HashSet<>(), quarantined=new HashSet<>();
+    private final Map<Cell,Integer> pendingCells=new HashMap<>();
     private final Deque<WorldReceiptJournal.Receipt> unresolved=new ArrayDeque<>();
     private Cell ownBreak;
     private boolean fault;
@@ -88,7 +89,10 @@ public final class WorldCommitService {
             for(var intent:projected.world()) {
                 var status=core.submit(intent);
                 if(status.result()==WorldCommitCore.Outcome.DEFERRED) {
-                    watched.add(new Cell(intent.key()));accepted++;count++;
+                    Cell cell=new Cell(intent.key());
+                    watched.add(cell);
+                    pendingCells.merge(cell,1,Integer::sum);
+                    accepted++;count++;
                 } else {
                     rejected++;
                     log.warn("[PDD-COMMIT] phase=QUEUE id={} result={} reason={} key={}",
@@ -133,6 +137,8 @@ public final class WorldCommitService {
         gateway.clearPermissionCache();
         int shown=0;
         for(var result:core.tick(gateway,tick)){
+            if(result.result()!=WorldCommitCore.Outcome.DEFERRED && result.receipt()!=null)
+                releasePending(new Cell(result.receipt().key()));
             switch(result.result()) {
                 case APPLIED_DAMAGE -> appliedDamage++;
                 case APPLIED_BREAK -> appliedBreak++;
@@ -154,7 +160,23 @@ public final class WorldCommitService {
                     journal.size(),journal.receiptCount(),journal.bytes(),fault||core.ioFault());
         }
     }
-    /** Must happen BEFORE a watched World block changes, including same-state replacement. */
+    private void releasePending(Cell cell) {
+        Integer pending=pendingCells.get(cell);
+        if(pending!=null) {
+            if(pending<=1)pendingCells.remove(cell);
+            else pendingCells.put(cell,pending-1);
+        }
+        releaseIfIdle(cell);
+    }
+    /** Retain only damaged, pending, or quarantined cells; no lifetime-long watcher leak. */
+    private void releaseIfIdle(Cell cell) {
+        if(!pendingCells.containsKey(cell) && !quarantined.contains(cell)
+                && !journal.hasPosition(cell.dimension(),cell.x(),cell.y(),cell.z())) {
+            watched.remove(cell);
+            revisions.remove(cell);
+        }
+    }
+    /** Only after a successful block state change (RETURN injection). */
     public void beforeBlockReplacement(Level level,BlockPos pos,
                                        net.minecraft.world.level.block.state.BlockState old,
                                        net.minecraft.world.level.block.state.BlockState next){
@@ -168,6 +190,7 @@ public final class WorldCommitService {
             if(previous==Long.MAX_VALUE)throw new IOException("incarnation revision overflow");
             revisions.put(cell,previous+1);
             // Intents already queued will fail their preflight if this block is replaced.
+            releaseIfIdle(cell);
         }catch(IOException unexpected) {
             fault=true;log.error("[PDD-SAVE] phase=BLOCK_CHANGE status=IO_FAULT dimension={} pos={} " +
                     "reason=UNABLE_TO_TOMBSTONE damageMayBeStale=true",cell.dimension(),pos,unexpected);
@@ -181,6 +204,6 @@ public final class WorldCommitService {
                         "mode=SYNCHRONOUS_PER_RECEIPT_FSYNC",
                 fault||core.ioFault()?"IO_FAULT":"CLEAN",core.queued(),journal.size(),
                 journal.receiptCount(),journal.bytes());
-        watched.clear();quarantined.clear();revisions.clear();unresolved.clear();
+        watched.clear();quarantined.clear();revisions.clear();pendingCells.clear();unresolved.clear();
     }
 }

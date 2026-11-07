@@ -4,8 +4,6 @@ import com.mojang.authlib.GameProfile;
 import com.physicaldestroydeform.state.SparseStateKey;
 import dev.ryanhcode.sable.api.sublevel.SubLevelContainer;
 import java.nio.charset.StandardCharsets;
-import java.util.HashMap;
-import java.util.Map;
 import java.util.UUID;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.BuiltInRegistries;
@@ -24,11 +22,10 @@ public final class NeoForgeWorldGateway implements WorldCommitCore.WorldGateway 
             "[PDD] Automation");
     private final MinecraftServer server;
     private final WorldCommitService lifecycle;
-    private final Map<SparseStateKey,WorldCommitCore.Observation> permissionCache=new HashMap<>();
     public NeoForgeWorldGateway(MinecraftServer server,WorldCommitService lifecycle) {
         this.server=server;this.lifecycle=lifecycle;
     }
-    public void clearPermissionCache(){permissionCache.clear();}
+    public void clearPermissionCache(){ /* No shared authorization cache across intents. */ }
     @Override public boolean isServerThread(){return server.isSameThread();}
     private ServerLevel dimension(String dim){
         for(ServerLevel level:server.getAllLevels())
@@ -83,19 +80,29 @@ public final class NeoForgeWorldGateway implements WorldCommitCore.WorldGateway 
             BlockPos pos=new BlockPos(key.x(),key.y(),key.z());
             var player=FakePlayerFactory.get(level,ACTOR);
             if(!level.mayInteract(player,pos) || !player.mayBuild())return WorldCommitCore.Permission.DENY;
-            // Protection plugins that listen to NeoForge block break event can veto this actor.
-            BlockEvent.BreakEvent veto=new BlockEvent.BreakEvent(level,pos,level.getBlockState(pos),player);
-            NeoForge.EVENT_BUS.post(veto);
-            if(veto.isCanceled())return WorldCommitCore.Permission.DENY;
-            permissionCache.put(key,expected);
+            // A damage-only plan does not break a block. Dispatching a BreakEvent
+            // here would trigger unrelated protection, drop and audit handlers even
+            // when the block remains intact. Reserve BreakEvent for real breaks.
             return WorldCommitCore.Permission.ALLOW;
         }catch(RuntimeException|LinkageError unsafe){return WorldCommitCore.Permission.UNKNOWN;}
     }
     @Override public WorldCommitCore.Permission canBreak(SparseStateKey key,WorldCommitCore.Observation expected) {
-        // The same preflight authorization applies to accumulation and final destruction;
-        // don't fire the BreakEvent twice for the same intent.
-        return expected.equals(permissionCache.get(key)) ? WorldCommitCore.Permission.ALLOW
-                : WorldCommitCore.Permission.UNKNOWN;
+        if(!isServerThread())return WorldCommitCore.Permission.UNKNOWN;
+        var observed=readIfLoaded(key);
+        if(!expected.equals(observed) || observed.isAir() || observed.hasBlockEntity()
+                || observed.unsafeMultiblock() || observed.unbreakable())
+            return WorldCommitCore.Permission.DENY;
+        try {
+            ServerLevel level=dimension(key.dimension());
+            BlockPos pos=new BlockPos(key.x(),key.y(),key.z());
+            var player=FakePlayerFactory.get(level,ACTOR);
+            if(!level.mayInteract(player,pos) || !player.mayBuild())return WorldCommitCore.Permission.DENY;
+            // The approved break is committed through ServerLevel.destroyBlock.
+            // A single explicit BreakEvent lets claim/protection mods veto first.
+            BlockEvent.BreakEvent veto=new BlockEvent.BreakEvent(level,pos,level.getBlockState(pos),player);
+            NeoForge.EVENT_BUS.post(veto);
+            return veto.isCanceled()?WorldCommitCore.Permission.DENY:WorldCommitCore.Permission.ALLOW;
+        }catch(RuntimeException|LinkageError unsafe){return WorldCommitCore.Permission.UNKNOWN;}
     }
     @Override public boolean breakVanillaOnce(SparseStateKey key) {
         if(!isServerThread())return false;

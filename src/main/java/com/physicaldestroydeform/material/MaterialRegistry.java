@@ -88,7 +88,7 @@ public final class MaterialRegistry {
     public static synchronized void rebuild(MinecraftServer server,Logger logger) {
         // Stage every source before publishing the new generation. Bad external CSV never
         // replaces a previously valid snapshot with a partial or empty material table.
-        final MaterialSources source;
+        MaterialSources source;
         try {source=readMaterialSources(logger);}
         catch(Exception malformed) {
             logger.error("[PDD-MATERIAL] reason=INVALID_SOURCE snapshotKept={} details={}",

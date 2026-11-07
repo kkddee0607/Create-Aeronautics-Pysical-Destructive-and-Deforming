@@ -12,14 +12,16 @@ import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
-/** Mark tracked damage stale before vanilla/Sable/other mod block replacement. */
+/** Invalidate tracked damage only when a vanilla/Sable/other mod state change succeeds. */
 @Mixin(LevelChunk.class)
 public abstract class WorldBlockReplacementMixin {
     @Shadow @Final Level level;
     @Inject(method="setBlockState(Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/state/BlockState;Z)Lnet/minecraft/world/level/block/state/BlockState;",
-            at=@At("HEAD"))
+            at=@At("RETURN"))
     private void pdd$replace(BlockPos pos,BlockState state,boolean moved,CallbackInfoReturnable<BlockState> ci) {
-        if(level.isClientSide())return;
+        // LevelChunk#setBlockState returns null on a no-op. A canceled/no-op update
+        // must not erase an unrelated persisted damage state.
+        if(level.isClientSide() || ci.getReturnValue()==null)return;
         WorldBlockMutationTracker.onSetBlockState(level,pos,
                 ((LevelChunk)(Object)this).getBlockState(pos),state);
     }

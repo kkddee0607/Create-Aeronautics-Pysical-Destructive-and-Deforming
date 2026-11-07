@@ -102,12 +102,13 @@ public final class PhysicalDestroyDeform {
         acceptanceReport.log(LOGGER);
         LOGGER.info("[PDD-OBS] phase=SUMMARY physicsSnapshots={} nativeRecords={} callbackRecords={} " +
                 "nativeDropped={} callbackDropped={} nativeMalformed={} nativeCapSaturatedPolls={} reason=READ_ONLY " +
-                "worldMutation=OFF",SableFrameCapture.summary(),
+                "worldMutation={}",SableFrameCapture.summary(),
                 NativeCollisionTelemetry.total()-lastNative,
                 SableContactQueue.total()-lastCallbacks,
                 NativeCollisionTelemetry.dropped()-lastNativeDropped,
                 SableContactQueue.dropped()-lastCallbackDropped,
-                NativeCollisionTelemetry.malformed(),NativeCollisionTelemetry.nativeCapSaturatedPolls());
+                NativeCollisionTelemetry.malformed(),NativeCollisionTelemetry.nativeCapSaturatedPolls(),
+                worldCommit==null?"OFF":"WORLD_STATIC_ONLY");
         lastNative=NativeCollisionTelemetry.total();
         lastCallbacks=SableContactQueue.total();
         lastNativeDropped=NativeCollisionTelemetry.dropped();
