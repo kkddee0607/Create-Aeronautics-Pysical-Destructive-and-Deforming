@@ -1,60 +1,139 @@
-# PDD 0.4.0finalFix — Physical Destruction and Deforming
+# PDD 0.4.1 — Physical Destruction and Deforming
 
-## finalFix (0.4.0) — evidence-safe fast path
+**Create Aeronautics: Physical Destruction and Deforming (PDD)** is a Minecraft Java 1.21.1 / NeoForge add-on that consumes Sable collision evidence to calculate block-level impact propagation and damage. Version **0.4.1** extends the read-only 0.4.0finalFix impact pipeline with **server-side damage accumulation and conditional destruction of eligible static World blocks**. Physical Plot block destruction, deformation, and stress mutation are **not enabled** in this release.
 
-**Scope:** production collision selection / F-first per-block distribution / H-T-D-E material and Q sealing are unchanged; `worldMutation=OFF` is still a shadow preview, NOT Minecraft block destruction. Based on GitHub `main` `786c536feab4244ab110a14615c070c0e63c83f5` and IDS 1.0.7.
+> **Release status:** The 0.4.1 implementation is present in source, but a complete 0.4.1 Gradle/JUnit build, GitHub Actions verification, and in-game destruction/drop/restart tests were **not performed** when this source ZIP was assembled. Treat it as an **unverified development release**. Back up the world and test on a disposable server first. See [0.4.1 verification report](docs/PDD-0.4.1-RELEASE-VERIFICATION.md).
 
-1. **Sable native 100-record saturation:** Sable's upstream Rapier post-effect feed truncates each poll to 100 native records. PDD cannot restore omitted records. Instead of rejecting all available opposing normals just because the feed is full, finalFix verifies every *available* contact, averages inward vectors in each owner's fixed local basis, and labels the result `NATIVE_100_CAP_SAMPLED` (not complete-contact evidence). Owner identity, opposite-normal, frame round-trip, and every pre-solver substep orientation gate still apply. An indeterminate mean falls back to non-directional F distribution; target selection and one-credit accounting are untouched.
-2. **Separate F vector from future deformation axes:** A diagonal, corroborated averaged normal is a valid F propagation direction. `PDD-DIRECTION` separately reports `fVectorStatus` and `gridAxisStatus`; failure to obtain a signed single-block axis does **not** invalidate the valid F vector. No fake axis, no exact solver contact claim, no enabled world mutation.
-3. **Per-credit neighbor snapshot:** Reuses resolved server dimension/container, Plot center/UUID and **already audited same-owner block coordinates** only within a single synchronous approved-impact plan. The first read still runs the original Sable ownership, chunk, shape and fingerprint checks. No across-tick cache, no forced chunk load, no owner mixing, no reduced target-validation checks.
-4. **Remove redundant cone parsing and frame scans:** Parsed integer seed positions are reused across graph traversal; identical effect owner frames share one all-substep orientation proof within each direction verification. The original 2,048-node safety bound, per-parent half-F and elasticity, F>=1 / Q>=1 cutoff, terminal F recovery, merge-once, Q caps and ledger remain.
-5. **Production-safe logging defaults:** Aggregate F ledger, Q seal, invariant and performance summaries remain. Full per-edge/per-node trace is opt-in with `-Dpdd.f.trace.enabled=true`; its previous default emitted thousands of INFO lines on the server tick and was included in `planNanos`. Normal samples default to 8 per credit, material target lines to 16 per tick; increase the existing properties for detailed field diagnostics. When trace is enabled, `planNanos` explicitly marks that it includes diagnostic output.
+## Supported environment
 
-For development evidence use `-Dpdd.f.trace.enabled=true -Dpdd.normal.samples.maxPerCredit=100 -Dpdd.material.trace.maxPerTick=512` on a brief reproducible test. For routine server use, leave per-edge trace disabled. **Neither standalone checks nor speculative speed estimates are a guarantee of 20 TPS**; use `PDD-F-PERF` in the actual server to decide whether this optimization is sufficient.
+| Component | Target |
+| --- | --- |
+| Minecraft Java Edition | 1.21.1 |
+| NeoForge | 21.1.228 or compatible 21.1.x |
+| Java | 21 |
+| Create | 6.0.10 (declared range `[6.0.10,6.1)`) |
+| Create Aeronautics (bundled) | 1.3.2 (declared range `[1.3.2,1.4)`) |
+| Sable | 2.0.6 (declared range `[2.0.6,2.1)`) |
 
-**Detailed verification, API notes, and two in-game scenarios:** [`docs/verification/0.4.0finalFix.md`](docs/verification/0.4.0finalFix.md).
+PDD does not replace Sable's physics solver or bundle its runtime. Install the required dependencies and the **built PDD JAR** in the server's `mods/` directory. The source ZIP is for development / GitHub Apply and **must not** be installed as a mod. A matching client mod configuration may be required by the mod loader; complete client-server compatibility remains unverified for this build.
 
-## 0.3.1QFix changes
+## What's new in 0.4.1
 
-1. **Independent Plot/World clearance:** `WorldClearanceVerifier` no longer applies the R4 32-cell target-search limit to the entire Plot AABB. Up to **8,192** expanded footprint cells can be inspected; larger scans fail closed explicitly as `TOO_BROAD`. A dedicated global scan budget of 1,024 cell reads/tick and a maximum of 256 scans/pair/tick bound the incremental work.
-2. **Atomic final proof:** A scan spanning multiple server ticks is `IN_PROGRESS`, not proof. At completion, the entire current footprint is rechecked **on one server tick** with a separate global 8,192-read confirmation budget. A new obstruction, unloaded chunk, unavailable Sable plot container, changed footprint, or unverified status cannot promote a pair to `ARMED`.
-3. **Rearm without duplicate damage:** The existing `GameImpactCredit` FSM still needs two consecutive, independently completed positive separation observations before `ARMED`; Q calculation is unchanged. An intervening unproved World frame resets the separation streak, and an actual Native contact discards pending clearance progress. The original `ContactCreditLedger` remains unchanged and issues one Q per new episode generation only. Owner generation changes invalidate stale evidence.
-4. **Live diagnosis:** `[PDD-WORLD-CLEARANCE]` reports `IN_PROGRESS`, `CLEAR`, `BLOCKED`, `INVALIDATED`, `UNAVAILABLE` or `TOO_BROAD` with scanned/total cells and the exact gate reason. Idle pending scans are pruned; initial precontact work rotates between plots to avoid persistent scan starvation.
-5. **0.3.1realFix retained:** Native 100-record saturation flags, R2 duplicate-audit skip, independent R4 budget, up to 32 verified target blocks per side, Q group limit 64, unchanged Sable original callbacks and no world mutation.
+### Static World block damage and break
 
-**Limit:** Large Plot bounding boxes exceeding 8,192 conservatively expanded World cells cannot be certified by QFix. The atomic verification budget is intentionally finite to protect server tick time. A future Sable-supported spatial index/air-section acceleration can extend coverage without weakening separation proof.
+- Takes **already authorized and sealed** Sable-derived F/Q collision credits from the existing 0.4.0finalFix pipeline; it does not recalculate or redistribute the original F/Q ledger.
+- Projects eligible **static World** shares to individual damage intents. Plot shares remain separate and are not committed to Plot blocks.
+- Accumulates sparse block damage using an unsigned-byte damage value and a **1/256 fixed-point remainder**. The existing hardness/threshold/ductility/elasticity damage model remains the calculation source.
+- When damage reaches the block's destruction threshold, applies a bounded server-thread commit, calls Minecraft's `destroyBlock(pos, true)` **once**, and checks the block state again afterward. No separate `dropResources` call is made.
+- Limits **break attempts to 64 per server tick by default**, configured using `-Dpdd.worldBreakCapPerTick=64` (bounded to 1–4096). Pending work has an explicit bounded queue and deferral timeout; rejected or uncertain operations are not silently classified as successful.
 
-## Preserved contracts
+**Safety scope is deliberately narrow.** The World gateway permits only certain simple, full-cube vanilla blocks (including stone, cobblestone, deepslate, dirt, planks, concrete and related basic materials). It rejects block entities, suspicious/multiblock states, unbreakable blocks and uncertain ownership. It never intentionally loads missing chunks or treats Sable Plot storage as ordinary World blocks. A block's presence in `blocks.csv` **does not** mean PDD can destroy that block.
 
-- **World mutation OFF:** this version does not damage, deform, destroy, split or move Minecraft blocks.
-- Sable native 15-double record, physics API, original collision callback return and ordering, COM/Plot Body-local coordinate conversion, independent witness R2, R3 cross-substep quarantine, R4 diagnostics only, frame-epoch checks.
-- `GameImpactCredit` separation/episode FSM; Q only after positive separation + verified approach; no duplicate credit; force peak, not summed witness forces. Per-group Q maximum 64.
-- Existing JUnit sources, prior design/verification documents, Gradle and GitHub Actions Apply contracts.
+### Safe server commits
 
-## Verification and installation
+The intended execution sequence is:
 
-Code and tests changed; see [0.3.1duperFix verification](docs/verification/0.3.1duperFix.md) for actual execution labels, limits, and test procedure. Previous superFix tests are retained; historical 0.25 gain comparisons use explicit legacy Settings.
+`Issued Credit → World Damage Intent → CAS preflight → permission/event veto → recheck → World commit → World re-read → durable receipt`.
 
-**Apply:** upload exactly one whole-project Apply-eligible root ZIP to GitHub `incoming/`. Existing Apply workflow preserves `.github`, `incoming`, `gradle`, `gradlew`, and `gradlew.bat` from GitHub. Run existing PDD Manual Build and Callback Contract Test Actions, then install only the resulting JAR in `mods/`. Report any failed Actions logs and full `latest.log`.
+The implementation checks server thread, dimension and owner, loaded chunk, block fingerprint and incarnation token, entity/multiblock safety, and permission. A NeoForge `BlockEvent.BreakEvent` is posted using a fake player; canceling the event vetoes damage/break. **Claim mods which do not honor that event may not be compatible**. This is not a guarantee that every external protection system is enforced. A block-replacement Mixin is included; its injection target must be verified against the actual mapped runtime before production use.
 
-## 0.4.0moreFix — bounded R2 shape-audit budget separation
+### Minimal restart persistence
 
-* The existing `collect()` policy and its 32-check unit-test contract remain unchanged. Actual `audit()` now permits **up to 256 distinct inspected owner/cells per side per authorized collision event**; the separate **32 verified damage targets per side** cap is unchanged. Same-owner-cell checks remain cached while each native witness point still undergoes its shape test.
-* This addresses the observed `SIDE_A_INCOMPLETE` at the former 32 unique-cell ceiling without lifting server-thread work limits or falsely crediting uncertain targets. If more than 256 distinct shape cells are necessary or more than 32 targets are identified, that side is still quarantined and receives no Q; the other independently proven side may be PARTIAL. This release is not a guarantee against all large-manifold cap exhaustion.
-* Checkpoint filename intentionally **remains `pdd-0.4.0Fix-preview-only.bin`** for backwards-compatible preview restoration; it is still shadow-only (`mutation=OFF`).
-* B3 balloon item drops are a separate, cause-unknown issue. No other mod's block-breaking behavior was changed.
-* Static and actual game/Gradle verification states are reported in `docs/verification/0.4.0moreFix.md`.
+The World damage / receipt journal is stored at:
 
+`<world-folder>/data/pdd-world-0.4.1.wal`
 
-### Experimental collision-scale calibration (0.4.0scaleFix)
+It uses a versioned, CRC-checked, append-only write-ahead log and synchronous flushes. It stores relevant World damage/remainder and per-ApplyId receipts. The possible receipt states include `PREPARED`, `DEFERRED`, `APPLIED`, `ABORTED` and `PARTIAL_QUARANTINED`. Interrupted work is **reconciled/quarantined**, not blindly replayed as another break. Corrupt or oversized journal data is not silently accepted; unsafe journal initialization disables World mutation. This is **not** the full chunk-sharded storage/migration system planned for 0.5.0, and it does **not** guarantee exactly-once drops through abrupt power loss.
 
-The source default uses `forceGain=0.161`, `maxGroupQ=65536`, and
-`damageGain=2.6` to avoid saturating the total game-Q budget at F=258.
-The game-Q formula, callback contract, and `mutation=OFF` remain unchanged.
-Vanilla grass and reinforced deepslate receive the material-sheet H/T/D/E
-anchors. At hypothetical Sable F=400 (mass 1, 10m/s, 0.025s stop) and
-50% allocation to one grass block, the predicted damage reaches T=32.
-This is **not** a verified Sable runtime force or actual world destruction.
-`-Dpdd.realfix.forceGain` and `-Dpdd.realfix.maxGroupQ` override the
-force defaults. Large Q may saturate per-block stored damage and alter
-balance; test on a separate world before any future mutation-enabled build.
+Important operational limits in source: 200,000 stored damage states; 60,000 receipts; a 96 MiB journal cap; and 8,192 queued intents. The synchronous journal can affect TPS under heavy collision loads. Monitor logs and test before enabling PDD on an existing world. **Do not delete the WAL to resolve startup errors without making a complete world backup.**
+
+### Bundled CSV material data and overrides
+
+Both catalogs are **already bundled** in the mod source:
+
+```text
+src/main/resources/pdd/materials/blocks.csv
+src/main/resources/pdd/materials/items.csv
+```
+
+A successful Gradle build packages these resources into the JAR. **You do not need to put separate CSV files in `mods/` for the built-in dataset.** The supplied dataset includes 1,844 block entries and 2,159 item entries. Values are resolved per registered definition/snapshot, not recomputed for every placed block.
+
+For operator edits, optional external files use these exact paths **relative to the game/server directory**:
+
+```text
+mods/pdd/materials/blocks.csv
+mods/pdd/materials/items.csv
+```
+
+Do **not** place bare `.csv` files directly in `mods/`. Files under `mods/pdd/materials/` are data sources, not mod JARs. The existing JSON override location is:
+
+```text
+config/pdd-materials.json
+```
+
+The implemented block material precedence (lowest to highest) is: **intrinsic / recipe inference → built-in profiles → bundled JAR CSV → JSON override → external user CSV**. External CSV values therefore supersede JSON on overlapping fields. CSVs are checked for format, ranges, duplicate IDs and registration; invalid user entries are logged/filtered or rejected according to the parser and source-loading policy. The material snapshot is published atomically at server startup and during supported data reload handling. The material registry preserves immutable per-generation snapshots for a collision episode.
+
+For blocks the schema has `H` (hardness), `T` (damage threshold), `D` (ductility) and `E` (elasticity); item records include `H`, `D`, `E`. The existing material computation uses the project's `MaterialProperties` and `DamageModel`; CSV `eligibility` is **not an override of the World gateway's safe-block restrictions**. Existing Minecraft intrinsically unbreakable status cannot be overridden by a CSV.
+
+## Preserved 0.4.0finalFix behavior
+
+- Sable original collision callback order, count, return values and native physics handling.
+- Verified collision ownership and coordinate transforms, multiple contact normals, available-sample treatment at the upstream native 100-record cap, and diagonal averaged-normal use for F propagation without inventing a deformation axis.
+- Episode/separation-based deduplication and rearm; F-first propagation, branch/merge limits, terminal recovery, elastic attenuation, Q sealing and F/Q invariants.
+- Prior diagnostic preview storage and existing JUnit test sources. The preview checkpoint is **not** the authoritative 0.4.1 World WAL.
+
+Historical implementation details and previous verification are preserved in [0.4.0finalFix notes](docs/verification/0.4.0finalFix.md), the [F-first propagation design](docs/PDD-0.4.0-F-First-Impact-Propagation-Design-v0.2.md) and the repository's `docs/verification/` history. Historical `worldMutation=OFF` log examples refer to earlier releases or specific diagnostic phases, **not** to the intended static World commit capability in 0.4.1.
+
+## Build and GitHub Apply
+
+Source repository: [Create-Aeronautics-Pysical-Destructive-and-Deforming](https://github.com/kkddee0607/Create-Aeronautics-Pysical-Destructive-and-Deforming).
+
+For an existing GitHub setup, upload **one complete project source ZIP** into `incoming/` and use the existing **Apply PDD ZIP** workflow. It recognizes a Gradle project root containing `build.gradle`, `settings.gradle`, and `src/main/java`. The workflow preserves repository-side `.github/`, `incoming/`, `gradle/`, `gradlew`, and `gradlew.bat`. Never upload a partial source ZIP to this workflow: it mirrors unprotected project paths and can delete files omitted from the archive.
+
+After Apply, run **PDD Manual Build** and **PDD Callback Contract Test**. For local builds, use the repository's existing Gradle wrapper:
+
+```bash
+./gradlew clean test --no-daemon
+./gradlew build --no-daemon
+```
+
+Install the successfully built mod JAR only after the full build succeeds. The project requires its configured NeoForge/Maven dependencies; do not assume local Sable/Create/Aeronautics JARs can replace Gradle's dependency resolution without inspecting the existing build configuration.
+
+## Diagnostics and performance
+
+Useful log prefixes:
+
+- `[PDD-COMMIT]`: queued work, applied damage, block breaks, rejection and uncertain outcomes.
+- `[PDD-SAVE]`: WAL initialization, writes, recovery, quarantine, storage limits and I/O faults.
+- `[PDD-MATERIAL]`: snapshot generation, CSV sources, overrides and input issues.
+- `[PDD-F-INVARIANT]`, `[PDD-Q-SEAL]`, `[PDD-F-PERF]`: unchanged F/Q accounting and performance evidence.
+
+Optional JVM properties:
+
+| Property | Default / behavior |
+| --- | --- |
+| `pdd.worldBreakCapPerTick` | `64` attempted World breaks per tick (clamped 1–4096) |
+| `pdd.world.verbose` | `false`: additional World offer diagnostics |
+| `pdd.f.trace.enabled` | `false`: verbose F-edge and node tracing |
+| `pdd.normal.samples.maxPerCredit` | `8`: bounded native-normal sample diagnostics |
+| `pdd.material.trace.maxPerTick` | `16`: bounded material trace lines |
+
+Logging, synchronous WAL writes, safety rechecks and the legacy collision path can all affect tick time. **20 TPS is not guaranteed**.
+
+## In-game acceptance testing (maximum two sessions)
+
+1. **World commit and protection:** On a disposable world with supported mod versions, repeatedly collide a Sable/Aeronautics physical structure with loaded static vanilla stone. Verify damage accumulation followed by one block break/drop, and inspect `[PDD-COMMIT]` / `[PDD-SAVE]`. Test block entities, unsuitable multiblocks and claimed or unloaded locations: these must not be changed. Confirm the F/Q ledger and Sable callback behavior still look consistent.
+2. **Restart and stale damage:** Stop the server normally, restart and strike a previously damaged block to verify progression resumes. Replace a damaged block (including same-state replacement) and confirm old damage is not reused. On a separate backup, assess interrupted PREPARED/DEFERRED reconciliation and quarantine without assuming exactly-once drops after a crash.
+
+A failed Gradle build, failed Mixin application, unexpected break/drop, claim bypass, state loss or receipt mismatch is a **failed acceptance criterion**. Preserve the full Actions/Gradle output, `latest.log`, crash reports, loaded mod versions, and relevant `[PDD-*]` log lines.
+
+## Roadmap and exclusions
+
+- **0.4.1:** static World damage/conditional destruction, basic durable receipts and material sources (implemented in source; full runtime validation pending).
+- **0.5.0:** comprehensive chunk-scoped persistent state and migration, **not implemented** here.
+- **0.5.1:** actual physical Plot block mutation/destruction, **not implemented** here.
+- Plastic deformation and stress propagation do not automatically become additional Direct damage in 0.4.1. No Plot voxel movement, splitting or visual deformation is claimed by this release.
+
+## License
+
+See [LICENSE](LICENSE) for the repository's licensing terms. External mods and upstream datasets retain their respective licenses and attribution requirements.
