@@ -118,12 +118,27 @@ class ForcePropagationTest {
     }
     @Test void boundedGraphNeverPassesLeftoverForceToArbitraryLastNode() {
         var occupied=new HashSet<String>();
-        for(int i=0;i<200;i++)occupied.add(PLOT+":"+i+",0,0");
+        // The old 200-node line is now a verified terminal under DuperFix's
+        // expanded budget. Use a connected plane larger than the actual cap,
+        // with shallow enough breadth-first layers to avoid the F floor.
+        int width=(int)Math.ceil(Math.sqrt(ForcePropagation.MAX_NODES_PER_SIDE))+2;
+        for(int x=0;x<width;x++)for(int z=0;z<width;z++)
+            occupied.add(PLOT+":"+x+",0,"+z);
         var r=ForcePropagation.plan(PLOT,List.of(at(PLOT,0,0,0)),1e70,graph(occupied),
                 fp->material(0),FORCE,DAMAGE);
         assertEquals(ForcePropagation.MAX_NODES_PER_SIDE,r.shares().size());
         assertEquals("UNVERIFIED_BOUNDARY",r.endReason());
         assertTrue(r.unresolvedF()>0);
+        assertEquals(1e70,r.assignedF()+r.dampedF()+r.unresolvedF(),1e55);
+    }
+    @Test void twoHundredConnectedBlocksNowReachVerifiedTerminalUnderExpandedBudget() {
+        var occupied=new HashSet<String>();
+        for(int i=0;i<200;i++)occupied.add(PLOT+":"+i+",0,0");
+        var r=ForcePropagation.plan(PLOT,List.of(at(PLOT,0,0,0)),1e70,graph(occupied),
+                fp->material(0),FORCE,DAMAGE);
+        assertEquals(200,r.shares().size());
+        assertEquals("VERIFIED_TERMINAL",r.endReason());
+        assertEquals(0,r.unresolvedF(),0);
         assertEquals(1e70,r.assignedF()+r.dampedF()+r.unresolvedF(),1e55);
     }
     @Test void sourceEnvelopeCapsTotalHighForceAfterPerBlockConversion() {
