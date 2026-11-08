@@ -149,3 +149,12 @@ A failed Gradle build, failed Mixin application, unexpected break/drop, claim by
 ## License
 
 See [LICENSE](LICENSE) for the repository's licensing terms. External mods and upstream datasets retain their respective licenses and attribution requirements.
+
+
+## 0.4.1-Fix2 (2026-11-08)
+
+- Previous `0.4.1-Fix` GitHub Manual Build failed **before compilation** because the Gradle distribution URL returned HTTP 504. This is an infrastructure download failure, not evidence of a Java source error.
+- Preserve Sable 2.0.6 callback contract, face-patch verified start points, 40,000,000 game-F saturation, and inward-tapered propagation from Fix.
+- Explicit all-World-block policy: PDD will attempt damage and Vanilla server break for every non-air, loaded, World-owned block including block entities, linked blocks, bedrock and blocks marked `unbreakable` in material definitions, if a verified collision reaches the damage threshold. **World protection/claims veto, break event cancellation, stable owner/CAS, loaded chunk and receipt journal still apply.**
+- Vanilla `ServerLevel.destroyBlock(pos, true)` is the single destruction/drop path. Some third-party blocks may require specialized teardown; test on a backed-up disposable world. Plot remains preview-only.
+- See `docs/verification/0.4.1-Fix2.md` for exact limitations and validation status.

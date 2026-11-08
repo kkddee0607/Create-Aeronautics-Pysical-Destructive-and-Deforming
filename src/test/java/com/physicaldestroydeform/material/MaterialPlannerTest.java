@@ -45,6 +45,17 @@ class MaterialPlannerTest {
         assertEquals(20,r.plannedQ());
         assertEquals(40,r.accountedQ(),1e-9);
     }
+    @Test void worldPreviewIgnoresBlockTypeImmunityButPlotStillRespectsIt() {
+        var report=MaterialPlanner.plan(issued(),4,fp->new MaterialProperties(255,255,0,0,true),
+                DamageModel.Settings.defaults());
+        var plot=report.plans().stream().filter(p->"PLOT".equals(p.key().ownerSpace())).findFirst().orElseThrow();
+        var world=report.plans().stream().filter(p->"WORLD".equals(p.key().ownerSpace())).findFirst().orElseThrow();
+        assertEquals(DamageModel.Status.UNBREAKABLE_UNUSED,plot.plan().status());
+        assertEquals(DamageModel.Status.PLANNED_NOT_APPLIED,world.plan().status());
+        assertTrue(plot.material().unbreakable());
+        assertFalse(world.material().unbreakable());
+        assertEquals(40,report.accountedQ(),1e-9);
+    }
     @Test void refusesUnapprovedCredit() {
         var good=issued();
         var bad=new ContactCreditLedger.Grant(good.id(),good.source(),ContactCreditLedger.Status.DUPLICATE_CAUSE,

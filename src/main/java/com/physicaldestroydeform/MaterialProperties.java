@@ -30,6 +30,12 @@ public record MaterialProperties(int hardness, int threshold, int ductilityPerce
         requireRange("ductilityPercent", ductilityPercent, 0, 100);
         return Math.max(0, 8 * (1 - ductilityPercent / 200.0));
     }
+    /** Explicit World-only policy adapter; callers must not use this for Plot. */
+    public MaterialProperties asBreakable() {
+        return unbreakable
+                ? new MaterialProperties(hardness,threshold,ductilityPercent,elasticityPercent,false,yieldThreshold)
+                : this;
+    }
     public double hardnessNormalized() { return hardness / 255.0; }
     public double ductility() { return ductilityPercent / 100.0; }
     public double elasticity() { return elasticityPercent / 100.0; }

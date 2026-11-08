@@ -22,7 +22,7 @@ final class WorldCommitIntegrationTest {
         @Override public WorldCommitCore.Observation readIfLoaded(SparseStateKey key){
             if(!loaded)return null;
             return new WorldCommitCore.Observation(DIM,key.fingerprint(),1,altered?"1-new":"0-fingerprint-sha",
-                    true,air,entity,unsafe,false,false);
+                    true,air,entity&&!air,unsafe&&!air,false,false);
         }
         @Override public WorldCommitCore.Permission canDamage(SparseStateKey key,WorldCommitCore.Observation read) {
             return permission?WorldCommitCore.Permission.ALLOW:WorldCommitCore.Permission.DENY;
@@ -53,7 +53,7 @@ final class WorldCommitIntegrationTest {
         assertNull(new WorldReceiptJournal(path).get(key));
         assertEquals(WorldCommitCore.Outcome.DUPLICATE,engine.submit(intent("collision-C",key,2000)).result());
     }
-    @Test void chunkProtectionEntityAndReplacementRejectWithoutDrops() throws Exception {
+    @Test void chunkProtectionAndReplacementRejectButEntityCanBreak() throws Exception {
         for(int i=0;i<4;i++) {
             var engine=new WorldCommitCore(new WorldReceiptJournal(Files.createTempDirectory("pdd-veto-").resolve("world.wal")),
                     DamageModel.Settings.defaults(),64);
@@ -61,8 +61,29 @@ final class WorldCommitIntegrationTest {
             world.entity=i==2;world.altered=i==3;
             engine.submit(intent("veto-"+i,at(10+i),1000));
             var outcome=engine.tick(world,201).getFirst().result();
-            assertEquals(i==0?WorldCommitCore.Outcome.DEFERRED:WorldCommitCore.Outcome.ABORTED,outcome);
-            assertEquals(0,world.drops);
+            assertEquals(i==0?WorldCommitCore.Outcome.DEFERRED:i==2
+                    ?WorldCommitCore.Outcome.APPLIED_BREAK:WorldCommitCore.Outcome.ABORTED,outcome);
+            assertEquals(i==2?1:0,world.drops);
+        }
+    }
+
+    @Test void allWorldBlockKindsUseVanillaOnceButNeverBypassClaims() throws Exception {
+        var stone=new MaterialProperties(255,255,0,0,true);
+        for(int i=0;i<4;i++) {
+            var journal=new WorldReceiptJournal(Files.createTempDirectory("pdd-any-block-").resolve("world.wal"));
+            var engine=new WorldCommitCore(journal,DamageModel.Settings.defaults(),64);
+            var fake=new FakeWorld();fake.entity=i==0;fake.unsafe=i==1;
+            var key=at(150+i);
+            var hit=new WorldCommitCore.Intent("all-world-"+i,key,"0-fingerprint-sha",6000,
+                    stone,1,200,true);
+            if(i==3)fake.permission=false;
+            engine.submit(hit);
+            var outcome=engine.tick(fake,201).getFirst().result();
+            assertEquals(i==3?WorldCommitCore.Outcome.ABORTED:WorldCommitCore.Outcome.APPLIED_BREAK,
+                    outcome,"block ID/BE/linked flags must not prevent World break");
+            assertEquals(i==3?0:1,fake.breaks);
+            assertEquals(i==3?0:1,fake.drops);
+            assertEquals(WorldCommitCore.Outcome.DUPLICATE,engine.submit(hit).result());
         }
     }
     @Test void damageOnlyAuthorizationMutationIsRejected() throws Exception {

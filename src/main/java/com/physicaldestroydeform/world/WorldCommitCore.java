@@ -108,9 +108,14 @@ public final class WorldCommitCore {
                 continue;
             }
             if(prior!=null) {before.setDamage(prior.damage());before.setRemainder(prior.remainder());}
+            // Explicit 0.4.1-Fix2 WORLD policy: no block ID, block entity,
+            // negative vanilla hardness, or material-level unbreakable veto.
+            // Keep the original H/T/D/E; only the absolute immunity bit is
+            // suppressed for World damage. Plot behavior remains unchanged.
+            MaterialProperties eligible=worldMaterial(intent.material());
             DamageModel.Plan plan=intent.fFirstPreDamped()
-                    ?DamageModel.planPreDamped(intent.sealedQ(),intent.material(),before,damageSettings)
-                    :DamageModel.plan(intent.sealedQ(),intent.material(),before,damageSettings);
+                    ?DamageModel.planPreDamped(intent.sealedQ(),eligible,before,damageSettings)
+                    :DamageModel.plan(intent.sealedQ(),eligible,before,damageSettings);
             if(plan.thresholdReached() && attemptedBreaks>=breakCapPerTick) {
                 queue.addFirst(intent);queuedIds.add(intent.applyId());
                 results.add(new Decision(Outcome.DEFERRED,"BREAK_CAP",journal.receipt(intent.applyId())));
@@ -158,10 +163,6 @@ public final class WorldCommitCore {
                     plan.plannedRemainderU8(),intent.materialGeneration(),tick);
             return finish(intent,WorldReceiptJournal.Status.APPLIED,Outcome.APPLIED_DAMAGE,"FIXED_POINT_APPLIED",next,tick);
         }
-        if(intent.material().unbreakable() || original.unbreakable())
-            return finish(intent,WorldReceiptJournal.Status.ABORTED,Outcome.ABORTED,"UNBREAKABLE",null,tick);
-        if(original.hasBlockEntity()||original.unsafeMultiblock())
-            return finish(intent,WorldReceiptJournal.Status.ABORTED,Outcome.ABORTED,"BE_OR_MULTIBLOCK",null,tick);
         if(world.canBreak(intent.key(),original)!=Permission.ALLOW)
             return finish(intent,WorldReceiptJournal.Status.ABORTED,Outcome.ABORTED,"PROTECTION_OR_CANCELLED",null,tick);
         // Recheck after event/claim hook in case another mod changed the block.
@@ -181,6 +182,10 @@ public final class WorldCommitCore {
             return finish(intent,WorldReceiptJournal.Status.PARTIAL_QUARANTINED,Outcome.QUARANTINED,
                     "BREAK_EXCEPTION_"+unknown.getClass().getSimpleName(),null,tick);
         }
+    }
+    /** All World block definitions participate while preserving their numeric H/T/D/E. */
+    private static MaterialProperties worldMaterial(MaterialProperties original) {
+        return original.asBreakable();
     }
     private static String preflight(Intent intent,Observation read) {
         SparseStateKey k=intent.key();

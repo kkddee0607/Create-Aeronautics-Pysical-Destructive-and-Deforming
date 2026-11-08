@@ -239,7 +239,7 @@ public final class ForcePropagation {
      * unrelated sibling branches. No global mean transmission is used.
      *
      * UNKNOWN direction uses an auditable equal-weight traversal with no depth cap. Native
-     * inward direction defines a forward-expanding cone in the frozen owner
+     * inward direction defines an inward-tapering cone in the frozen owner
      * lattice, with no edge that retreats along the collision normal. A Plot
      * may move in world coordinates while its block-local positions stay fixed.
      * Re-sampling a world pose for every BFS layer would mix physics epochs.

@@ -11,9 +11,6 @@ import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.block.state.BlockState;
-import net.minecraft.world.level.block.state.properties.BlockStateProperties;
-import net.minecraft.world.level.block.BedBlock;
-import net.minecraft.world.level.block.DoorBlock;
 import net.neoforged.neoforge.common.NeoForge;
 import net.neoforged.neoforge.common.util.FakePlayerFactory;
 import net.neoforged.neoforge.event.level.BlockEvent;
@@ -49,27 +46,24 @@ public final class NeoForgeWorldGateway implements WorldCommitCore.WorldGateway 
             if(container==null || container.getPlot(chunk)!=null || container.inBounds(chunk))return null;
             BlockState state=level.getBlockState(pos);
             String fp=BuiltInRegistries.BLOCK.getKey(state.getBlock())+"|"+state;
-            boolean blockEntity=state.hasBlockEntity() || level.getBlockEntity(pos)!=null;
-            // The previous registry allow-list excluded netherite/slime and all
-            // modded blocks. All one-cell shapes can be damaged; multi-cell
-            // linked blocks and block entities retain their safety veto.
-            boolean unsafe=isLinkedMultiblock(state);
+            // A just-destroyed block is AIR even if a mod has not yet cleared
+            // its old block-entity cache. Never quarantine an otherwise
+            // confirmed vanilla destroy purely for a stale BE reference.
+            boolean blockEntity=!state.isAir() && (state.hasBlockEntity() || level.getBlockEntity(pos)!=null);
+            // Record these characteristics for auditing, NOT as a block-type veto.
+            // Vanilla's destroyBlock/drop/neighbor-update path is responsible for
+            // block entities, attached blocks and multi-cell neighbor cleanup.
+            // A protection mod can still veto through mayInteract/BreakEvent.
+            boolean unsafe=false;
             boolean unbreakable=state.getDestroySpeed(level,pos)<0;
             return new WorldCommitCore.Observation(key.dimension(),fp,1,lifecycle.incarnation(key.dimension(),pos,fp),
                     true,state.isAir(),blockEntity,unsafe,unbreakable,false);
         } catch(RuntimeException unsafe){return null;}
     }
-    /** No registry allow-list. Linked vanilla double blocks must be handled
-     * atomically by a future owner-specific gateway, not as one isolated cell. */
-    private static boolean isLinkedMultiblock(BlockState state) {
-        return state.hasProperty(BlockStateProperties.DOUBLE_BLOCK_HALF)
-                || state.getBlock() instanceof BedBlock
-                || state.getBlock() instanceof DoorBlock;
-    }
     @Override public WorldCommitCore.Permission canDamage(SparseStateKey key,WorldCommitCore.Observation expected) {
         if(!isServerThread())return WorldCommitCore.Permission.UNKNOWN;
         var seen=readIfLoaded(key);
-        if(!expected.equals(seen) || seen.hasBlockEntity() || seen.unsafeMultiblock() || seen.unbreakable())
+        if(seen==null || !expected.equals(seen) || seen.isAir())
             return WorldCommitCore.Permission.DENY;
         try {
             ServerLevel level=dimension(key.dimension());
@@ -85,8 +79,7 @@ public final class NeoForgeWorldGateway implements WorldCommitCore.WorldGateway 
     @Override public WorldCommitCore.Permission canBreak(SparseStateKey key,WorldCommitCore.Observation expected) {
         if(!isServerThread())return WorldCommitCore.Permission.UNKNOWN;
         var observed=readIfLoaded(key);
-        if(!expected.equals(observed) || observed.isAir() || observed.hasBlockEntity()
-                || observed.unsafeMultiblock() || observed.unbreakable())
+        if(observed==null || !expected.equals(observed) || observed.isAir())
             return WorldCommitCore.Permission.DENY;
         try {
             ServerLevel level=dimension(key.dimension());

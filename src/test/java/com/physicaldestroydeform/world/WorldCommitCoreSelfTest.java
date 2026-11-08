@@ -25,7 +25,7 @@ public final class WorldCommitCoreSelfTest {
         @Override public boolean isServerThread(){return thread;}
         @Override public WorldCommitCore.Observation readIfLoaded(SparseStateKey key) {
             if(!loaded)return null;
-            return new WorldCommitCore.Observation(DIM,key.fingerprint(),1,incarnation,true,air,be,multiblock,immune,stepping);
+            return new WorldCommitCore.Observation(DIM,key.fingerprint(),1,incarnation,true,air,be&&!air,multiblock&&!air,immune&&!air,stepping);
         }
         @Override public WorldCommitCore.Permission canDamage(SparseStateKey key,WorldCommitCore.Observation expected) {
             return deny?WorldCommitCore.Permission.DENY:WorldCommitCore.Permission.ALLOW;
@@ -67,7 +67,7 @@ public final class WorldCommitCoreSelfTest {
         var replaced=new Fake();replaced.incarnation="incarnation-2";
         core.submit(hit("replace-1",key(3),500));
         check(core.tick(replaced,104).get(0).result()==WorldCommitCore.Outcome.ABORTED,"same state replacement rejected");
-        // Claims/permission and cancellation, BE and unsafe multiblocks fail closed.
+        // Claims/event cancellation remain vetoes; ALL World block types are eligible.
         var denied=new Fake();denied.deny=true;
         core.submit(hit("deny",key(4),500));
         check(core.tick(denied,105).get(0).result()==WorldCommitCore.Outcome.ABORTED,"claim veto");
@@ -76,10 +76,22 @@ public final class WorldCommitCoreSelfTest {
         check(core.tick(canceled,106).get(0).result()==WorldCommitCore.Outcome.ABORTED,"event veto");
         var be=new Fake();be.be=true;
         core.submit(hit("be",key(6),500));
-        check(core.tick(be,107).get(0).result()==WorldCommitCore.Outcome.ABORTED,"BE veto");
+        check(core.tick(be,107).get(0).result()==WorldCommitCore.Outcome.APPLIED_BREAK,"BE vanilla World break");
+        check(be.breaks==1&&be.drops==1,"BE single vanilla drop path");
         var multi=new Fake();multi.multiblock=true;
         core.submit(hit("multi",key(7),500));
-        check(core.tick(multi,108).get(0).result()==WorldCommitCore.Outcome.ABORTED,"unsafe multiblock veto");
+        check(core.tick(multi,108).get(0).result()==WorldCommitCore.Outcome.APPLIED_BREAK,"linked World block vanilla break");
+        check(multi.breaks==1&&multi.drops==1,"linked World block single break path");
+        // World-only policy also overrides negative vanilla destroy speed and
+        // the definition-level UNBREAKABLE flag; Plot is a separate pipeline.
+        MaterialProperties immune=new MaterialProperties(255,255,0,0,true);
+        var bedrockIntent=new WorldCommitCore.Intent("bedrock",key(61),"incarnation-1",3000,
+                immune,1,100,true);
+        var bedrock=new Fake();bedrock.immune=true;
+        core.submit(bedrockIntent);
+        check(core.tick(bedrock,108).get(0).result()==WorldCommitCore.Outcome.APPLIED_BREAK,
+                "World UNBREAKABLE material is eligible");
+        check(bedrock.breaks==1&&bedrock.drops==1,"World unbreakable executed exactly once");
         var unloaded=new Fake();unloaded.loaded=false;
         core.submit(hit("unloaded",key(8),500));
         check(core.tick(unloaded,109).get(0).result()==WorldCommitCore.Outcome.DEFERRED,"unloaded deferred");
