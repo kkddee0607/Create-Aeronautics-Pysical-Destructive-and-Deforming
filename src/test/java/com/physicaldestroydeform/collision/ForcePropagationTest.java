@@ -118,12 +118,11 @@ class ForcePropagationTest {
     }
     @Test void boundedGraphNeverPassesLeftoverForceToArbitraryLastNode() {
         var occupied=new HashSet<String>();
-        // The old 200-node line is now a verified terminal under DuperFix's
-        // expanded budget. Use a connected plane larger than the actual cap,
-        // with shallow enough breadth-first layers to avoid the F floor.
-        int width=(int)Math.ceil(Math.sqrt(ForcePropagation.MAX_NODES_PER_SIDE))+2;
-        for(int x=0;x<width;x++)for(int z=0;z<width;z++)
-            occupied.add(PLOT+":"+x+",0,"+z);
+        // A dense cube reaches the node cap before the minimum-F cutoff.
+        // A corner-seeded plane spreads too slowly and can stop on the F floor first.
+        int width=(int)Math.ceil(Math.cbrt(ForcePropagation.MAX_NODES_PER_SIDE))+1;
+        for(int x=0;x<width;x++)for(int y=0;y<width;y++)for(int z=0;z<width;z++)
+            occupied.add(PLOT+":"+x+","+y+","+z);
         var r=ForcePropagation.plan(PLOT,List.of(at(PLOT,0,0,0)),1e70,graph(occupied),
                 fp->material(0),FORCE,DAMAGE);
         assertEquals(ForcePropagation.MAX_NODES_PER_SIDE,r.shares().size());
