@@ -16,13 +16,13 @@ final class WorldCommitIntegrationTest {
         return new WorldCommitCore.Intent(id,key,"0-fingerprint-sha",q,STONE,1,200,true);
     }
     private static class FakeWorld implements WorldCommitCore.WorldGateway {
-        boolean loaded=true,air,permission=true,entity,unsafe,thread=true,altered;
+        boolean loaded=true,air,permission=true,entity,unsafe,unbreakable,thread=true,altered;
         int breaks,drops;
         @Override public boolean isServerThread(){return thread;}
         @Override public WorldCommitCore.Observation readIfLoaded(SparseStateKey key){
             if(!loaded)return null;
             return new WorldCommitCore.Observation(DIM,key.fingerprint(),1,altered?"1-new":"0-fingerprint-sha",
-                    true,air,entity&&!air,unsafe&&!air,false,false);
+                    true,air,entity&&!air,unsafe&&!air,unbreakable&&!air,false);
         }
         @Override public WorldCommitCore.Permission canDamage(SparseStateKey key,WorldCommitCore.Observation read) {
             return permission?WorldCommitCore.Permission.ALLOW:WorldCommitCore.Permission.DENY;
@@ -53,7 +53,7 @@ final class WorldCommitIntegrationTest {
         assertNull(new WorldReceiptJournal(path).get(key));
         assertEquals(WorldCommitCore.Outcome.DUPLICATE,engine.submit(intent("collision-C",key,2000)).result());
     }
-    @Test void chunkProtectionAndReplacementRejectButEntityCanBreak() throws Exception {
+    @Test void chunkProtectionEntityAndReplacementReject() throws Exception {
         for(int i=0;i<4;i++) {
             var engine=new WorldCommitCore(new WorldReceiptJournal(Files.createTempDirectory("pdd-veto-").resolve("world.wal")),
                     DamageModel.Settings.defaults(),64);
@@ -61,29 +61,39 @@ final class WorldCommitIntegrationTest {
             world.entity=i==2;world.altered=i==3;
             engine.submit(intent("veto-"+i,at(10+i),1000));
             var outcome=engine.tick(world,201).getFirst().result();
-            assertEquals(i==0?WorldCommitCore.Outcome.DEFERRED:i==2
-                    ?WorldCommitCore.Outcome.APPLIED_BREAK:WorldCommitCore.Outcome.ABORTED,outcome);
-            assertEquals(i==2?1:0,world.drops);
+            assertEquals(i==0?WorldCommitCore.Outcome.DEFERRED:WorldCommitCore.Outcome.ABORTED,outcome);
+            assertEquals(0,world.drops);
         }
     }
 
-    @Test void allWorldBlockKindsUseVanillaOnceButNeverBypassClaims() throws Exception {
-        var stone=new MaterialProperties(255,255,0,0,true);
-        for(int i=0;i<4;i++) {
-            var journal=new WorldReceiptJournal(Files.createTempDirectory("pdd-any-block-").resolve("world.wal"));
-            var engine=new WorldCommitCore(journal,DamageModel.Settings.defaults(),64);
-            var fake=new FakeWorld();fake.entity=i==0;fake.unsafe=i==1;
-            var key=at(150+i);
-            var hit=new WorldCommitCore.Intent("all-world-"+i,key,"0-fingerprint-sha",6000,
-                    stone,1,200,true);
-            if(i==3)fake.permission=false;
+    @Test void ordinaryWorldBlockIdsBreakButImmuneAndUnsafeBlocksDoNot() throws Exception {
+        var stone=new MaterialProperties(59,91,10,9,false);
+        // The block's namespace/ID must not be a hardcoded veto (slime, netherite, mod block).
+        String[] ids={"minecraft:slime_block", "minecraft:netherite_block", "example:metal_block"};
+        for(int i=0;i<ids.length;i++) {
+            var engine=new WorldCommitCore(new WorldReceiptJournal(Files.createTempDirectory("pdd-open-ids-").resolve("world.wal")),
+                    DamageModel.Settings.defaults(),64);
+            var fake=new FakeWorld();
+            var key=new SparseStateKey(DIM,"WORLD",DIM,1,150+i,72,0,ids[i]+"|Block{"+ids[i]+"}");
+            var hit=new WorldCommitCore.Intent("open-id-"+i,key,"0-fingerprint-sha",6000,stone,1,200,true);
             engine.submit(hit);
-            var outcome=engine.tick(fake,201).getFirst().result();
-            assertEquals(i==3?WorldCommitCore.Outcome.ABORTED:WorldCommitCore.Outcome.APPLIED_BREAK,
-                    outcome,"block ID/BE/linked flags must not prevent World break");
-            assertEquals(i==3?0:1,fake.breaks);
-            assertEquals(i==3?0:1,fake.drops);
+            assertEquals(WorldCommitCore.Outcome.APPLIED_BREAK,engine.tick(fake,201).getFirst().result(),ids[i]);
+            assertEquals(1,fake.breaks);assertEquals(1,fake.drops);
             assertEquals(WorldCommitCore.Outcome.DUPLICATE,engine.submit(hit).result());
+        }
+        // Definition immunity, intrinsic vanilla hardness, BE and linked blocks are separate vetoes.
+        var immuneMaterial=new MaterialProperties(255,255,0,0,true);
+        for(int i=0;i<4;i++) {
+            var engine=new WorldCommitCore(new WorldReceiptJournal(Files.createTempDirectory("pdd-safety-").resolve("world.wal")),
+                    DamageModel.Settings.defaults(),64);
+            var fake=new FakeWorld();fake.entity=i==2;fake.unsafe=i==3;fake.unbreakable=i==1;
+            var key=at(160+i);
+            var hit=new WorldCommitCore.Intent("safety-"+i,key,"0-fingerprint-sha",6000,i==0?immuneMaterial:stone,1,200,true);
+            engine.submit(hit);
+            var decision=engine.tick(fake,201).getFirst();
+            assertEquals(WorldCommitCore.Outcome.ABORTED,decision.result());
+            assertEquals(i<2?"UNBREAKABLE":"BE_OR_MULTIBLOCK",decision.reason());
+            assertEquals(0,fake.breaks);assertEquals(0,fake.drops);
         }
     }
     @Test void damageOnlyAuthorizationMutationIsRejected() throws Exception {

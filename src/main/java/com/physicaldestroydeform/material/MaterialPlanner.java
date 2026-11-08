@@ -52,10 +52,8 @@ public final class MaterialPlanner {
             GameImpactCredit.Owner owner=grant.id().pair().a().stableKey().equals(target.ownerKey())
                     ?grant.id().pair().a():grant.id().pair().b();
             SparseStateKey key=SparseStateKey.fromTarget(grant.id().pair().dimension(),owner,target);
-            // Shadow previews and real World commits must agree on eligibility.
-            // The 0.4.1-Fix2 policy overrides only absolute block-type immunity
-            // in World; Plot previews preserve definition-level UNBREAKABLE.
-            if("WORLD".equals(key.ownerSpace()))material=material.asBreakable();
+            // The same definition-level immunity applies in World and Plot previews.
+            // World gateway restrictions are evaluated separately at commit time.
             BlockDamageState prior=Objects.requireNonNull(priorState.apply(key),"missing preview state");
             DamageModel.Plan p=grant.propagated()
                     ?DamageModel.planPreDamped(share.q(),material,prior,settings)

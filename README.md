@@ -1,4 +1,4 @@
-# PDD 0.4.1-Fix — Physical Destruction and Deforming
+# PDD 0.4.1-Fix3 (corrected) — Physical Destruction and Deforming
 
 **Create Aeronautics: Physical Destruction and Deforming (PDD)** is a Minecraft Java 1.21.1 / NeoForge add-on that consumes Sable collision evidence to calculate block-level impact propagation and damage. Version **0.4.1-Fix** builds on 0.4.1 and extends the read-only 0.4.0finalFix impact pipeline with **server-side damage accumulation and conditional destruction of eligible static World blocks**. Physical Plot block destruction, deformation, and stress mutation are **not enabled** in this release.
 
@@ -39,7 +39,7 @@ This fix preserves the **World-only mutation / Plot-preview** version boundary a
 - When damage reaches the block's destruction threshold, applies a bounded server-thread commit, calls Minecraft's `destroyBlock(pos, true)` **once**, and checks the block state again afterward. No separate `dropResources` call is made.
 - Limits **break attempts to 64 per server tick by default**, configured using `-Dpdd.worldBreakCapPerTick=64` (bounded to 1–4096). Pending work has an explicit bounded queue and deferral timeout; rejected or uncertain operations are not silently classified as successful.
 
-**Safety scope is deliberately narrow.** The World gateway permits only certain simple, full-cube vanilla blocks (including stone, cobblestone, deepslate, dirt, planks, concrete and related basic materials). It rejects block entities, suspicious/multiblock states, unbreakable blocks and uncertain ownership. It never intentionally loads missing chunks or treats Sable Plot storage as ordinary World blocks. A block's presence in `blocks.csv` **does not** mean PDD can destroy that block.
+**World safety policy (0.4.1-Fix3 corrected).** There is **no hard-coded block-ID allow-list**. Ordinary breakable blocks such as `minecraft:slime_block`, `minecraft:netherite_block` and registered mod blocks can receive damage and break. **Intrinsic negative destroy speed and the material definition's `unbreakable` flag remain absolute vetoes**: this release does **not** break bedrock or change `UNBREAKABLE` behavior. Block entities and linked multi-cell blocks (e.g. doors/beds) remain conservatively protected until their lifecycle/atomicity can be verified. Loaded chunk, verified World ownership, claim/`BreakEvent`, fingerprint and WAL protections still apply. A block in `blocks.csv` is not automatically permitted to break.
 
 ### Safe server commits
 
@@ -47,7 +47,7 @@ The intended execution sequence is:
 
 `Issued Credit → World Damage Intent → CAS preflight → permission/event veto → recheck → World commit → World re-read → durable receipt`.
 
-The implementation checks server thread, dimension and owner, loaded chunk, block fingerprint and incarnation token, entity/multiblock safety, and permission. A NeoForge `BlockEvent.BreakEvent` is posted using a fake player; canceling the event vetoes damage/break. **Claim mods which do not honor that event may not be compatible**. This is not a guarantee that every external protection system is enforced. A block-replacement Mixin is included; its injection target must be verified against the actual mapped runtime before production use.
+The implementation checks server thread, dimension and owner, loaded chunk, block fingerprint and incarnation token, entity/multiblock safety, and permission. A NeoForge `BlockEvent.BreakEvent` is posted using a fake player for an actual break; canceling it vetoes that break. Damage-only accumulation does not synthesize a `BreakEvent`. **Claim mods which do not honor that event may not be compatible**. This is not a guarantee that every external protection system is enforced. A block-replacement Mixin is included; its injection target must be verified against the actual mapped runtime before production use.
 
 ### Minimal restart persistence
 
@@ -57,7 +57,7 @@ The World damage / receipt journal is stored at:
 
 It uses a versioned, CRC-checked, append-only write-ahead log and synchronous flushes. It stores relevant World damage/remainder and per-ApplyId receipts. The possible receipt states include `PREPARED`, `DEFERRED`, `APPLIED`, `ABORTED` and `PARTIAL_QUARANTINED`. Interrupted work is **reconciled/quarantined**, not blindly replayed as another break. Corrupt or oversized journal data is not silently accepted; unsafe journal initialization disables World mutation. This is **not** the full chunk-sharded storage/migration system planned for 0.5.0, and it does **not** guarantee exactly-once drops through abrupt power loss.
 
-Important operational limits in source: 200,000 stored damage states; 60,000 receipts; a 96 MiB journal cap; and 8,192 queued intents. The synchronous journal can affect TPS under heavy collision loads. Monitor logs and test before enabling PDD on an existing world. **Do not delete the WAL to resolve startup errors without making a complete world backup.**
+Important operational limits in source: 200,000 stored damage states; 60,000 receipts; a 96 MiB journal cap; and 16,384 queued intents. The synchronous journal can affect TPS under heavy collision loads. Monitor logs and test before enabling PDD on an existing world. **Do not delete the WAL to resolve startup errors without making a complete world backup.**
 
 ### Bundled CSV material data and overrides
 
@@ -151,10 +151,10 @@ A failed Gradle build, failed Mixin application, unexpected break/drop, claim by
 See [LICENSE](LICENSE) for the repository's licensing terms. External mods and upstream datasets retain their respective licenses and attribution requirements.
 
 
-## 0.4.1-Fix2 (2026-11-08)
+## 0.4.1-Fix3 corrected (2026-11-08)
 
-- Previous `0.4.1-Fix` GitHub Manual Build failed **before compilation** because the Gradle distribution URL returned HTTP 504. This is an infrastructure download failure, not evidence of a Java source error.
-- Preserve Sable 2.0.6 callback contract, face-patch verified start points, 40,000,000 game-F saturation, and inward-tapered propagation from Fix.
-- Explicit all-World-block policy: PDD will attempt damage and Vanilla server break for every non-air, loaded, World-owned block including block entities, linked blocks, bedrock and blocks marked `unbreakable` in material definitions, if a verified collision reaches the damage threshold. **World protection/claims veto, break event cancellation, stable owner/CAS, loaded chunk and receipt journal still apply.**
-- Vanilla `ServerLevel.destroyBlock(pos, true)` is the single destruction/drop path. Some third-party blocks may require specialized teardown; test on a backed-up disposable world. Plot remains preview-only.
-- See `docs/verification/0.4.1-Fix2.md` for exact limitations and validation status.
+- **Corrected an over-broad Fix2 policy:** previously this source attempted to bypass intrinsic and material `UNBREAKABLE` and allowed block entities and linked multi-cell structures to break. That was **not** the requested behavior and is now reverted.
+- **Removed only the temporary block-ID allow-list.** Slime, netherite, ordinary modded single-cell blocks and other non-immune blocks are now eligible; all existing ownership, physics phase, claim, cancellation, BE, linked-structure and immutable material safety checks remain active.
+- World preview and actual World commit both preserve definition-level `unbreakable` without converting material profiles. Plot remains preview-only.
+- Retains Fix1/Fix2 collision-face reconstruction, F=40,000,000 saturation, reverse cone geometry, and their tests. Gradle 8.10.2 bootstrap adjustments from the previous Fix3 are also retained, but **`gradle/wrapper` is protected by Apply**; the included wrapper properties must be manually applied on GitHub if not already done.
+- See `docs/verification/0.4.1-Fix3-unbreakable-correction.md` for exact changed files, validation, limits and test handoff.

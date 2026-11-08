@@ -67,7 +67,7 @@ public final class WorldCommitCoreSelfTest {
         var replaced=new Fake();replaced.incarnation="incarnation-2";
         core.submit(hit("replace-1",key(3),500));
         check(core.tick(replaced,104).get(0).result()==WorldCommitCore.Outcome.ABORTED,"same state replacement rejected");
-        // Claims/event cancellation remain vetoes; ALL World block types are eligible.
+        // Claims/event cancellation are always vetoes, regardless of block ID.
         var denied=new Fake();denied.deny=true;
         core.submit(hit("deny",key(4),500));
         check(core.tick(denied,105).get(0).result()==WorldCommitCore.Outcome.ABORTED,"claim veto");
@@ -76,22 +76,47 @@ public final class WorldCommitCoreSelfTest {
         check(core.tick(canceled,106).get(0).result()==WorldCommitCore.Outcome.ABORTED,"event veto");
         var be=new Fake();be.be=true;
         core.submit(hit("be",key(6),500));
-        check(core.tick(be,107).get(0).result()==WorldCommitCore.Outcome.APPLIED_BREAK,"BE vanilla World break");
-        check(be.breaks==1&&be.drops==1,"BE single vanilla drop path");
+        var beResult=core.tick(be,107).get(0);
+        check(beResult.result()==WorldCommitCore.Outcome.ABORTED && "BE_OR_MULTIBLOCK".equals(beResult.reason()),
+                "block entity protected");
+        check(be.breaks==0&&be.drops==0,"BE untouched");
         var multi=new Fake();multi.multiblock=true;
         core.submit(hit("multi",key(7),500));
-        check(core.tick(multi,108).get(0).result()==WorldCommitCore.Outcome.APPLIED_BREAK,"linked World block vanilla break");
-        check(multi.breaks==1&&multi.drops==1,"linked World block single break path");
-        // World-only policy also overrides negative vanilla destroy speed and
-        // the definition-level UNBREAKABLE flag; Plot is a separate pipeline.
+        var multiResult=core.tick(multi,108).get(0);
+        check(multiResult.result()==WorldCommitCore.Outcome.ABORTED && "BE_OR_MULTIBLOCK".equals(multiResult.reason()),
+                "linked block protected");
+        check(multi.breaks==0&&multi.drops==0,"linked block untouched");
+        // Neither the intrinsic negative destroy speed nor the material's
+        // definition-level UNBREAKABLE flag may be bypassed in World.
         MaterialProperties immune=new MaterialProperties(255,255,0,0,true);
         var bedrockIntent=new WorldCommitCore.Intent("bedrock",key(61),"incarnation-1",3000,
                 immune,1,100,true);
         var bedrock=new Fake();bedrock.immune=true;
         core.submit(bedrockIntent);
-        check(core.tick(bedrock,108).get(0).result()==WorldCommitCore.Outcome.APPLIED_BREAK,
-                "World UNBREAKABLE material is eligible");
-        check(bedrock.breaks==1&&bedrock.drops==1,"World unbreakable executed exactly once");
+        var bedrockResult=core.tick(bedrock,108).get(0);
+        check(bedrockResult.result()==WorldCommitCore.Outcome.ABORTED && "UNBREAKABLE".equals(bedrockResult.reason()),
+                "World UNBREAKABLE is not eligible");
+        check(bedrock.breaks==0&&bedrock.drops==0,"World immune material untouched");
+        // Even with a mistaken breakable material profile, negative vanilla
+        // destroy speed is independently authoritative.
+        var vanillaImmune=new Fake();vanillaImmune.immune=true;
+        core.submit(hit("vanilla-immune",key(62),500));
+        var vanillaImmuneResult=core.tick(vanillaImmune,108).get(0);
+        check(vanillaImmuneResult.result()==WorldCommitCore.Outcome.ABORTED
+                        && "UNBREAKABLE".equals(vanillaImmuneResult.reason()),"vanilla immunity veto");
+        check(vanillaImmune.breaks==0&&vanillaImmune.drops==0,"vanilla immune untouched");
+        // Previously whitelisted by type only: slime and netherite are now
+        // allowed if they are ordinary breakable World cells.
+        for (String id : List.of("minecraft:slime_block", "minecraft:netherite_block", "example:metal_block")) {
+            int x=id.equals("minecraft:slime_block")?63:id.equals("minecraft:netherite_block")?64:65;
+            var k=new SparseStateKey(DIM,"WORLD",DIM,1,x,64,0,id+"|Block{"+id+"}");
+            var intent=new WorldCommitCore.Intent("allow-"+id,k,"incarnation-1",500,STONE,1,100,true);
+            var allowed=new Fake();
+            core.submit(intent);
+            check(core.tick(allowed,108).get(0).result()==WorldCommitCore.Outcome.APPLIED_BREAK,
+                    "type allow-list removed: "+id);
+            check(allowed.breaks==1&&allowed.drops==1,"one break/drop "+id);
+        }
         var unloaded=new Fake();unloaded.loaded=false;
         core.submit(hit("unloaded",key(8),500));
         check(core.tick(unloaded,109).get(0).result()==WorldCommitCore.Outcome.DEFERRED,"unloaded deferred");

@@ -108,14 +108,11 @@ public final class WorldCommitCore {
                 continue;
             }
             if(prior!=null) {before.setDamage(prior.damage());before.setRemainder(prior.remainder());}
-            // Explicit 0.4.1-Fix2 WORLD policy: no block ID, block entity,
-            // negative vanilla hardness, or material-level unbreakable veto.
-            // Keep the original H/T/D/E; only the absolute immunity bit is
-            // suppressed for World damage. Plot behavior remains unchanged.
-            MaterialProperties eligible=worldMaterial(intent.material());
+            // Keep definition-level UNBREAKABLE intact for World and Plot.
+            // Opening the registry allow-list must never override material immunity.
             DamageModel.Plan plan=intent.fFirstPreDamped()
-                    ?DamageModel.planPreDamped(intent.sealedQ(),eligible,before,damageSettings)
-                    :DamageModel.plan(intent.sealedQ(),eligible,before,damageSettings);
+                    ?DamageModel.planPreDamped(intent.sealedQ(),intent.material(),before,damageSettings)
+                    :DamageModel.plan(intent.sealedQ(),intent.material(),before,damageSettings);
             if(plan.thresholdReached() && attemptedBreaks>=breakCapPerTick) {
                 queue.addFirst(intent);queuedIds.add(intent.applyId());
                 results.add(new Decision(Outcome.DEFERRED,"BREAK_CAP",journal.receipt(intent.applyId())));
@@ -183,13 +180,11 @@ public final class WorldCommitCore {
                     "BREAK_EXCEPTION_"+unknown.getClass().getSimpleName(),null,tick);
         }
     }
-    /** All World block definitions participate while preserving their numeric H/T/D/E. */
-    private static MaterialProperties worldMaterial(MaterialProperties original) {
-        return original.asBreakable();
-    }
     private static String preflight(Intent intent,Observation read) {
         SparseStateKey k=intent.key();
         if(!read.loaded()||read.isAir())return "EMPTY_OR_UNLOADED";
+        if(intent.material().unbreakable() || read.unbreakable())return "UNBREAKABLE";
+        if(read.hasBlockEntity() || read.unsafeMultiblock())return "BE_OR_MULTIBLOCK";
         if(!k.dimension().equals(read.dimension()) || k.ownerGeneration()!=read.ownerGeneration())return "OWNER_CHANGED";
         if(!k.fingerprint().equals(read.fingerprint()))return "FINGERPRINT_CHANGED";
         if(!intent.expectedIncarnation().equals(read.incarnation()))return "REPLACED_SAME_STATE";
