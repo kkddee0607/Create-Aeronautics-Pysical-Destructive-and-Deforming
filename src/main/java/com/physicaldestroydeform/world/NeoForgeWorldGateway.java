@@ -11,6 +11,9 @@ import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.block.state.properties.BlockStateProperties;
+import net.minecraft.world.level.block.BedBlock;
+import net.minecraft.world.level.block.DoorBlock;
 import net.neoforged.neoforge.common.NeoForge;
 import net.neoforged.neoforge.common.util.FakePlayerFactory;
 import net.neoforged.neoforge.event.level.BlockEvent;
@@ -47,28 +50,21 @@ public final class NeoForgeWorldGateway implements WorldCommitCore.WorldGateway 
             BlockState state=level.getBlockState(pos);
             String fp=BuiltInRegistries.BLOCK.getKey(state.getBlock())+"|"+state;
             boolean blockEntity=state.hasBlockEntity() || level.getBlockEntity(pos)!=null;
-            boolean fullCube=state.isCollisionShapeFullBlock(level,pos);
-            boolean unsafe=!fullCube || state.hasAnalogOutputSignal() || !isSimpleState(state);
+            // The previous registry allow-list excluded netherite/slime and all
+            // modded blocks. All one-cell shapes can be damaged; multi-cell
+            // linked blocks and block entities retain their safety veto.
+            boolean unsafe=isLinkedMultiblock(state);
             boolean unbreakable=state.getDestroySpeed(level,pos)<0;
             return new WorldCommitCore.Observation(key.dimension(),fp,1,lifecycle.incarnation(key.dimension(),pos,fp),
                     true,state.isAir(),blockEntity,unsafe,unbreakable,false);
         } catch(RuntimeException unsafe){return null;}
     }
-    /** Conservative safety policy: only single-cell full cubes, no block entities or dynamic blocks. */
-    private static boolean isSimpleState(BlockState state){
-        String id=BuiltInRegistries.BLOCK.getKey(state.getBlock()).toString();
-        if(!id.startsWith("minecraft:"))return false;
-        String block=id.substring("minecraft:".length());
-        return block.equals("stone") || block.equals("cobblestone") || block.equals("deepslate")
-                || block.equals("cobbled_deepslate") || block.equals("tuff")
-                || block.equals("dirt") || block.equals("grass_block") || block.equals("sand")
-                || block.equals("gravel") || block.equals("netherrack") || block.equals("end_stone")
-                || block.equals("obsidian") || block.equals("bricks")
-                || block.endsWith("_planks") || block.endsWith("_concrete")
-                || block.endsWith("_terracotta") || block.equals("terracotta")
-                || block.endsWith("_wool") || block.endsWith("_bricks")
-                || block.equals("stone_bricks") || block.equals("smooth_stone")
-                || block.equals("andesite") || block.equals("granite") || block.equals("diorite");
+    /** No registry allow-list. Linked vanilla double blocks must be handled
+     * atomically by a future owner-specific gateway, not as one isolated cell. */
+    private static boolean isLinkedMultiblock(BlockState state) {
+        return state.hasProperty(BlockStateProperties.DOUBLE_BLOCK_HALF)
+                || state.getBlock() instanceof BedBlock
+                || state.getBlock() instanceof DoorBlock;
     }
     @Override public WorldCommitCore.Permission canDamage(SparseStateKey key,WorldCommitCore.Observation expected) {
         if(!isServerThread())return WorldCommitCore.Permission.UNKNOWN;

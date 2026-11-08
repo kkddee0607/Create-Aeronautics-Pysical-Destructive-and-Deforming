@@ -31,7 +31,8 @@ class DuperFixPropagationTest {
     static void balanced(ForcePropagation.Result r) {
         assertEquals(r.inputF(),r.assignedF()+r.dampedF()+r.unresolvedF()+r.audit().thresholdDiscardF(),
                 Math.max(1e-7,r.inputF()*1e-9));
-        assertEquals(r.candidateQ(),r.finalQ()+r.dampedQ()+r.audit().thresholdDiscardQ(),1e-6);
+        assertEquals(r.candidateQ(),r.finalQ()+r.dampedQ()+r.audit().thresholdDiscardQ(),
+                Math.max(1e-6,r.candidateQ()*1e-11));
         assertEquals(r.shares().size(),r.shares().stream().map(s->s.target().localBlock()).distinct().count());
     }
     @Test void exactThreeNodeTerminalTakesRemainingForce() {
@@ -121,9 +122,9 @@ class DuperFixPropagationTest {
     }
     @Test void largeConnectedRegionDoesNotFalselyAbsorbAtWorkCap() {
         var cells=new HashSet<String>();
-        for(int x=-12;x<=12;x++)for(int y=-12;y<=12;y++)for(int z=-12;z<=12;z++)
+        for(int x=-18;x<=18;x++)for(int y=-18;y<=18;y++)for(int z=-18;z<=18;z++)
             cells.add(x+","+y+","+z);
-        var r=plan(cells,1e12,null,new ArrayList<>());
+        var r=plan(cells,1e70,null,new ArrayList<>());
         balanced(r);
         assertTrue(r.shares().size()>=ForcePropagation.MAX_NODES_PER_SIDE-1);
         assertTrue(r.shares().size()<=ForcePropagation.MAX_NODES_PER_SIDE);

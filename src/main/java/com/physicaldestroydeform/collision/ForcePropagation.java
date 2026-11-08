@@ -21,7 +21,7 @@ import java.util.function.Function;
 public final class ForcePropagation {
     // 128 truncated a radius-3.5 Plot and a small patch of terrain. The bound
     // still prevents unbounded work on huge connected World colliders.
-    public static final int MAX_NODES_PER_SIDE = 2048;
+    public static final int MAX_NODES_PER_SIDE = 32_768;
     public static final double MIN_REMAINING_F = 1.0 / 256.0;
     public static final double MIN_PROPAGATED_F = 1.0;
     public static final double MIN_ISSUED_Q = 1.0;
@@ -209,11 +209,11 @@ public final class ForcePropagation {
     // finite node cap and the explicit 1.0 F cutoff bound traversal.
     public static final int MAX_UNKNOWN_DEPTH=Integer.MAX_VALUE;
     public static final int MAX_NATIVE_DEPTH=Integer.MAX_VALUE;
-    // Gameplay geometry policy, not a measured material/solver constant.
-    // 30-degree forward expansion with a half-block opening. The opening lets
-    // a later layer traverse sideways without manufacturing disconnected hits.
-    private static final double FORWARD_CONE_SLOPE=0.5773502691896257;
-    private static final double CONTACT_RADIUS=0.5;
+    // Inward-tapering field: broad contact base and diminishing cross-section.
+    // Available depth scales logarithmically with GAME F (not measured Newtons);
+    // actual propagation still terminates sooner through F and elasticity.
+    private static final double MIN_CONTACT_RADIUS=1.5;
+    private static final double MAX_GEOMETRIC_DEPTH=32;
     private static final double GEOMETRY_EPS=1.0e-10;
 
     private static final class Flow {
@@ -283,6 +283,7 @@ public final class ForcePropagation {
         // for every visited node, and localBlock() is a string identifier.
         var seedCells=new ArrayList<int[]>(layer.size());
         for(var node:layer)seedCells.add(new int[]{node.x,node.y,node.z});
+        var field=ConeField.from(direction,seedCells,inputF);
         var all=new ArrayList<Flow>();
         double assigned=0,dampedF=0,unresolved=0,discardF=0,terminalF=0;
         int terminalNodes=0,maxDepth=0,paidEdges=0,mergedNodes=0,blockedNodes=0;
@@ -304,7 +305,7 @@ public final class ForcePropagation {
                         x=Math.addExact(node.x,step[0]);y=Math.addExact(node.y,step[1]);
                         z=Math.addExact(node.z,step[2]);
                     }catch(ArithmeticException overflow){blocked.put(node,"COORDINATE_OVERFLOW");continue;}
-                    if(!forwardStep(direction,step)||!withinField(direction,seedCells,x,y,z))continue;
+                    if(!forwardStep(direction,step)||!withinField(field,x,y,z))continue;
                     Probe proof=Objects.requireNonNull(neighbors.read(node.target,x,y,z),"missing neighbor proof");
                     if(proof.status()==ProbeStatus.UNKNOWN){blocked.put(node,"UNKNOWN_NEIGHBOR");unknown=true;continue;}
                     if(proof.status()!=ProbeStatus.PRESENT)continue;
@@ -485,24 +486,42 @@ public final class ForcePropagation {
         return n.x()*step[0]+n.y()*step[1]+n.z()*step[2]>=-GEOMETRY_EPS;
     }
 
-    /** Multi-source contact cone in the frozen owner-local grid. Do not
-     * transform each node using a moving world pose: all signed positions and
-     * the validated normal refer to the SAME owner-local collision frame.
-     * Position offsets are in block cells; no translation is applied to a
-     * direction vector. Graph adjacency is always checked separately. */
-    private static boolean withinField(Orientation direction,List<int[]> seeds,
-                                       int x,int y,int z) {
-        if(!direction.verified())return true;
-        FrameMath.Vec n=direction.inward();
-        for(var p:seeds) {
-            double dx=(double)x-p[0],dy=(double)y-p[1],dz=(double)z-p[2];
-            double parallel=dx*n.x()+dy*n.y()+dz*n.z();
-            if(parallel < -GEOMETRY_EPS)continue;
-            double radial2=Math.max(0,dx*dx+dy*dy+dz*dz-parallel*parallel);
-            double radius=CONTACT_RADIUS+parallel*FORWARD_CONE_SLOPE;
-            if(radial2<=radius*radius+GEOMETRY_EPS)return true;
+    /** Frozen per-credit geometry. Precompute once, not O(seed count) per
+     * visited neighbor; the surface of a large vessel may have 10,000 roots. */
+    private record ConeField(FrameMath.Vec inward,double cx,double cy,double cz,
+                             double baseRadius,double reach,Set<String> rootCells) {
+        static ConeField from(Orientation direction,List<int[]> seeds,double sourceF) {
+            if(!direction.verified())return null;
+            FrameMath.Vec n=direction.inward();
+            double sx=0,sy=0,sz=0;
+            for(var p:seeds){sx+=p[0];sy+=p[1];sz+=p[2];}
+            sx/=seeds.size();sy/=seeds.size();sz/=seeds.size();
+            double radius2=0;
+            for(var p:seeds) {
+                double ux=p[0]-sx,uy=p[1]-sy,uz=p[2]-sz;
+                double axial=ux*n.x()+uy*n.y()+uz*n.z();
+                radius2=Math.max(radius2,Math.max(0,ux*ux+uy*uy+uz*uz-axial*axial));
+            }
+            double base=Math.max(MIN_CONTACT_RADIUS,Math.sqrt(radius2)+0.5);
+            double reach=Math.min(MAX_GEOMETRIC_DEPTH,2+Math.log1p(Math.max(0,sourceF))/Math.log(2));
+            var rootCells=new HashSet<String>();
+            for(var p:seeds)rootCells.add(p[0]+","+p[1]+","+p[2]);
+            return new ConeField(n,sx,sy,sz,base,reach,Set.copyOf(rootCells));
         }
-        return false;
+    }
+    /** A wide verified contact face narrows inward. Every prospective child
+     * also requires an independent owner-local shape/neighbor proof. */
+    private static boolean withinField(ConeField field,int x,int y,int z) {
+        if(field==null)return true;
+        FrameMath.Vec n=field.inward();
+        double dx=x-field.cx(),dy=y-field.cy(),dz=z-field.cz();
+        double depth=dx*n.x()+dy*n.y()+dz*n.z();
+        if(depth < -GEOMETRY_EPS || depth>field.reach()+GEOMETRY_EPS)return false;
+        // The initial contact plane must not grow beyond source-proven seeds.
+        if(depth<=GEOMETRY_EPS && !field.rootCells().contains(x+","+y+","+z))return false;
+        double radius=field.baseRadius()*Math.max(0,1-depth/field.reach());
+        double radial2=Math.max(0,dx*dx+dy*dy+dz*dz-depth*depth);
+        return radial2<=radius*radius+GEOMETRY_EPS;
     }
 
     private static void add(Map<String,GameImpactCredit.Target> seen,String owner,GameImpactCredit.Target target) {

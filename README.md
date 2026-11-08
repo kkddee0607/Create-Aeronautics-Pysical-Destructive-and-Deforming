@@ -1,6 +1,6 @@
-# PDD 0.4.1 — Physical Destruction and Deforming
+# PDD 0.4.1-Fix — Physical Destruction and Deforming
 
-**Create Aeronautics: Physical Destruction and Deforming (PDD)** is a Minecraft Java 1.21.1 / NeoForge add-on that consumes Sable collision evidence to calculate block-level impact propagation and damage. Version **0.4.1** extends the read-only 0.4.0finalFix impact pipeline with **server-side damage accumulation and conditional destruction of eligible static World blocks**. Physical Plot block destruction, deformation, and stress mutation are **not enabled** in this release.
+**Create Aeronautics: Physical Destruction and Deforming (PDD)** is a Minecraft Java 1.21.1 / NeoForge add-on that consumes Sable collision evidence to calculate block-level impact propagation and damage. Version **0.4.1-Fix** builds on 0.4.1 and extends the read-only 0.4.0finalFix impact pipeline with **server-side damage accumulation and conditional destruction of eligible static World blocks**. Physical Plot block destruction, deformation, and stress mutation are **not enabled** in this release.
 
 > **Release status:** The 0.4.1 implementation is present in source, but a complete 0.4.1 Gradle/JUnit build, GitHub Actions verification, and in-game destruction/drop/restart tests were **not performed** when this source ZIP was assembled. Treat it as an **unverified development release**. Back up the world and test on a disposable server first. See [0.4.1 verification report](docs/PDD-0.4.1-RELEASE-VERIFICATION.md).
 
@@ -16,6 +16,18 @@
 | Sable | 2.0.6 (declared range `[2.0.6,2.1)`) |
 
 PDD does not replace Sable's physics solver or bundle its runtime. Install the required dependencies and the **built PDD JAR** in the server's `mods/` directory. The source ZIP is for development / GitHub Apply and **must not** be installed as a mod. A matching client mod configuration may be required by the mod loader; complete client-server compatibility remains unverified for this build.
+
+## 0.4.1-Fix: post-test collision corrections
+
+This fix preserves the **World-only mutation / Plot-preview** version boundary and the Sable original collision callback. Fixes:
+
+- Reconstructs **axis-aligned, four-corner-witnessed contact faces** by independently auditing each added candidate against the real owner-local block collision shape; the same approved collision issues one F/Q credit, not 25 credits. This is deliberately a bounded, evidence-based planar repair, **not** proof that arbitrary rotated or partially observed faces are recoverable.
+- Saturates the game-scale event F at `40,000,000` (100×100×100 blocks × 4 mass units per block × 10 speed units). This is a **gameplay F proxy, not a measured physical force in newtons**. With default `forceFloor=2`, `forceGain=0.161`, the default group-Q limit is `6,439,999.678`; larger valid forces are clamped rather than rejected.
+- Extends R2 contact-audit, seed, graph and World-queue and preview-state limits for large faces. An independently invalid owner/region/chunk or unverified collision remains ineligible.
+- Reverses verified-direction propagation geometry: a **broad proven contact face narrows inward**; maximum geometric reach grows monotonically with F and is bounded to 32 block steps. Actual damage still depends on per-block F, material attenuation and caps.
+- Removes the hardcoded list of breakable World block IDs. Single-cell vanilla and modded blocks are eligible subject to the unchanged **block entity / linked multiblock / unbreakable / owner / loaded chunk / claim / BreakEvent / stale state** vetoes. This is **not** unrestricted destruction of every installed machine or multi-block.
+
+> **Verification:** Isolated Java compilation and local tests were run; the current full NeoForge/Gradle/JUnit build and in-game behavior remain **unverified**. Always test on a backed-up disposable world. See [the fix verification record](docs/verification/0.4.1-Fix.md) and [integrated specification 1.0.7](docs/PDD-1.0.7-Integrated-Design-Specification.md).
 
 ## What's new in 0.4.1
 

@@ -81,10 +81,10 @@ final class ContactCreditLedgerTest {
             assertEquals(5.0,grant.allocatedB(),1e-9);
         }
     }
-    @Test void thirtyThreeTargetsFailClosedWithoutMintingBudget() {
+    @Test void overNewMaximumTargetsFailClosedWithoutMintingBudget() {
         var ledger=new ContactCreditLedger();
         var regions=new ArrayList<ContactCreditLedger.Region>();
-        for(int i=0;i<33;i++)regions.add(new ContactCreditLedger.Region(a(i),null));
+        for(int i=0;i<=ContactCreditLedger.MAX_TARGETS_PER_SIDE;i++)regions.add(new ContactCreditLedger.Region(a(i),null));
         var grant=ledger.issue(PAIR,approved(3,PAIR,a(0),null),
                 ContactCreditLedger.Source.SABLE_POST_EFFECT,regions);
         assertEquals(ContactCreditLedger.Status.INVALID_TARGET_SET,grant.status());

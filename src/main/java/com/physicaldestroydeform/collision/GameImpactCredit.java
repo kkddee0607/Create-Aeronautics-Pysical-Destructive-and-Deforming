@@ -15,7 +15,10 @@ import java.util.Objects;
  * No Minecraft/Sable mutable object crosses this boundary.</p>
  */
 public final class GameImpactCredit {
-    public static final String POLICY_REVISION = "PDD-IDS-1.0.7/0.4.0finalFix";
+    public static final String POLICY_REVISION = "PDD-IDS-1.0.7/0.4.1-Fix-F40M";
+    // User's 100^3 blocks * 4 mass-units/block * 10 m/s. This is a
+    // GAME F index (mass * speed); without stopping time it is NOT Newtons.
+    public static final double MAX_GAME_F = 100d * 100d * 100d * 4d * 10d;
 
     public record Settings(double forceEnter, double forceFloor, double forceGain,
                            double maxGroupQ, int separatedFrames, int maxEntries,
@@ -39,7 +42,7 @@ public final class GameImpactCredit {
          * F=400 -> Q=64.078 for the hypothetical mass-1, 10m/s test;
          * F=40,000 -> Q=6,439.678, distinct from small impacts.
          * The upper bound limits the total event budget, not per-block damage. */
-        public static Settings provisional() { return new Settings(2, 2, 0.161, 65536, 2, 4096, 600); }
+        public static Settings provisional() { return new Settings(2, 2, 0.161, 0.161*(MAX_GAME_F-2), 2, 4096, 600); }
         /** Per-version developer defaults, operator-overridable after gameplay testing. */
         public static Settings fromSystemProperties() {
             Settings d=provisional();
@@ -75,7 +78,7 @@ public final class GameImpactCredit {
         }
         public double candidate(double peak) {
             if (!Double.isFinite(peak) || peak < forceEnter) return 0;
-            return Math.min(maxGroupQ, forceGain * Math.max(0, peak - forceFloor));
+            return Math.min(maxGroupQ, forceGain * Math.max(0, Math.min(MAX_GAME_F,peak) - forceFloor));
         }
     }
 
@@ -291,7 +294,7 @@ public final class GameImpactCredit {
         final double b=frame.targetB()==null?0:q*0.5;
         // Two targets resolving to exactly the same owned block do not double credit it.
         final double bShare=frame.targetA()!=null && frame.targetA().equals(frame.targetB())?0:b;
-        return new Decision(s.phase,reason,frame.forcePeak(),q,
+        return new Decision(s.phase,reason,Math.min(MAX_GAME_F,frame.forcePeak()),q,
                 new Allocation(a,bShare,q-a-bShare),s.episode,s.episodeGeneration,
                 s.authorizationTick,frame.tick(),POLICY_REVISION);
     }

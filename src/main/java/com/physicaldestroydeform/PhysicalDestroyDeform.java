@@ -25,7 +25,7 @@ import org.slf4j.LoggerFactory;
 @Mod(PhysicalDestroyDeform.MOD_ID)
 public final class PhysicalDestroyDeform {
     public static final String MOD_ID = "physical_destroy_deform";
-    public static final String BUILD_VERSION = "0.4.1";
+    public static final String BUILD_VERSION = "0.4.1-Fix";
     private static final Logger LOGGER = LoggerFactory.getLogger(PhysicalDestroyDeform.class);
     private final AcceptanceReport acceptanceReport = new AcceptanceReport();
     private final RealFixRuntimeBridge bridge = new RealFixRuntimeBridge();
@@ -57,7 +57,7 @@ public final class PhysicalDestroyDeform {
             LOGGER.error("[PDD-SAVE] phase=START status=DISABLED reason=JOURNAL_INIT_FAILED " +
                     "worldMutation=OFF",unsafeJournal);
         }
-        LOGGER.info("[PDD-0.4.1] phase=START bridge=READ_ONLY nativeScalar=GAME_FORCE_PROXY " +
+        LOGGER.info("[PDD-0.4.1-Fix] phase=START bridge=READ_ONLY nativeScalar=GAME_FORCE_PROXY " +
                 "newNativeABI=NOT_REQUIRED customNullCallback=DISABLED developmentBaseSha=92b95b77c5a41009b425682079f940aa0d2e1607 worldMutation={}",
                 worldCommit==null?"DISABLED":"WORLD_STATIC_ONLY");
     }
@@ -73,7 +73,7 @@ public final class PhysicalDestroyDeform {
         SableContactQueue.drain();
         SableFrameCapture.clear();
         acceptanceReport.close();
-        LOGGER.info("[PDD-0.4.1] phase=STOP state=CLEARED worldMutation=STOPPED");
+        LOGGER.info("[PDD-0.4.1-Fix] phase=STOP state=CLEARED worldMutation=STOPPED");
     }
     private void onServerTick(ServerTickEvent.Post event) {
         // Snapshot and native inputs are consumed exactly once on the server tick.
@@ -85,7 +85,7 @@ public final class PhysicalDestroyDeform {
             bridge.tick(event.getServer(),callbacks,nativeEffects,preHistory,LOGGER);
         } catch (RuntimeException invalid) {
             // Never let a diagnostic bridge disrupt the physics/game tick.
-            LOGGER.error("[PDD-0.4.1] phase=BRIDGE_EXCEPTION reason={} nativeEffects={} " +
+            LOGGER.error("[PDD-0.4.1-Fix] phase=BRIDGE_EXCEPTION reason={} nativeEffects={} " +
                     "callbacks={} Q=0 worldMutation=OFF",invalid.getClass().getName(),
                     nativeEffects.size(),callbacks.size(),invalid);
         } finally {

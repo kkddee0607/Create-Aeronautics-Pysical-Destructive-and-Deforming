@@ -20,7 +20,7 @@ import java.util.function.Function;
 /** Bounded, diagnostic-only, server-thread shadow state. Not a Minecraft SavedData or ApplyReceipt.
  * Never reads or writes a block; previews are NOT queued for later commit. */
 public final class PreviewDamageLedger {
-    public static final int MAX_ENTRIES=8192;
+    public static final int MAX_ENTRIES=16_384;
     public static final int MAX_CREDITS=8192;
     public enum ResultStatus { ACCEPTED, DUPLICATE, CAPACITY }
     public record Result(ResultStatus status,MaterialPlanner.Report report,int entries,

@@ -12,13 +12,13 @@ class ExpandedImpactScaleTest {
     @Test void smallAndLargeImpactsRemainDistinct() {
         var settings=GameImpactCredit.Settings.provisional();
         assertEquals(0.161,settings.forceGain(),1e-12);
-        assertEquals(65536,settings.maxGroupQ(),0);
+        assertEquals(0.161*(GameImpactCredit.MAX_GAME_F-2),settings.maxGroupQ(),1e-6);
         assertEquals(41.216,settings.candidate(258),1e-9);
         assertEquals(64.078,settings.candidate(400),1e-9);
         assertEquals(6439.678,settings.candidate(40000),1e-9);
         assertTrue(settings.candidate(40000)>settings.candidate(400));
         assertTrue(settings.candidate(100000)>settings.candidate(40000));
-        assertEquals(65536,settings.candidate(1e12),0);
+        assertEquals(settings.maxGroupQ(),settings.candidate(1e12),1e-6);
         assertEquals(0,settings.candidate(Double.NaN),0);
     }
     @Test void theoreticalTenMetersPerSecondGrassThreshold() {

@@ -12,7 +12,7 @@ import java.util.*;
  * The gateway must implement NeoForge's real protection/event and vanilla-drop contract.
  */
 public final class WorldCommitCore {
-    public static final int DEFAULT_WORLD_BREAK_CAP_PER_TICK=64, MAX_QUEUED=8192;
+    public static final int DEFAULT_WORLD_BREAK_CAP_PER_TICK=64, MAX_QUEUED=16_384;
     public static final long MAX_DEFER_TICKS=1200;
     public enum Outcome { APPLIED_DAMAGE, APPLIED_BREAK, DEFERRED, ABORTED, QUARANTINED, DUPLICATE }
     public enum Permission { ALLOW, DENY, UNKNOWN }

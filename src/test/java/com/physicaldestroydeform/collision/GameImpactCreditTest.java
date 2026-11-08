@@ -45,7 +45,7 @@ final class GameImpactCreditTest {
     @Test void defaultPolicyIsBoundedAndSeparatesMeasuredImpactStrengths() {
         var d=Settings.provisional();
         assertEquals(0.161,d.forceGain(),1e-12);
-        assertEquals(65536,d.maxGroupQ(),0);
+        assertEquals(0.161*(GameImpactCredit.MAX_GAME_F-2),d.maxGroupQ(),1e-6);
         assertEquals(0.0,d.candidate(1.8));
         assertEquals(0.161*(3849.28271484375-2),d.candidate(3849.28271484375),1e-9);
         assertEquals(0.161*(30181.88671875-2),d.candidate(30181.88671875),1e-9);

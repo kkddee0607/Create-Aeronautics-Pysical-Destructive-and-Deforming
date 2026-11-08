@@ -173,12 +173,12 @@ public final class RealFixRuntimeBridge {
     /** Diagnostic snapshot ONLY. No connection to real World/Plot damage persistence. */
     public void loadPreview(MinecraftServer server,Logger log) {
         var q=credit.settings();
-        log.info("[PDD-POLICY] revision={} forceEnter={} forceFloor={} forceGain={} maxGroupQ={} " +
+        log.info("[PDD-POLICY] revision={} forceEnter={} forceFloor={} forceGain={} maxGroupQ={} maxGameF={} " +
                         "damageGain={} directShare={} plasticShare={} stressShare={} fixedPointScale={} " +
                         "F_FIRST=TRUE halfTransfer=0.5 maxNodesPerSide={} minRemainingF={} " +
                         "source=POST_EFFECT_GAME_PROXY measured=false mutation=OFF",
                 GameImpactCredit.POLICY_REVISION,q.forceEnter(),q.forceFloor(),q.forceGain(),
-                q.maxGroupQ(),damageSettings.damageGain(),DamageModel.DIRECT_SHARE,
+                q.maxGroupQ(),GameImpactCredit.MAX_GAME_F,damageSettings.damageGain(),DamageModel.DIRECT_SHARE,
                 DamageModel.PLASTIC_SHARE,DamageModel.STRESS_SHARE,
                 com.physicaldestroydeform.BlockDamageState.FIXED_SCALE,
                 ForcePropagation.MAX_NODES_PER_SIDE,ForcePropagation.MIN_PROPAGATED_F);
@@ -344,6 +344,11 @@ public final class RealFixRuntimeBridge {
                                     "checkedA={} checkedB={} regions={} status={} mutation=OFF",
                             pair.a().stableKey(),pair.b().stableKey(),r2Nanos,records.size(),
                             regions.checksA(),regions.checksB(),regions.regions().size(),regions.status());
+                    if(regions.trace().detail().contains("facePatchAddedA="))
+                        log.info("[PDD-CONTACT-PATCH] pair={}/{} nativeTick={} " +
+                                        "originalRecords={} verifiedRegions={} audit={} mutation=OFF",
+                                pair.a().stableKey(),pair.b().stableKey(),stamp.tick,
+                                records.size(),regions.regions().size(),regions.trace().detail());
                 }
                 else r2SkippedDuplicate++;
                 boolean saturatedPoll=records.stream().anyMatch(NativeCollisionTelemetry.Contact::capSaturated);
@@ -587,10 +592,11 @@ public final class RealFixRuntimeBridge {
                     boolean granted=grant!=null && grant.credited();
                     if(granted) {
                         log.info("[PDD-F-PERF] credit={} planNanos={} ownerCount=2 " +
-                                        "maxNodesPerSide={} eventF={} eventQCap={} " +
+                                        "maxNodesPerSide={} eventF={} eventQCap={} rawPeak={} fSaturated={} " +
                                         "normalMode={} traceEnabled={} includesTraceOutput={} mutation=OFF",
                                 grant.id(),propagationNanos,ForcePropagation.MAX_NODES_PER_SIDE,
-                                result.peakForce(),result.issuedQ(),nativeNormal.reason(),
+                                result.peakForce(),result.issuedQ(),group.forcePeak(),
+                                group.forcePeak()>GameImpactCredit.MAX_GAME_F,nativeNormal.reason(),
                                 F_TRACE_ENABLED,F_TRACE_ENABLED);
                         log.info("[PDD-NORMAL-PERF] credit={} verifyNanos={} availableRecords={} " +
                                         "capSampled={} verified={} mutation=OFF",

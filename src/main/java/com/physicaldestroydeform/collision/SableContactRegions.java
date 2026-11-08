@@ -17,8 +17,8 @@ public final class SableContactRegions {
     private SableContactRegions() {}
     /** Legacy pure-policy test budget; collect() retains its existing contract. */
     public static final int MAX_CHECKS_PER_SIDE=32;
-    /** Independent bounded runtime shape-read budget; damage target cap remains 32. */
-    public static final int RUNTIME_MAX_UNIQUE_CELLS_PER_SIDE=256;
+    /** Bounded read budget, independent of 16,384 verified damage targets. */
+    public static final int RUNTIME_MAX_UNIQUE_CELLS_PER_SIDE=32_768;
     public enum Status { PROVED, PARTIAL, NO_VERIFIED_REGION, TOO_BROAD, SKIPPED_DUPLICATE }
     public record Check(List<GameImpactCredit.Target> targets,int inspected,boolean incomplete,
                         String method,String detail) {
@@ -85,6 +85,8 @@ public final class SableContactRegions {
         // Repeated identical native points share shape audits, not credit.
         var cache=new HashMap<AuditKey,Check>();
         var nativeBatch=new OwnerResolver.NativeAuditBatch(server,dimension);
+        var ownerOffsets=new HashMap<String,net.minecraft.core.BlockPos>();
+        var inconsistentOffsets=new java.util.HashSet<String>();
         Result collected=collectWithBudget(pair,records,(contact,owner,remainingChecks)-> {
             int sourceSide=SableConsumerTargets.sourceSide(owner,contact,dimension);
             if(sourceSide==0)return new Check(List.of(),0,false,"UNVERIFIED","OWNER_FRAME_MISMATCH");
@@ -109,6 +111,10 @@ public final class SableContactRegions {
                 var evidence=sampled.result();
                 if(evidence.verified()) {
                     var targetKey=evidence.key();
+                    var offset=new net.minecraft.core.BlockPos(pos.getX()-targetKey.x(),
+                            pos.getY()-targetKey.y(),pos.getZ()-targetKey.z());
+                    var previous=ownerOffsets.putIfAbsent(owner,offset);
+                    if(previous!=null && !previous.equals(offset))inconsistentOffsets.add(owner);
                     found.add(new GameImpactCredit.Target(owner,targetKey.x()+","+targetKey.y()+","+targetKey.z(),targetKey.fingerprint()));
                 }
             }
@@ -125,17 +131,85 @@ public final class SableContactRegions {
             cache.put(key,result);
             return result;
         }, RUNTIME_MAX_UNIQUE_CELLS_PER_SIDE);
+        // PDD-local repair of Sable 2.0.6's intentional Face/Face and
+        // Edge/Face manifold omissions. Four corroborated corner witnesses may
+        // describe one broad planar patch. Only individually shape-proven cells
+        // are admitted, and the common event still issues exactly one F/Q.
+        int expandedA=0, expandedB=0, attemptedA=0, attemptedB=0;
+        int shapeChecksA=0, shapeChecksB=0;
+        String patchStatus="NOT_ELIGIBLE";
+        if(collected.verified() && collected.trace().failure()==AuditFailure.NONE) {
+            var joined=new LinkedHashSet<>(collected.regions());
+            String[] owners={pair.a().stableKey(),pair.b().stableKey()};
+            StringBuilder descriptions=new StringBuilder();
+            for(int side=0;side<2;side++) {
+                final String owner=owners[side];
+                var originals=new LinkedHashSet<GameImpactCredit.Target>();
+                for(var region:collected.regions()) {
+                    var candidate=side==0?region.a():region.b();
+                    if(candidate!=null)originals.add(candidate);
+                }
+                var offset=ownerOffsets.get(owner);
+                if(offset==null || inconsistentOffsets.contains(owner)) {
+                    descriptions.append(side==0?"A=":" B=").append("OWNER_GRID_OFFSET_UNVERIFIED");
+                    continue;
+                }
+                int already=side==0?collected.checksA():collected.checksB();
+                int[] additional={0};
+                boolean[] exceeded={false};
+                var patch=ContactFacePatch.reconstruct(dimension,owner,offset,originals,records,(pos,point)-> {
+                    net.minecraft.core.BlockPos absolute;
+                    try { absolute=new net.minecraft.core.BlockPos(Math.addExact(pos.getX(),offset.getX()),
+                            Math.addExact(pos.getY(),offset.getY()),Math.addExact(pos.getZ(),offset.getZ())); }
+                    catch(ArithmeticException overflow){return null;}
+                    if(!nativeBatch.cached(owner,absolute) && already+additional[0]>=RUNTIME_MAX_UNIQUE_CELLS_PER_SIDE) {
+                        exceeded[0]=true;
+                        return null;
+                    }
+                    var sample=nativeBatch.inspect(owner,absolute,new FrameMath.Vec(
+                            point.x()+offset.getX(),point.y()+offset.getY(),point.z()+offset.getZ()));
+                    if(sample.newCell())additional[0]++;
+                    if(!sample.result().verified())return null;
+                    var key=sample.result().key();
+                    return new GameImpactCredit.Target(owner,
+                            key.x()+","+key.y()+","+key.z(),key.fingerprint());
+                });
+                if(side==0)shapeChecksA=additional[0];else shapeChecksB=additional[0];
+                int size=originals.size()+patch.added().size();
+                if(!exceeded[0] && size<=ContactCreditLedger.MAX_TARGETS_PER_SIDE
+                        && joined.size()+patch.added().size()<=ContactCreditLedger.MAX_REGIONS) {
+                    for(var target:patch.added())joined.add(side==0
+                            ?new ContactCreditLedger.Region(target,null)
+                            :new ContactCreditLedger.Region(null,target));
+                    if(side==0){expandedA=patch.added().size();attemptedA=patch.attempted();}
+                    else {expandedB=patch.added().size();attemptedB=patch.attempted();}
+                }
+                descriptions.append(side==0?"A=":" B=")
+                        .append(exceeded[0]?"SHAPE_BUDGET":size>ContactCreditLedger.MAX_TARGETS_PER_SIDE
+                                ?"TARGET_BUDGET":patch.reason())
+                        .append(" tested=").append(patch.attempted());
+            }
+            patchStatus=descriptions.toString();
+            collected=new Result(new ArrayList<>(joined),
+                    collected.status(),collected.checksA()+shapeChecksA,collected.checksB()+shapeChecksB,
+                    collected.rejected(),collected.methodA(),collected.methodB(),collected.trace());
+        }
         var t=collected.trace();
         var stats=nativeBatch.stats();
         var t2=new Trace(t.failure(),t.sourceIndex(),t.processedRecords(),
-                t.remainingA(),t.remainingB(),t.requestedA(),t.requestedB(),
+                Math.max(0,RUNTIME_MAX_UNIQUE_CELLS_PER_SIDE-collected.checksA()),
+                Math.max(0,RUNTIME_MAX_UNIQUE_CELLS_PER_SIDE-collected.checksB()),
+                t.requestedA(),t.requestedB(),
                 t.verifiedTargetsA(),t.verifiedTargetsB(),t.regionCount(),t.rejectedContacts(),
                 t.detail()+" auditedUniqueOwnerCells="+stats.newCells()
                         +" reusedCellReads="+stats.reusedCells()
                         +" shapePointTests="+stats.pointTests()
                         +" testedShapeBoxes="+stats.testedBoxes()
                         +" cellBudgetPerSide="+RUNTIME_MAX_UNIQUE_CELLS_PER_SIDE
-                        +" damageTargetCapPerSide="+ContactCreditLedger.MAX_TARGETS_PER_SIDE);
+                        +" damageTargetCapPerSide="+ContactCreditLedger.MAX_TARGETS_PER_SIDE
+                        +" contactPatch="+patchStatus
+                        +" facePatchAddedA="+expandedA+" facePatchAddedB="+expandedB
+                        +" facePatchAttemptedA="+attemptedA+" facePatchAttemptedB="+attemptedB);
         return new Result(collected.regions(),collected.status(),collected.checksA(),collected.checksB(),
                 collected.rejected(),collected.methodA(),collected.methodB(),t2);
     }
