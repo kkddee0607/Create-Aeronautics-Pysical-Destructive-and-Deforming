@@ -30,7 +30,7 @@ class ContactFacePatchTest {
     @Test void fourCornerContactWitnessesRecoverAllTwentyFiveVerifiedCells() {
         var result=ContactFacePatch.reconstruct(DIM,OWNER,BlockPos.ZERO,cornerIslands(),corners(),
                 (pos,point)->target(pos.getX(),pos.getZ()));
-        assertEquals("SHAPE_VERIFIED_FACE",result.reason());
+        assertTrue(result.reason().startsWith("SHAPE_VERIFIED_SURFACES"),result.reason());
         assertEquals(9,result.added().size());
         assertEquals(9,result.attempted());
         assertEquals(25,new HashSet<>(result.added()).size()+cornerIslands().size());
@@ -46,7 +46,7 @@ class ContactFacePatchTest {
                     visited.add(pos.getX()+","+pos.getZ());
                     return target(pos.getX(),pos.getZ());
                 });
-        assertEquals("SHAPE_VERIFIED_FACE",patch.reason());
+        assertTrue(patch.reason().startsWith("SHAPE_VERIFIED_SURFACES"),patch.reason());
         assertEquals(21,patch.added().size());
         assertEquals(21,patch.attempted());
         assertTrue(visited.contains("2,2"));
@@ -60,7 +60,7 @@ class ContactFacePatchTest {
         var one=List.of(target(0,0));
         var result=ContactFacePatch.reconstruct(DIM,OWNER,BlockPos.ZERO,one,corners(),
                 (pos,point)->target(pos.getX(),pos.getZ()));
-        assertEquals("SHAPE_VERIFIED_FACE",result.reason());
+        assertTrue(result.reason().startsWith("SHAPE_VERIFIED_SURFACES"),result.reason());
         assertEquals(24,result.added().size());
         assertEquals(25,result.added().size()+one.size());
     }
@@ -71,7 +71,7 @@ class ContactFacePatchTest {
         var four=List.of(target(0,0),target(0,4),target(4,0),target(4,4));
         var result=ContactFacePatch.reconstruct(DIM,OWNER,BlockPos.ZERO,four,records,
                 (pos,point)->target(pos.getX(),pos.getZ()));
-        assertEquals("SHAPE_VERIFIED_FACE",result.reason());
+        assertTrue(result.reason().startsWith("SHAPE_VERIFIED_SURFACES"),result.reason());
         assertEquals(21,result.added().size());
     }
     @Test void diagonalWitnessesCannotFabricateARectangle() {
@@ -80,14 +80,17 @@ class ContactFacePatchTest {
                 0,-1,0,0,1,0,0,0,0,p+0.5,65,p+0.5,DIM,5));
         var result=ContactFacePatch.reconstruct(DIM,OWNER,BlockPos.ZERO,cornerIslands(),diagonal,
                 (pos,point)->target(pos.getX(),pos.getZ()));
-        assertEquals("NO_CORROBORATED_FACE",result.reason());
-        assertTrue(result.added().isEmpty());
+        assertTrue(result.reason().startsWith("SHAPE_VERIFIED_SURFACES"));
+        assertTrue(result.added().stream().allMatch(t -> {
+            String[] c=t.localBlock().split(",");
+            return c[0].equals(c[2]);
+        }),"A diagonal native contact may recover a line, never a whole rectangle");
     }
     @Test void onlyIndividuallyProvenFaceBlocksReceiveRecoveredTargets() {
         var four=List.of(target(0,0),target(0,4),target(4,0),target(4,4));
         var result=ContactFacePatch.reconstruct(DIM,OWNER,BlockPos.ZERO,four,corners(),
                 (pos,point)->pos.getX()==2&&pos.getZ()==2?null:target(pos.getX(),pos.getZ()));
-        assertEquals("SHAPE_VERIFIED_FACE",result.reason());
+        assertTrue(result.reason().startsWith("SHAPE_VERIFIED_SURFACES"),result.reason());
         assertEquals(20,result.added().size());
         assertTrue(result.added().stream().noneMatch(t->t.localBlock().equals("2,64,2")));
     }
@@ -102,7 +105,7 @@ class ContactFacePatchTest {
                 (pos,point)->target(pos.getX(),pos.getZ()));
         assertEquals(10000-4,result.added().size());
         assertEquals(10000-4,result.attempted());
-        assertEquals("SHAPE_VERIFIED_FACE",result.reason());
+        assertTrue(result.reason().startsWith("SHAPE_VERIFIED_SURFACES"),result.reason());
     }
     @Test void missingInnerShapeNeverBecomesASyntheticContact() {
         var result=ContactFacePatch.reconstruct(DIM,OWNER,BlockPos.ZERO,cornerIslands(),corners(),
@@ -116,8 +119,10 @@ class ContactFacePatchTest {
         assertTrue(invalid.added().isEmpty());
         var oblique=corners().stream().map(c->new NativeCollisionTelemetry.Contact(7,-1,3500,
                 0,-1,0,0,1,1,0,0,0,c.contactBX(),65,c.contactBZ(),DIM,5)).toList();
-        assertEquals("NOT_AXIS_ALIGNED",ContactFacePatch.reconstruct(DIM,OWNER,BlockPos.ZERO,
-                cornerIslands(),oblique,(pos,point)->target(pos.getX(),pos.getZ())).reason());
+        // Oblique local normals now retain their own (potentially sloped)
+        // source planes; they are not rejected as non-axis-aligned up front.
+        assertNotNull(ContactFacePatch.reconstruct(DIM,OWNER,BlockPos.ZERO,
+                cornerIslands(),oblique,(pos,point)->target(pos.getX(),pos.getZ())));
     }
     @Test void plotStorageOffsetMustNotBeConfusedWithRelativeCoordinates() {
         var off=new BlockPos(20_480_000,64,20_480_000);
@@ -146,8 +151,71 @@ class ContactFacePatchTest {
         var result=ContactFacePatch.reconstruct(DIM,plot,offset,List.of(source),contacts,
                 (pos,point)->new GameImpactCredit.Target(plot,
                         pos.getX()+","+pos.getY()+","+pos.getZ(),"minecraft:netherite_block"));
-        assertEquals("SHAPE_VERIFIED_FACE",result.reason());
+        assertTrue(result.reason().startsWith("SHAPE_VERIFIED_SURFACES"),result.reason());
         assertEquals(24,result.added().size());
         assertTrue(result.added().stream().anyMatch(t->t.localBlock().equals("2,64,2")));
     }
+
+    @Test void twoIndependentPerpendicularFacesRecoverEveryVerifiedCellWithoutDoubleForce() {
+        var records=new ArrayList<NativeCollisionTelemetry.Contact>();
+        for(int x:new int[]{0,3})for(int z:new int[]{0,3})
+            records.add(new NativeCollisionTelemetry.Contact(7,-1,4000,
+                    0,-1,0,0,1,0,0,0,0,x+0.5,65,z+0.5,DIM,42));
+        for(int y:new int[]{64,67})for(int z:new int[]{0,3})
+            records.add(new NativeCollisionTelemetry.Contact(7,-1,4000,
+                    1,0,0,-1,0,0,0,0,0,5,y+0.5,z+0.5,DIM,42));
+        var horizontal=new GameImpactCredit.Target(OWNER,"0,64,0","minecraft:stone");
+        var vertical=new GameImpactCredit.Target(OWNER,"5,64,0","minecraft:stone");
+        var patch=ContactFacePatch.reconstruct(DIM,OWNER,BlockPos.ZERO,
+                List.of(horizontal,vertical),records,(pos,point)->
+                    (pos.getY()==64&&pos.getX()>=0&&pos.getX()<4 ||
+                     pos.getX()==5&&pos.getY()>=64&&pos.getY()<68)
+                      ?new GameImpactCredit.Target(OWNER,
+                        pos.getX()+","+pos.getY()+","+pos.getZ(),"minecraft:stone"):null);
+        assertTrue(patch.reason().contains("faces=2"),patch.reason());
+        var all=new HashSet<GameImpactCredit.Target>(List.of(horizontal,vertical));
+        all.addAll(patch.added());
+        assertEquals(32,all.size());
+        assertTrue(all.contains(new GameImpactCredit.Target(OWNER,"2,64,2","minecraft:stone")));
+        assertTrue(all.contains(new GameImpactCredit.Target(OWNER,"5,66,2","minecraft:stone")));
+    }
+
+    @Test void nativeTriangleDoesNotFabricateBoundingRectangleCorners() {
+        var contacts=new ArrayList<NativeCollisionTelemetry.Contact>();
+        for(var c:new double[][]{{0.5,0.5},{4.5,0.5},{0.5,4.5}})
+            contacts.add(new NativeCollisionTelemetry.Contact(7,-1,3500,
+                    0,-1,0,0,1,0,0,0,0,c[0],65,c[1],DIM,5));
+        var patch=ContactFacePatch.reconstruct(DIM,OWNER,BlockPos.ZERO,
+                List.of(target(0,0)),contacts,(pos,point)->target(pos.getX(),pos.getZ()));
+        assertTrue(patch.reason().startsWith("SHAPE_VERIFIED_SURFACES"),patch.reason());
+        assertTrue(patch.added().stream().anyMatch(t->t.localBlock().equals("1,64,1")));
+        assertFalse(patch.added().stream().anyMatch(t->t.localBlock().equals("4,64,4")));
+    }
+
+    @Test void oversizedUnverifiedRectangleIsBudgetedWithoutFabricatedTargets() {
+        var contacts=new ArrayList<NativeCollisionTelemetry.Contact>();
+        for(int x:new int[]{0,199})for(int z:new int[]{0,199})
+            contacts.add(new NativeCollisionTelemetry.Contact(7,-1,3500,
+                    0,-1,0,0,1,0,0,0,0,x+0.5,65,z+0.5,DIM,5));
+        var patch=ContactFacePatch.reconstruct(DIM,OWNER,BlockPos.ZERO,
+                List.of(target(0,0)),contacts,(pos,point)->target(pos.getX(),pos.getZ()));
+        assertEquals("PATCH_BUDGET",patch.reason());
+        assertTrue(patch.added().isEmpty());
+    }
+    @Test void rotatedPlaneReconstructsOwnerVerifiedCellsWithoutAxisAlignedSpecialCase() {
+        var contacts=new ArrayList<NativeCollisionTelemetry.Contact>();
+        for(double y:new double[]{5.5,7.5})for(double z:new double[]{0.5,3.5}) {
+            double x=10.0-y;
+            contacts.add(new NativeCollisionTelemetry.Contact(7,-1,3000,
+                    0,-1,0,1,1,0,0,0,0,x,y,z,DIM,77));
+        }
+        var seed=new GameImpactCredit.Target(OWNER,"4,5,0","minecraft:stone");
+        var result=ContactFacePatch.reconstruct(DIM,OWNER,BlockPos.ZERO,
+                List.of(seed),contacts,(pos,point)->new GameImpactCredit.Target(OWNER,
+                        pos.getX()+","+pos.getY()+","+pos.getZ(),"minecraft:stone"));
+        assertTrue(result.reason().contains("faces=1"),result.reason());
+        assertEquals(11,result.added().size());
+        assertTrue(result.added().stream().anyMatch(t->t.localBlock().equals("3,6,2")));
+    }
+
 }

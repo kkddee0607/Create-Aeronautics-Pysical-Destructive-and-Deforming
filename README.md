@@ -1,8 +1,8 @@
-# PDD 0.4.1-Fix3 (corrected) — Physical Destruction and Deforming
+# PDD 0.4.1-moreFix — Physical Destruction and Deforming
 
-**Create Aeronautics: Physical Destruction and Deforming (PDD)** is a Minecraft Java 1.21.1 / NeoForge add-on that consumes Sable collision evidence to calculate block-level impact propagation and damage. Version **0.4.1-Fix** builds on 0.4.1 and extends the read-only 0.4.0finalFix impact pipeline with **server-side damage accumulation and conditional destruction of eligible static World blocks**. Physical Plot block destruction, deformation, and stress mutation are **not enabled** in this release.
+**Create Aeronautics: Physical Destruction and Deforming (PDD)** is a Minecraft Java 1.21.1 / NeoForge add-on that consumes Sable collision evidence to calculate block-level impact propagation and damage. The **0.4.1-moreFix** release retains the 0.4.1 lineage and extends the read-only 0.4.0finalFix impact pipeline with **server-side damage accumulation and conditional destruction of eligible static World blocks**. Physical Plot block destruction, deformation, and stress mutation are **not enabled** in this release.
 
-> **Release status:** The 0.4.1 implementation is present in source, but a complete 0.4.1 Gradle/JUnit build, GitHub Actions verification, and in-game destruction/drop/restart tests were **not performed** when this source ZIP was assembled. Treat it as an **unverified development release**. Back up the world and test on a disposable server first. See [0.4.1 verification report](docs/PDD-0.4.1-RELEASE-VERIFICATION.md).
+> **moreFix release status:** This source passed 39 Java21 independent stub-based test methods, but the 0.4.1-moreFix Gradle/JUnit build, GitHub Actions, and in-game destruction/contact tests were **not performed** when this ZIP was assembled. Treat it as an **unverified development release**. Back up the world and test on a disposable server first. See [0.4.1 verification report](docs/PDD-0.4.1-RELEASE-VERIFICATION.md).
 
 ## Supported environment
 
@@ -16,6 +16,15 @@
 | Sable | 2.0.6 (declared range `[2.0.6,2.1)`) |
 
 PDD does not replace Sable's physics solver or bundle its runtime. Install the required dependencies and the **built PDD JAR** in the server's `mods/` directory. The source ZIP is for development / GitHub Apply and **must not** be installed as a mod. A matching client mod configuration may be required by the mod loader; complete client-server compatibility remains unverified for this build.
+
+## 0.4.1-moreFix — bounded multi-surface runtime correction (2026-11-08)
+
+- **General contact surfaces, not a 5×5 special case.** The owner-local native contact witnesses are grouped by compatible planes; the actual 2D convex contact hull (or witnessed segment) of each group is rasterized and every candidate block is independently rechecked against the real owner-local collision shape. Multiple perpendicular / oblique source planes can contribute seeds to the **same original F/Q event**, without multiplying force or inventing extra solver contacts. No four-corner predicate or one-rectangle restriction remains. Shape/audit, source evidence, region and graph budgets remain enforced.
+- **Late first-impact authorization.** A pair first observed in contact is no longer permanently disqualified before the first approved credit. The server can re-audit an ACTIVE zero-credit pair when a previous stable-world-block and Plot AABB snapshot independently prove new approach. The credit FSM permits one first authorization on that independently proved approach. High F **alone never overrides** the duplicate-contact gate; further credits still require verified separation and rearm.
+- **Finite F saturation:** `MAX_GAME_F=40,000,000` and default `maxGroupQ=0.161×(MAX_GAME_F−2)` are derived from the same cap, with no arbitrary 5×5 or force-exception threshold. Look for `[PDD-HIGH-F]` to distinguish `approval` rejections from `cappedF` and `[PDD-CONTACT-PATCH]` for individual recovered surface counts.
+- **Honest constraint:** The Sable 2.0.6 post-effect records lack a complete synchronized native manifold, per-contact pose and collider-pair snapshot. This patch reconstructs shape-verified **gameplay damage candidates**, not exact native contact forces or a mathematical guarantee of all actual contacting blocks. Plot block mutation/deformation remains preview-only; material, World write and callback safety gates are not removed.
+
+> moreFix is **not a verified game release**: independent Java 21 source/test compilation is separate from Gradle/JUnit, Actions and in-game testing. See `docs/verification/0.4.1-moreFix.md` for acceptance tests and remaining risks.
 
 ## 0.4.1-Fix3 reconstructed contact face (2026-11-08)
 

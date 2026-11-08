@@ -15,7 +15,7 @@ import java.util.Objects;
  * No Minecraft/Sable mutable object crosses this boundary.</p>
  */
 public final class GameImpactCredit {
-    public static final String POLICY_REVISION = "PDD-IDS-1.0.7/0.4.1-Fix-F40M";
+    public static final String POLICY_REVISION = "PDD-IDS-1.0.7/0.4.1-moreFix-CONTACT-RECOVERY";
     // User's 100^3 blocks * 4 mass-units/block * 10 m/s. This is a
     // GAME F index (mass * speed); without stopping time it is NOT Newtons.
     public static final double MAX_GAME_F = 100d * 100d * 100d * 4d * 10d;
@@ -258,17 +258,30 @@ public final class GameImpactCredit {
             return decision(s,Reason.UNKNOWN_SEPARATION,frame,0);
         }
         if (s.phase == Phase.COOLING || s.phase == Phase.UNINITIALIZED) {
-            s.phase=Phase.ACTIVE; s.separatedSamples=0; s.pendingApproach=false;
-            s.authorizationTick=-1;
+            // A genuinely first observed approach may have no prior clearance
+            // snapshot. Do not burn its ONLY opportunity when independent
+            // geometry already proves approach and owner-local targets exist.
+            // Cooling still requires normal positive rearm evidence.
+            boolean firstApproach=s.phase==Phase.UNINITIALIZED && frame.verifiedApproach();
+            s.phase=Phase.ACTIVE; s.separatedSamples=0;
+            s.pendingApproach=firstApproach;
+            s.authorizationTick=firstApproach?frame.tick():-1;
+            s.burstFrames=0;
             s.episodeGeneration++;
-            return decision(s,Reason.INITIAL_CONTACT_UNKNOWN,frame,0);
-        }
-        if (s.phase == Phase.ARMED) {
+            if(!firstApproach)return decision(s,Reason.INITIAL_CONTACT_UNKNOWN,frame,0);
+        } else if (s.phase == Phase.ARMED) {
             s.phase=Phase.ACTIVE; s.separatedSamples=0;
             s.pendingApproach=frame.verifiedApproach();
             s.authorizationTick=s.pendingApproach?frame.tick():-1;
             s.episodeGeneration++;
             s.burstFrames=0;
+        } else if (s.phase == Phase.ACTIVE && s.episode==0 && frame.verifiedApproach()
+                && (!s.pendingApproach || s.burstFrames>=2)
+                && (s.authorizationTick<0 || frame.tick()-s.authorizationTick>=config.quietFrames())) {
+            // An initially unknown collision can later become independently
+            // proved. This one-time recovery is NEVER triggered by force size.
+            // Once any credit issues, ordinary separation/rearm is mandatory.
+            s.pendingApproach=true;s.authorizationTick=frame.tick();s.burstFrames=0;
         } else if (s.phase != Phase.ACTIVE || !s.pendingApproach || s.burstFrames >= 2) {
             return decision(s,Reason.DUPLICATE_EPISODE,frame,0);
         }

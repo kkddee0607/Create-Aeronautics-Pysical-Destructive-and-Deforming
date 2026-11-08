@@ -18,7 +18,7 @@ class Fix3FaceImpactPipelineTest {
         var face=ContactFacePatch.reconstruct(ContactFacePatchTest.DIM,
                 ContactFacePatchTest.OWNER,BlockPos.ZERO,roots,ContactFacePatchTest.corners(),
                 (pos,p)->ContactFacePatchTest.target(pos.getX(),pos.getZ()));
-        assertEquals("SHAPE_VERIFIED_FACE",face.reason());
+        assertTrue(face.reason().startsWith("SHAPE_VERIFIED_SURFACES"),face.reason());
         var all=new HashSet<>(roots);
         all.addAll(face.added());
         assertEquals(25,all.size());

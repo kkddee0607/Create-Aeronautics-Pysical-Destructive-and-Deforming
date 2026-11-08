@@ -170,7 +170,7 @@ final class GameImpactCreditTest {
         assertEquals(Phase.ARMED,e.phase(P));
         e.invalidateOwner(P.a().stableKey());
         assertEquals(Phase.UNINITIALIZED,e.phase(P));
-        assertEquals(Reason.INITIAL_CONTACT_UNKNOWN,e.step(frame(3,MANY,false,true,TA,TB)).reason());
+        assertEquals(Reason.APPROVED,e.step(frame(3,MANY,false,true,TA,TB)).reason());
     }
     @Test void risingEdgeNeedsQuietEvidenceAndIndependentGeometry() {
         var e=new GameImpactCredit(new GameImpactCredit.Settings(2,2,0.25,64,2,4096,600));
@@ -199,5 +199,51 @@ final class GameImpactCreditTest {
         var repeat=e.step(frame(8,MANY,false,true,TA,TB));
         assertTrue(repeat.credited());
         assertEquals(2,repeat.episodeGeneration());
+    }
+
+    @Test void hugeFirstContactWithProvenApproachIsNotRejectedForMissingWarmup() {
+        var e=new GameImpactCredit(Settings.provisional());
+        var huge=List.of(new ObservedForce(-1,7,1e14,0));
+        var decision=e.step(frame(1,huge,false,true,TA,TB));
+        assertEquals(Reason.APPROVED,decision.reason());
+        assertEquals(GameImpactCredit.MAX_GAME_F,decision.peakForce());
+        assertEquals(e.settings().candidate(GameImpactCredit.MAX_GAME_F),decision.issuedQ(),1e-6);
+        assertEquals(Reason.DUPLICATE_EPISODE,e.step(frame(2,huge,false,true,TA,TB)).reason());
+    }
+    @Test void initiallyUnprovenCollisionRecoversOnlyWhenIndependentApproachAppears() {
+        var e=new GameImpactCredit(Settings.provisional());
+        var huge=List.of(new ObservedForce(-1,7,21_323_370,0));
+        assertEquals(Reason.INITIAL_CONTACT_UNKNOWN,
+                e.step(frame(1,huge,false,false,TA,TB)).reason());
+        assertEquals(Reason.DUPLICATE_EPISODE,
+                e.step(frame(2,huge,false,false,TA,TB)).reason());
+        var recovered=e.step(frame(3,huge,false,true,TA,TB));
+        assertTrue(recovered.credited());
+        assertEquals(21_323_370,recovered.peakForce());
+        assertEquals(1,recovered.episode());
+        assertEquals(Reason.DUPLICATE_EPISODE,
+                e.step(frame(4,huge,false,true,TA,TB)).reason());
+    }
+    @Test void noApproachCannotPromoteEvenExtremeRawForce() {
+        var e=new GameImpactCredit(Settings.provisional());
+        var huge=List.of(new ObservedForce(-1,7,Double.MAX_VALUE,0));
+        assertEquals(Reason.INITIAL_CONTACT_UNKNOWN,
+                e.step(frame(1,huge,false,false,TA,TB)).reason());
+        assertEquals(Reason.DUPLICATE_EPISODE,
+                e.step(frame(2,huge,false,false,TA,TB)).reason());
+    }
+
+    @Test void firstUnresolvedTargetCanRecoverOnLaterVerifiedApproachWithoutDoubleCredit() {
+        var e=new GameImpactCredit(Settings.provisional());
+        var large=List.of(new ObservedForce(-1,7,21_323_370,0));
+        assertEquals(Reason.TARGET_UNVERIFIED,
+                e.step(frame(1,large,false,true,null,null)).reason());
+        assertEquals(Reason.TARGET_UNVERIFIED,
+                e.step(frame(2,large,false,false,null,null)).reason());
+        assertEquals(Reason.DUPLICATE_EPISODE,
+                e.step(frame(3,large,false,false,TA,TB)).reason());
+        assertTrue(e.step(frame(4,large,false,true,TA,TB)).credited());
+        assertEquals(Reason.DUPLICATE_EPISODE,
+                e.step(frame(5,large,false,true,TA,TB)).reason());
     }
 }

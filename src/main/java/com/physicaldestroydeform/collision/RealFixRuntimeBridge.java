@@ -103,6 +103,7 @@ public final class RealFixRuntimeBridge {
         long lastVerfRegionTick=-1;
         String lastVerfFsm="";
         long lastVerfFsmTick=-1;
+        long lastHighFLogTick=-1;
         String lastVerfR4="";
         long lastVerfR4Tick=-1;
         String lastClearanceStatus="";
@@ -182,9 +183,9 @@ public final class RealFixRuntimeBridge {
                 DamageModel.PLASTIC_SHARE,DamageModel.STRESS_SHARE,
                 com.physicaldestroydeform.BlockDamageState.FIXED_SCALE,
                 ForcePropagation.MAX_NODES_PER_SIDE,ForcePropagation.MIN_PROPAGATED_F);
-        log.info("[PDD-FACE-POLICY] revision=Fix3-FACE25 nativeCornerWitnesses=4 " +
-                "maxFaceArea=10000 ownerLocalShapeProof=REQUIRED sourceBudget=ONE_COLLISION " +
-                "unknownOrNonPlanar=NO_SYNTHETIC_TARGETS");
+        log.info("[PDD-FACE-POLICY] revision=moreFix-MULTIFACE nativeWitnesses=2+ " +
+                "maxFaceArea=16384 ownerLocalShapeProof=REQUIRED sourceBudget=ONE_COLLISION " +
+                "unsupportedSurfaces=NO_SYNTHETIC_TARGETS");
         // A changed Q, damage, material override or datapack cache must not replay
         // the previous calibration's diagnostic damage as this policy's result.
         previewPolicyId=calibrationIdentity();
@@ -332,10 +333,23 @@ public final class RealFixRuntimeBridge {
                 // Sable consumer pose; aggregate only source-proven block keys.
                 // The owner/pair/tick has a separate bounded R2 shape-check budget (32768 unique cells/side); verified damage targets are capped at 16384/side.
                 var beforeAudit=credit.evidence(pair);
-                // An exhausted ACTIVE episode cannot mint Q. Still observe
-                // native records and advance FSM, but skip expensive shape I/O.
+                // Before a pair's FIRST successful credit, allow a renewed R2
+                // audit only when a stable, previously inspected World block
+                // and the Plot's actual world AABB prove new geometric closure.
+                // Large force alone is not proof, and stationary contacts stay cheap.
+                Tracked priorTracking=tracked.get(pair);
+                boolean recoverFirstApproach=beforeAudit.phase()==Phase.ACTIVE
+                        && beforeAudit.episode()==0 && !beforeAudit.pendingApproach()
+                        && priorTracking!=null && priorTracking.previousA!=null
+                        && priorTracking.previousB!=null
+                        && RealFixBoundsEvidence.approaching(priorTracking.previousA,
+                            priorTracking.previousB,
+                            box(server,pair.a().stableKey(),priorTracking.a,stamp.dimension,worldBounds,knownWorldBlocks),
+                            box(server,pair.b().stableKey(),priorTracking.b,stamp.dimension,worldBounds,knownWorldBlocks));
+                // An exhausted ACTIVE episode cannot mint Q. Audit only a
+                // positive first-approach recovery or an authorized new episode.
                 boolean auditEligible=beforeAudit.phase()!=Phase.ACTIVE
-                        || beforeAudit.hasUnspentAuthorization();
+                        || beforeAudit.hasUnspentAuthorization() || recoverFirstApproach;
                 long r2Start=auditEligible?System.nanoTime():0;
                 var massSafe=auditEligible?massEpochs.validate(stamp.dimension,stamp.tick,records):null;
                 var regions=auditEligible?SableContactRegions.audit(server,stamp.dimension,pair,massSafe.contacts())
@@ -396,7 +410,13 @@ public final class RealFixRuntimeBridge {
                 boolean armedFromGap=phaseBefore==Phase.ARMED
                         && t.lastSeparatedTick>t.lastSeen;
                 boolean aabbClosing=RealFixBoundsEvidence.approaching(t.previousA,t.previousB,boxA,boxB);
-                boolean approach=aabbClosing || previousSeparated || armedFromGap;
+                // For an ACTIVE, never-credited pair, only the stable cached
+                // target/Plot approach may reauthorize the first impact. A
+                // changed world-block target could fake an AABB gap reduction.
+                boolean approach=(beforeAudit.phase()==Phase.ACTIVE && beforeAudit.episode()==0
+                        && !beforeAudit.pendingApproach())
+                        ?recoverFirstApproach
+                        :(aabbClosing || previousSeparated || armedFromGap);
                 long separationEvidenceTick=t.lastSeparatedTick;
                 double rise=Double.isFinite(t.lastPeak)?group.forcePeak()-t.lastPeak:Double.NaN;
                 t.lastPeak=group.forcePeak();
@@ -494,6 +514,22 @@ public final class RealFixRuntimeBridge {
                     // mapped, verified owner-local block. Force is a GAME proxy.
                     var frame=new Frame(pair,now,group.samples(),false,approach,a,b,group.forcePeak());
                     var result=credit.step(frame);
+                    // A large force is diagnostic evidence, not permission to
+                    // bypass the episode gate. Sample the actual rejection
+                    // cause even when no F/Q credit was issued.
+                    if(VERF_ENABLED && group.forcePeak()>=1_000_000
+                            && (result.credited() || t.lastHighFLogTick<0
+                                || now-t.lastHighFLogTick>=VERF_SAMPLE_TICKS)) {
+                        log.info("[PDD-HIGH-F] pair={}/{} nativeTick={} rawF={} cappedF={} " +
+                                        "gameMaxF={} phaseBefore={} verifiedApproach={} recoveryAttempt={} " +
+                                        "hasTarget={} regionStatus={} approval={} issuedQ={} " +
+                                        "source=POST_EFFECT_GAME_POLICY mutation=OFF",
+                                pair.a().stableKey(),pair.b().stableKey(),stamp.tick,
+                                group.forcePeak(),result.peakForce(),GameImpactCredit.MAX_GAME_F,
+                                gapBefore.phase(),approach,recoverFirstApproach,
+                                a!=null||b!=null,regions.status(),result.reason(),result.issuedQ());
+                        t.lastHighFLogTick=now;
+                    }
                     if(result.credited() && group.forcePeak()>GameImpactCredit.MAX_GAME_F
                             && lines++<MAX_LOG_PER_TICK)
                         log.info("[PDD-F-CAP] pair={}/{} rawF={} appliedF={} issuedQ={} " +

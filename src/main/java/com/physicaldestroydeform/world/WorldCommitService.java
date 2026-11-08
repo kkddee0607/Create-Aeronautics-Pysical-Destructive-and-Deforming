@@ -53,7 +53,7 @@ public final class WorldCommitService {
             quarantined.add(cell);unresolved.addLast(receipt);
         }
         WorldBlockMutationTracker.attach(this);
-        log.info("[PDD-WORLD-POLICY] revision=0.4.1-Fix3 blockTypeVeto=OFF " +
+        log.info("[PDD-WORLD-POLICY] revision=0.4.1-moreFix blockTypeVeto=OFF " +
                 "blockEntities=VETO multiBlock=VETO " +
                 "unbreakableMaterials=VETO loadedChunk=REQUIRED " +
                 "ownerCAS=REQUIRED breakEventVeto=ON claims=ENFORCED");

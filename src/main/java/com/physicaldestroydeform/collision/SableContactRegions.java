@@ -131,14 +131,15 @@ public final class SableContactRegions {
             cache.put(key,result);
             return result;
         }, RUNTIME_MAX_UNIQUE_CELLS_PER_SIDE);
-        // PDD-local repair of Sable 2.0.6's intentional Face/Face and
-        // Edge/Face manifold omissions. Four corroborated corner witnesses may
-        // describe one broad planar patch. Only individually shape-proven cells
-        // are admitted, and the common event still issues exactly one F/Q.
+        // Each evidenced source-local surface may contribute real shape-proven
+        // block targets, not only one rectangle from four corner witnesses.
+        // The original native pair/tick keeps exactly ONE shared F/Q envelope.
         int expandedA=0, expandedB=0, attemptedA=0, attemptedB=0;
         int shapeChecksA=0, shapeChecksB=0;
         String patchStatus="NOT_ELIGIBLE";
-        if(collected.verified() && collected.trace().failure()==AuditFailure.NONE) {
+        // One owner may be incomplete while the opposite source-local owner
+        // is independently proved. Never discard that already-safe face.
+        if(collected.verified()) {
             var joined=new LinkedHashSet<>(collected.regions());
             String[] owners={pair.a().stableKey(),pair.b().stableKey()};
             StringBuilder descriptions=new StringBuilder();
