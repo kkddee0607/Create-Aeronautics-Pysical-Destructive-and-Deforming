@@ -34,14 +34,16 @@ class ColFix3DirectionalPropagationTest {
         assertEquals(r.candidateQ(),r.finalQ()+r.dampedQ()+r.audit().thresholdDiscardQ(),1e-8);
         assertEquals(r.shares().size(),r.shares().stream().map(s->s.target().localBlock()).distinct().count());
     }
-    @Test void worldNormalGuidesForwardAndLaterSidewaysButNeverBackward() {
+    @Test void worldNormalGuidesForwardAndImmediateSidewaysButNeverBackward() {
         var occupied=Set.of("0,0,0","0,1,0","1,1,0","0,-1,0","-1,1,0","1,0,0");
         var r=run(WORLD,occupied,List.of(cell(WORLD,0,0,0)),new FrameMath.Vec(0,1,0));
         conserved(r);
         assertEquals("VERIFIED_TERMINAL",r.endReason());
-        assertEquals(4,r.shares().size());
+        assertEquals(5,r.shares().size());
         assertFalse(r.shares().stream().anyMatch(s->s.target().localBlock().equals("0,-1,0")));
-        assertFalse(r.shares().stream().anyMatch(s->s.target().localBlock().equals("1,0,0")));
+        // spreadFix admits a verified tangential neighbor at the first layer.
+        assertTrue(r.shares().stream().anyMatch(s->s.target().localBlock().equals("1,0,0")
+                && s.layer()==1));
         assertEquals(0,r.shares().getFirst().layer());
         assertTrue(r.shares().stream().anyMatch(s->s.target().localBlock().equals("1,1,0")));
     }
