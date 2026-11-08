@@ -15,7 +15,7 @@ import java.util.Objects;
  * No Minecraft/Sable mutable object crosses this boundary.</p>
  */
 public final class GameImpactCredit {
-    public static final String POLICY_REVISION = "PDD-IDS-1.0.7/0.4.1-moreFix-CONTACT-RECOVERY";
+    public static final String POLICY_REVISION = "PDD-IDS-1.0.7/0.4.1-spreadFix-CONTACT-RECOVERY";
     // User's 100^3 blocks * 4 mass-units/block * 10 m/s. This is a
     // GAME F index (mass * speed); without stopping time it is NOT Newtons.
     public static final double MAX_GAME_F = 100d * 100d * 100d * 4d * 10d;

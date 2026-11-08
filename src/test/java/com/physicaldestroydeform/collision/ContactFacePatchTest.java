@@ -113,10 +113,16 @@ class ContactFacePatchTest {
         assertEquals(8,result.added().size());
         assertTrue(result.added().stream().noneMatch(t->t.localBlock().equals("2,64,2")));
     }
-    @Test void aSinglePointOrObliqueWitnessNeverFillsAFace() {
-        var invalid=ContactFacePatch.reconstruct(DIM,OWNER,BlockPos.ZERO,cornerIslands(),
+    @Test void oneSparseWitnessCanOnlyVerifyOneCellHaloNotAnUnboundedFace() {
+        var limited=ContactFacePatch.reconstruct(DIM,OWNER,BlockPos.ZERO,cornerIslands(),
                 corners().subList(0,1),(pos,point)->target(pos.getX(),pos.getZ()));
-        assertTrue(invalid.added().isEmpty());
+        assertTrue(limited.reason().contains("sparseLocalHalos=1"),limited.reason());
+        assertTrue(limited.added().size()<=8);
+        assertTrue(limited.added().stream().allMatch(t->{
+            String[] xyz=t.localBlock().split(",");
+            return Math.abs(Integer.parseInt(xyz[0]))<=1
+                    && Math.abs(Integer.parseInt(xyz[2]))<=1;
+        }));
         var oblique=corners().stream().map(c->new NativeCollisionTelemetry.Contact(7,-1,3500,
                 0,-1,0,0,1,1,0,0,0,c.contactBX(),65,c.contactBZ(),DIM,5)).toList();
         // Oblique local normals now retain their own (potentially sloped)

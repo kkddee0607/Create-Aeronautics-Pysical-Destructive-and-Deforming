@@ -27,6 +27,10 @@ final class ContactFacePatch {
     private static final double PLANE_EPS = 0.125;
     private static final double NORMAL_DOT = 0.995;
     private static final double SURFACE_TOLERANCE = 0.51;
+    // With only one distinct solver witness there is no evidenced polygon.
+    // A one-cell local neighborhood, independently shape-checked, avoids a
+    // corner-only game seed without extrapolating an arbitrary full face.
+    private static final double SPARSE_HALO = 1.01;
     private static final double GRID_EPS = 1e-6;
 
     record Result(List<GameImpactCredit.Target> added, int attempted, String reason) {
@@ -51,7 +55,7 @@ final class ContactFacePatch {
         Objects.requireNonNull(dimension);Objects.requireNonNull(owner);
         Objects.requireNonNull(gridOffset);Objects.requireNonNull(verified);
         Objects.requireNonNull(records);Objects.requireNonNull(shape);
-        if(records.size()<2 || verified.isEmpty())
+        if(records.isEmpty() || verified.isEmpty())
             return new Result(List.of(),0,"INSUFFICIENT_WITNESSES");
 
         var planes=new ArrayList<Plane>();
@@ -91,12 +95,13 @@ final class ContactFacePatch {
         for(var target:verified)if(owner.equals(target.ownerKey()))original.add(target.localBlock());
         Set<String> seen=new HashSet<>(original);
         var added=new ArrayList<GameImpactCredit.Target>();
-        int attempted=0,faces=0,insufficient=0,limited=0;
+        int attempted=0,faces=0,insufficient=0,limited=0,sparse=0;
         for(var group:planes) {
             var points=group.points;
-            if(points.size()<2){insufficient++;continue;}
             List<Point> hull=hull(points);
-            if(hull.size()<2){insufficient++;continue;}
+            if(hull.isEmpty()){insufficient++;continue;}
+            boolean localHalo=hull.size()==1;
+            double tolerance=localHalo?SPARSE_HALO:SURFACE_TOLERANCE;
             int axis=group.first.axis(),u=(axis+1)%3,v=(axis+2)%3;
             double[] normal=group.first.normal();
             double plane=group.plane();
@@ -106,10 +111,11 @@ final class ContactFacePatch {
                 minU=Math.min(minU,p.u());maxU=Math.max(maxU,p.u());
                 minV=Math.min(minV,p.v());maxV=Math.max(maxV,p.v());
             }
-            // Only scan cells intersecting the source hull; an isolated point
-            // cannot create a broad synthetic face, even when shapes are solid.
-            double lowU=Math.floor(minU-SURFACE_TOLERANCE),highU=Math.ceil(maxU+SURFACE_TOLERANCE)-1;
-            double lowV=Math.floor(minV-SURFACE_TOLERANCE),highV=Math.ceil(maxV+SURFACE_TOLERANCE)-1;
+            // A sparse solver witness can only authorize a one-cell halo,
+            // NEVER a full synthetic plane. Every candidate still needs the
+            // separately verified owner collision shape at the source plane.
+            double lowU=Math.floor(minU-tolerance),highU=Math.ceil(maxU+tolerance)-1;
+            double lowV=Math.floor(minV-tolerance),highV=Math.ceil(maxV+tolerance)-1;
             if(lowU<Integer.MIN_VALUE+2 || lowV<Integer.MIN_VALUE+2 ||
                     highU>Integer.MAX_VALUE-2 || highV>Integer.MAX_VALUE-2) {limited++;continue;}
             int u0=(int)lowU,u1=(int)highU,v0=(int)lowV,v1=(int)highV;
@@ -124,15 +130,19 @@ final class ContactFacePatch {
                 int[] c=parse(target.localBlock());if(c==null)continue;
                 double planeAxis=(plane-normal[u]*(c[u]+0.5)-normal[v]*(c[v]+0.5))/normal[axis];
                 int blockAxis=(int)Math.floor(planeAxis-Math.signum(normal[axis])*GRID_EPS);
-                if(c[axis]==blockAxis && inside(hull,c[u]+0.5,c[v]+0.5)) {
+                if(c[axis]==blockAxis &&
+                        (localHalo?segmentDistanceSquared(hull.getFirst(),hull.getFirst(),
+                                c[u]+0.5,c[v]+0.5)<=tolerance*tolerance
+                                :inside(hull,c[u]+0.5,c[v]+0.5))) {
                     anchored=true;break;
                 }
             }
             if(!anchored){insufficient++;continue;}
-            faces++;
+            faces++;if(localHalo)sparse++;
             for(int a=u0;a<=u1;a++)for(int b=v0;b<=v1;b++) {
                 double cu=a+0.5,cv=b+0.5;
-                if(!inside(hull,cu,cv))continue;
+                if(localHalo?segmentDistanceSquared(hull.getFirst(),hull.getFirst(),cu,cv)
+                        >tolerance*tolerance:!inside(hull,cu,cv))continue;
                 double along=(plane-normal[u]*cu-normal[v]*cv)/normal[axis];
                 if(!Double.isFinite(along) || along<=Integer.MIN_VALUE+2 || along>=Integer.MAX_VALUE-2)
                     continue;
@@ -152,7 +162,7 @@ final class ContactFacePatch {
         if(faces==0)return new Result(List.of(),attempted,
                 limited>0?"PATCH_BUDGET":normalsMissing?"NO_VALID_NORMAL":"NO_PROVEN_SURFACE");
         return new Result(added,attempted,"SHAPE_VERIFIED_SURFACES faces="+faces+
-                " limited="+limited+" unsupported="+insufficient);
+                " sparseLocalHalos="+sparse+" limited="+limited+" unsupported="+insufficient);
     }
 
     private static int[] parse(String key) {

@@ -209,11 +209,10 @@ public final class ForcePropagation {
     // finite node cap and the explicit 1.0 F cutoff bound traversal.
     public static final int MAX_UNKNOWN_DEPTH=Integer.MAX_VALUE;
     public static final int MAX_NATIVE_DEPTH=Integer.MAX_VALUE;
-    // Inward-tapering field: broad contact base and diminishing cross-section.
-    // Available depth scales logarithmically with GAME F (not measured Newtons);
-    // actual propagation still terminates sooner through F and elasticity.
-    private static final double MIN_CONTACT_RADIUS=1.5;
-    private static final double MAX_GEOMETRIC_DEPTH=32;
+    // A geometric cone previously vetoed ALL initial lateral movement outside
+    // the native seed cells. Those seeds can be sparse solver corner witnesses.
+    // spreadFix uses owner-verified block neighbors plus per-parent F decay,
+    // not a synthetic contact-hull or hard-coded cone radius, to bound spread.
     private static final double GEOMETRY_EPS=1.0e-10;
 
     private static final class Flow {
@@ -239,8 +238,8 @@ public final class ForcePropagation {
      * unrelated sibling branches. No global mean transmission is used.
      *
      * UNKNOWN direction uses an auditable equal-weight traversal with no depth cap. Native
-     * inward direction defines an inward-tapering cone in the frozen owner
-     * lattice, with no edge that retreats along the collision normal. A Plot
+     * inward direction reserves 70% of outgoing F for inward children and 30%
+     * for lateral children when both exist; backward edges remain forbidden. A Plot
      * may move in world coordinates while its block-local positions stay fixed.
      * Re-sampling a world pose for every BFS layer would mix physics epochs.
      */
@@ -279,11 +278,6 @@ public final class ForcePropagation {
         List<Flow> layer=new ArrayList<>(seen.values());
         layer.sort(Comparator.comparing(n->n.target.localBlock()));
         for(var node:layer)node.incoming=inputF/layer.size();
-        // Parse source coordinates ONCE. The cone is queried up to six times
-        // for every visited node, and localBlock() is a string identifier.
-        var seedCells=new ArrayList<int[]>(layer.size());
-        for(var node:layer)seedCells.add(new int[]{node.x,node.y,node.z});
-        var field=ConeField.from(direction,seedCells,inputF);
         var all=new ArrayList<Flow>();
         double assigned=0,dampedF=0,unresolved=0,discardF=0,terminalF=0;
         int terminalNodes=0,maxDepth=0,paidEdges=0,mergedNodes=0,blockedNodes=0;
@@ -305,7 +299,7 @@ public final class ForcePropagation {
                         x=Math.addExact(node.x,step[0]);y=Math.addExact(node.y,step[1]);
                         z=Math.addExact(node.z,step[2]);
                     }catch(ArithmeticException overflow){blocked.put(node,"COORDINATE_OVERFLOW");continue;}
-                    if(!forwardStep(direction,step)||!withinField(field,x,y,z))continue;
+                    if(!forwardStep(direction,step))continue;
                     Probe proof=Objects.requireNonNull(neighbors.read(node.target,x,y,z),"missing neighbor proof");
                     if(proof.status()==ProbeStatus.UNKNOWN){blocked.put(node,"UNKNOWN_NEIGHBOR");unknown=true;continue;}
                     if(proof.status()!=ProbeStatus.PRESENT)continue;
@@ -435,93 +429,48 @@ public final class ForcePropagation {
                 end,new Audit(discardF,discardQ,terminalF,terminalNodes,maxDepth,
                         paidEdges,mergedNodes,blockedNodes));
     }
-    /** A deterministic tenths partition. Every graph-valid child gets at least
-     * 0.1; remaining tenths follow positive axial projection with a small
-     * tangential fallback. Largest remainders settle ties in DIRECTIONS order.
-     * A vector (0.8,0,0.6) therefore yields 0.6/0.4 for +X/+Z, not
-     * an arbitrary 0.8/0.2. No force is lost by quantization. */
+    /**
+     * spreadFix: split the outgoing F between verified inward (70%) and tangent
+     * (30%) children, then normalize within each occupied group. Missing groups
+     * surrender their reservation to the remaining verified children. An
+     * oblique inward normal is weighted by its exact positive projection, not
+     * snapped to an axis. All payments still debit ONE parent's outgoing F.
+     */
     private static double[] directionWeights(Orientation direction,List<Flow> children,Flow parent) {
         int size=children.size();
         double[] weights=new double[size];
+        if(size==0)return weights;
         if(!direction.verified()) {
             java.util.Arrays.fill(weights,1.0/size);
             return weights;
         }
-        if(size>10)throw new IllegalStateException("more than 10 face neighbors");
-        double[] score=new double[size],fractions=new double[size];
-        int[] tenths=new int[size];
         FrameMath.Vec n=direction.inward();
-        double total=0;
+        double[] inward=new double[size];
+        double totalInward=0;
+        int tangentCount=0;
         for(int i=0;i<size;i++) {
             var child=children.get(i);
-            double projection=(child.x-parent.x)*n.x()+(child.y-parent.y)*n.y()
+            double dot=(child.x-parent.x)*n.x()+(child.y-parent.y)*n.y()
                     +(child.z-parent.z)*n.z();
-            score[i]=Math.max(0.01,projection);
-            total+=score[i];
+            if(dot>GEOMETRY_EPS) {
+                inward[i]=dot;
+                totalInward+=dot;
+            } else tangentCount++;
         }
-        int slots=10-size;
-        int remaining=slots;
-        for(int i=0;i<size;i++) {
-            double scaled=slots*score[i]/total;
-            int floor=(int)Math.floor(scaled);
-            tenths[i]=1+floor;
-            fractions[i]=scaled-floor;
-            remaining-=floor;
-        }
-        while(remaining-->0) {
-            int best=0;
-            for(int i=1;i<size;i++)if(fractions[i]>fractions[best]+1e-12)best=i;
-            tenths[best]++;
-            fractions[best]=-1;
-        }
-        for(int i=0;i<size;i++)weights[i]=tenths[i]/10.0;
+        double inwardShare=totalInward==0?0:tangentCount==0?1:0.70;
+        double tangentShare=tangentCount==0?0:totalInward==0?1:0.30;
+        for(int i=0;i<size;i++)weights[i]=inward[i]>0
+                ?inwardShare*inward[i]/totalInward
+                :tangentShare/tangentCount;
         return weights;
     }
 
-    /** No backward edge, including at an oblique normal. Perpendicular moves
-     * are allowed only where the global cone includes the destination. */
+    /** No backward edge, including at an oblique normal. Perpendicular
+     * neighbors are eligible from the very first verified contact cell. */
     private static boolean forwardStep(Orientation direction,int[] step) {
         if(!direction.verified())return true;
         FrameMath.Vec n=direction.inward();
         return n.x()*step[0]+n.y()*step[1]+n.z()*step[2]>=-GEOMETRY_EPS;
-    }
-
-    /** Frozen per-credit geometry. Precompute once, not O(seed count) per
-     * visited neighbor; the surface of a large vessel may have 10,000 roots. */
-    private record ConeField(FrameMath.Vec inward,double cx,double cy,double cz,
-                             double baseRadius,double reach,Set<String> rootCells) {
-        static ConeField from(Orientation direction,List<int[]> seeds,double sourceF) {
-            if(!direction.verified())return null;
-            FrameMath.Vec n=direction.inward();
-            double sx=0,sy=0,sz=0;
-            for(var p:seeds){sx+=p[0];sy+=p[1];sz+=p[2];}
-            sx/=seeds.size();sy/=seeds.size();sz/=seeds.size();
-            double radius2=0;
-            for(var p:seeds) {
-                double ux=p[0]-sx,uy=p[1]-sy,uz=p[2]-sz;
-                double axial=ux*n.x()+uy*n.y()+uz*n.z();
-                radius2=Math.max(radius2,Math.max(0,ux*ux+uy*uy+uz*uz-axial*axial));
-            }
-            double base=Math.max(MIN_CONTACT_RADIUS,Math.sqrt(radius2)+0.5);
-            double reach=Math.min(MAX_GEOMETRIC_DEPTH,2+Math.log1p(Math.max(0,sourceF))/Math.log(2));
-            var rootCells=new HashSet<String>();
-            for(var p:seeds)rootCells.add(p[0]+","+p[1]+","+p[2]);
-            return new ConeField(n,sx,sy,sz,base,reach,Set.copyOf(rootCells));
-        }
-    }
-    /** A wide verified contact face narrows inward. Every prospective child
-     * also requires an independent owner-local shape/neighbor proof. */
-    private static boolean withinField(ConeField field,int x,int y,int z) {
-        if(field==null)return true;
-        FrameMath.Vec n=field.inward();
-        double dx=x-field.cx(),dy=y-field.cy(),dz=z-field.cz();
-        double depth=dx*n.x()+dy*n.y()+dz*n.z();
-        if(depth < -GEOMETRY_EPS || depth>field.reach()+GEOMETRY_EPS)return false;
-        // The initial contact plane must not grow beyond source-proven seeds.
-        if(depth<=GEOMETRY_EPS && !field.rootCells().contains(x+","+y+","+z))return false;
-        double radius=field.baseRadius()*Math.max(0,1-depth/field.reach());
-        double radial2=Math.max(0,dx*dx+dy*dy+dz*dz-depth*depth);
-        return radial2<=radius*radius+GEOMETRY_EPS;
     }
 
     private static void add(Map<String,GameImpactCredit.Target> seen,String owner,GameImpactCredit.Target target) {

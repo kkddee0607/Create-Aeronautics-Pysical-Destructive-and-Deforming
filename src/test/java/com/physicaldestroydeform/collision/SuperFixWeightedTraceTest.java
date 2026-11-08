@@ -55,7 +55,7 @@ class SuperFixWeightedTraceTest {
             assertEquals(100,r.assignedF(),1e-8);
         }
     }
-    @Test void obliqueDirectionUsesTenthsAndDoesNotFallBackToEqual() {
+    @Test void obliqueDirectionUsesContinuousProjectionAndDoesNotSnapToAxis() {
         var trace=new ArrayList<ForcePropagation.Trace>();
         var r=run(PLOT,Set.of("0,0,0","1,0,0","0,0,1","-1,0,0"),
                 new FrameMath.Vec(0.8,0,0.6),trace);
@@ -63,10 +63,10 @@ class SuperFixWeightedTraceTest {
         assertEquals(2,edges(trace).size());
         var x=edges(trace).stream().filter(e->e.child().localBlock().equals("1,0,0")).findFirst().orElseThrow();
         var z=edges(trace).stream().filter(e->e.child().localBlock().equals("0,0,1")).findFirst().orElseThrow();
-        assertEquals(0.6,x.directionWeight(),1e-12);
-        assertEquals(0.4,z.directionWeight(),1e-12);
-        assertEquals(30,x.sentF(),1e-8);
-        assertEquals(20,z.sentF(),1e-8);
+        assertEquals(4.0/7,x.directionWeight(),1e-12);
+        assertEquals(3.0/7,z.directionWeight(),1e-12);
+        assertEquals(200.0/7,x.sentF(),1e-8);
+        assertEquals(150.0/7,z.sentF(),1e-8);
         assertEquals(50,x.sentF()+z.sentF(),1e-8);
         assertTrue(r.shares().stream().noneMatch(s->s.target().localBlock().equals("-1,0,0")));
     }

@@ -17,7 +17,7 @@ import java.util.Set;
  * F through owner-verified connected cells before deriving target Q.
  */
 public final class ContactCreditLedger {
-    public static final String ALGORITHM_REVISION = "PDD-IDS-1.0.7/0.4.1-moreFix-MULTIFACE";
+    public static final String ALGORITHM_REVISION = "PDD-IDS-1.0.7/0.4.1-spreadFix-MULTIFACE-70-30";
     // Bounded but large enough for a 100x100 fully verified planar contact patch.
     public static final int MAX_TARGETS_PER_SIDE = 16_384;
     public static final int MAX_REGIONS = 2 * MAX_TARGETS_PER_SIDE;

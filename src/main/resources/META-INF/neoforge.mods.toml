@@ -4,10 +4,10 @@ license="MIT"
 
 [[mods]]
 modId="physical_destroy_deform"
-version="0.4.1-moreFix"
+version="0.4.1-spreadFix"
 displayName="Create Aeronautics: Physical Destruction and Deforming"
 authors="PDD contributors"
-description='''PDD 0.4.1-moreFix: bounded multi-surface contact-hull reconstruction with owner-local shape checks, first-approach impact authorization recovery and finite game F saturation at 40 million. World damage remains server-authoritative; Plot mutation is preview-only.'''
+description='''PDD 0.4.1-spreadFix: directional 70:30 F propagation with verified lateral neighbors from sparse native contacts, bounded source-anchored surface micro-patches and existing collision-credit saturation. Static World mutation remains guarded and Plot mutation stays preview-only.'''
 
 [[mixins]]
 config="pdd.mixins.json"

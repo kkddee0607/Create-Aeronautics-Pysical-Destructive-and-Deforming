@@ -183,9 +183,13 @@ public final class RealFixRuntimeBridge {
                 DamageModel.PLASTIC_SHARE,DamageModel.STRESS_SHARE,
                 com.physicaldestroydeform.BlockDamageState.FIXED_SCALE,
                 ForcePropagation.MAX_NODES_PER_SIDE,ForcePropagation.MIN_PROPAGATED_F);
-        log.info("[PDD-FACE-POLICY] revision=moreFix-MULTIFACE nativeWitnesses=2+ " +
+        log.info("[PDD-FACE-POLICY] revision=spreadFix-SURFACE-HALO nativeWitnesses=1+ " +
                 "maxFaceArea=16384 ownerLocalShapeProof=REQUIRED sourceBudget=ONE_COLLISION " +
-                "unsupportedSurfaces=NO_SYNTHETIC_TARGETS");
+                "sparseHaloRadius=1.01 syntheticNativeContact=NONE");
+        log.info("[PDD-F-SPREAD-POLICY] revision=spreadFix-DIRECTION-70-30 " +
+                "inwardWeight=0.70 lateralWeight=0.30 transferShare=0.50 " +
+                "reverseEdges=FORBIDDEN verifiedNeighbors=REQUIRED " +
+                "shapeConeVeto=DISABLED FSourceBudget=ONE_COLLISION");
         // A changed Q, damage, material override or datapack cache must not replay
         // the previous calibration's diagnostic damage as this policy's result.
         previewPolicyId=calibrationIdentity();

@@ -1,8 +1,8 @@
-# PDD 0.4.1-moreFix — Physical Destruction and Deforming
+# PDD 0.4.1-spreadFix — Physical Destruction and Deforming
 
-**Create Aeronautics: Physical Destruction and Deforming (PDD)** is a Minecraft Java 1.21.1 / NeoForge add-on that consumes Sable collision evidence to calculate block-level impact propagation and damage. The **0.4.1-moreFix** release retains the 0.4.1 lineage and extends the read-only 0.4.0finalFix impact pipeline with **server-side damage accumulation and conditional destruction of eligible static World blocks**. Physical Plot block destruction, deformation, and stress mutation are **not enabled** in this release.
+**Create Aeronautics: Physical Destruction and Deforming (PDD)** is a Minecraft Java 1.21.1 / NeoForge add-on that consumes Sable collision evidence to calculate block-level impact propagation and damage. The **0.4.1-spreadFix** release retains the 0.4.1 lineage and extends the read-only 0.4.0finalFix impact pipeline with **server-side damage accumulation and conditional destruction of eligible static World blocks**. Physical Plot block destruction, deformation, and stress mutation are **not enabled** in this release.
 
-> **moreFix release status:** This source passed 39 Java21 independent stub-based test methods, but the 0.4.1-moreFix Gradle/JUnit build, GitHub Actions, and in-game destruction/contact tests were **not performed** when this ZIP was assembled. Treat it as an **unverified development release**. Back up the world and test on a disposable server first. See [0.4.1 verification report](docs/PDD-0.4.1-RELEASE-VERIFICATION.md).
+> **moreFix (prior release) status:** This source passed 39 Java21 independent stub-based test methods, but the 0.4.1-moreFix Gradle/JUnit build, GitHub Actions, and in-game destruction/contact tests were **not performed** when this ZIP was assembled. Treat it as an **unverified development release**. Back up the world and test on a disposable server first. See [0.4.1 verification report](docs/PDD-0.4.1-RELEASE-VERIFICATION.md).
 
 ## Supported environment
 
@@ -17,7 +17,15 @@
 
 PDD does not replace Sable's physics solver or bundle its runtime. Install the required dependencies and the **built PDD JAR** in the server's `mods/` directory. The source ZIP is for development / GitHub Apply and **must not** be installed as a mod. A matching client mod configuration may be required by the mod loader; complete client-server compatibility remains unverified for this build.
 
-## 0.4.1-moreFix — bounded multi-surface runtime correction (2026-11-08)
+## 0.4.1-spreadFix — direction-biased lateral F propagation (2026-11-09)
+
+- On an approved collision, verified inward children receive **70%** and lateral children **30%** of the parent's outgoing half (when both groups exist). Missing groups release their reservation to present verified children; backward transfers are forbidden. Unknown normal retains equal weighting.
+- Removes the old geometric cone veto which forbade *all* lateral propagation on the initial native contact plane outside sparse contact seeds. Graph still uses six-face owner-local verified neighbors, parent-level half transfer, elasticity, F/Q safety budgets and one source envelope.
+- A single native solver witness can now authorize only a **one-cell local candidate neighborhood** when anchored by an independently verified R2 target. Each candidate needs its owner's real collision shape; this is explicitly a post-effect game approximation, **not** proof that all candidates touched the opposite collider.
+- Never treats a secondary child as a new Sable native contact; no new collision source F/Q is generated.
+- **Validation:** see `docs/verification/0.4.1-spreadFix.md`. Full NeoForge Gradle/JUnit, GitHub Actions and in-game validation are separate from independent Java21 tests.
+
+## 0.4.1-moreFix (historical) — bounded multi-surface runtime correction (2026-11-08)
 
 - **General contact surfaces, not a 5×5 special case.** The owner-local native contact witnesses are grouped by compatible planes; the actual 2D convex contact hull (or witnessed segment) of each group is rasterized and every candidate block is independently rechecked against the real owner-local collision shape. Multiple perpendicular / oblique source planes can contribute seeds to the **same original F/Q event**, without multiplying force or inventing extra solver contacts. No four-corner predicate or one-rectangle restriction remains. Shape/audit, source evidence, region and graph budgets remain enforced.
 - **Late first-impact authorization.** A pair first observed in contact is no longer permanently disqualified before the first approved credit. The server can re-audit an ACTIVE zero-credit pair when a previous stable-world-block and Plot AABB snapshot independently prove new approach. The credit FSM permits one first authorization on that independently proved approach. High F **alone never overrides** the duplicate-contact gate; further credits still require verified separation and rearm.
