@@ -17,6 +17,16 @@
 
 PDD does not replace Sable's physics solver or bundle its runtime. Install the required dependencies and the **built PDD JAR** in the server's `mods/` directory. The source ZIP is for development / GitHub Apply and **must not** be installed as a mod. A matching client mod configuration may be required by the mod loader; complete client-server compatibility remains unverified for this build.
 
+## 0.4.1-Fix3 reconstructed contact face (2026-11-08)
+
+- A **5×5×4 fully colliding cube face** with just four native corner contact neighborhoods can now recover all **25 owner-local collision-shape-verified face blocks** as distinct F propagation seeds. The previous geometry required four already verified targets on the same four corners; this was rejected in actual logs even when four native corner witnesses were present.
+- Native near-axis-aligned, same-plane witnesses define the proposed rectangle; four independently spaced quadrant witnesses and actual per-cell collision-shape rechecks are required. Mixed oblique contacts do not invalidate an otherwise valid planar group. No cross-owner guessed target, unverified occupied voxel, duplicate F/Q credit or volumetric scan is permitted. Faces are limited to 100×100 and bounded by the existing unique-cell cap.
+- **F ceiling:** `MAX_GAME_F=40,000,000`; a larger finite native collision is **saturated, not interpreted as no collision**. `maxGroupQ` corresponds to this F ceiling; the original credit/owner/episode gates still apply. An accepted oversized hit emits `[PDD-F-CAP] action=SATURATE_NOT_REJECT`.
+- The **broad-base, inward-tapering cone** stays in the existing directional `ForcePropagation` implementation. Its effect requires a validated native inward normal and actually recovered face seeds; no Sable physics callback is replaced.
+- No hardcoded block allowlist; ordinary slime/netherite/registered mod World blocks are eligible. Intrinsic negative destroy speed, `MaterialProperties.unbreakable`, block entities, beds/doors, claims, loaded-chunk and owner/state checks remain protective.
+- The JAR's NeoForge metadata, startup and World safety policy logs now correctly report **Fix3**, instead of the earlier misleading Fix2 metadata. Look for `[PDD-FACE-POLICY] revision=Fix3-FACE25` to verify the installed build.
+- Plot physical destruction/deformation remains **preview-only**, unrelated to this Fix3 contact/force correction. This release does not claim Plot mutation support.
+
 ## 0.4.1-Fix: post-test collision corrections
 
 This fix preserves the **World-only mutation / Plot-preview** version boundary and the Sable original collision callback. Fixes:

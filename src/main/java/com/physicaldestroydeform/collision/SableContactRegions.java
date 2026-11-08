@@ -209,6 +209,8 @@ public final class SableContactRegions {
                         +" damageTargetCapPerSide="+ContactCreditLedger.MAX_TARGETS_PER_SIDE
                         +" contactPatch="+patchStatus
                         +" facePatchAddedA="+expandedA+" facePatchAddedB="+expandedB
+                        +" facePatchTotalTargetsA="+(t.verifiedTargetsA()+expandedA)
+                        +" facePatchTotalTargetsB="+(t.verifiedTargetsB()+expandedB)
                         +" facePatchAttemptedA="+attemptedA+" facePatchAttemptedB="+attemptedB);
         return new Result(collected.regions(),collected.status(),collected.checksA(),collected.checksB(),
                 collected.rejected(),collected.methodA(),collected.methodB(),t2);

@@ -182,6 +182,9 @@ public final class RealFixRuntimeBridge {
                 DamageModel.PLASTIC_SHARE,DamageModel.STRESS_SHARE,
                 com.physicaldestroydeform.BlockDamageState.FIXED_SCALE,
                 ForcePropagation.MAX_NODES_PER_SIDE,ForcePropagation.MIN_PROPAGATED_F);
+        log.info("[PDD-FACE-POLICY] revision=Fix3-FACE25 nativeCornerWitnesses=4 " +
+                "maxFaceArea=10000 ownerLocalShapeProof=REQUIRED sourceBudget=ONE_COLLISION " +
+                "unknownOrNonPlanar=NO_SYNTHETIC_TARGETS");
         // A changed Q, damage, material override or datapack cache must not replay
         // the previous calibration's diagnostic damage as this policy's result.
         previewPolicyId=calibrationIdentity();
@@ -327,7 +330,7 @@ public final class RealFixRuntimeBridge {
                 ObservedTargets candidate=targetEvidence.get(scene);
                 // §21.4: inspect each native contact point once, in its own
                 // Sable consumer pose; aggregate only source-proven block keys.
-                // The owner/pair/tick has a separate bounded R2 shape-check budget (256 unique cells/side); target Q allocations stay capped at 32 targets/side.
+                // The owner/pair/tick has a separate bounded R2 shape-check budget (32768 unique cells/side); verified damage targets are capped at 16384/side.
                 var beforeAudit=credit.evidence(pair);
                 // An exhausted ACTIVE episode cannot mint Q. Still observe
                 // native records and advance FSM, but skip expensive shape I/O.
@@ -491,6 +494,12 @@ public final class RealFixRuntimeBridge {
                     // mapped, verified owner-local block. Force is a GAME proxy.
                     var frame=new Frame(pair,now,group.samples(),false,approach,a,b,group.forcePeak());
                     var result=credit.step(frame);
+                    if(result.credited() && group.forcePeak()>GameImpactCredit.MAX_GAME_F
+                            && lines++<MAX_LOG_PER_TICK)
+                        log.info("[PDD-F-CAP] pair={}/{} rawF={} appliedF={} issuedQ={} " +
+                                        "action=SATURATE_NOT_REJECT source=NATIVE_EFFECT_GAME_PROXY mutation=OFF",
+                                pair.a().stableKey(),pair.b().stableKey(),group.forcePeak(),
+                                result.peakForce(),result.issuedQ());
                     var gapAfter=credit.evidence(pair);
                     String fsmSignature=result.reason()+":"+gapBefore.phase()+":"+gapAfter.phase();
                     if(VERF_ENABLED && (result.credited() || gapBefore.phase()!=gapAfter.phase()
