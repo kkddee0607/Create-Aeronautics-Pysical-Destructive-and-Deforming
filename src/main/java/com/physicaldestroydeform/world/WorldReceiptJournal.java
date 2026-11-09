@@ -14,7 +14,7 @@ import static java.nio.file.StandardOpenOption.*;
  * is quarantined, never executed again. No Plot state is stored here.
  * 0.5.0 owns sharding/migration; this minimal WAL never silently evicts a receipt.
  */
-public final class WorldReceiptJournal {
+public final class WorldReceiptJournal implements WorldJournal {
     public static final int VERSION=2, MAX_STATES=200_000, MAX_RECEIPTS=60_000;
     public static final long MAX_BYTES=96L*1024*1024;
     private static final int MAGIC=0x50445732, MAX_RECORD_BYTES=16*1024;
@@ -66,6 +66,8 @@ public final class WorldReceiptJournal {
     public synchronized List<Receipt> uncertain(){return receipts.values().stream()
             .filter(r->r.status()==Status.PREPARED||r.status()==Status.DEFERRED).toList();}
     public synchronized List<State> stateSnapshot(){return List.copyOf(states.values());}
+    /** Complete legacy receipt enumeration for verified schema-2 migration. */
+    public synchronized List<Receipt> receiptSnapshot(){return List.copyOf(receipts.values());}
     public synchronized boolean hasPosition(String dimension,int x,int y,int z) {
         return stateIndex.containsKey(new Cell(dimension,x,y,z));
     }

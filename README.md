@@ -185,3 +185,21 @@ See [LICENSE](LICENSE) for the repository's licensing terms. External mods and u
 - World preview and actual World commit both preserve definition-level `unbreakable` without converting material profiles. Plot remains preview-only.
 - Retains Fix1/Fix2 collision-face reconstruction, F=40,000,000 saturation, reverse cone geometry, and their tests. Gradle 8.10.2 bootstrap adjustments from the previous Fix3 are also retained, but **`gradle/wrapper` is protected by Apply**; the included wrapper properties must be manually applied on GitHub if not already done.
 - See `docs/verification/0.4.1-Fix3-unbreakable-correction.md` for exact changed files, validation, limits and test handoff.
+
+## PDD 0.5.0 — Chunk-sharded World persistence
+
+0.5.0 preserves the 0.4.1-spreadFix F-first 70:30 collision and World CAS contracts.
+It migrates schema-2 `data/pdd-world-0.4.1.wal` read-only into a CRC-validated,
+checkpointed store at `data/pdd-world-0.5.0/`: per-dimension/chunk sparse damage,
+256 durable receipt buckets, fsynced recovery WAL, and atomic generation manifest.
+
+The original WAL is kept for forensic recovery. Do **not** run a downgraded PDD
+version against the same world: divergent legacy WAL writes fail closed on the
+next 0.5.0 restart. World block damage still requires an already loaded chunk
+and validated live block fingerprint; Plot mutation remains disabled.
+
+Debug: set `-Dpdd.persistence.verbose=true` (or `-Dpdd.world.verbose=true`) in
+server JVM arguments, then inspect `[PDD-PERSIST]`, `[PDD-COMMIT]`, and
+`[PDD-SAVE]`. Full implementation limits, migration details, regressions, and
+two-session in-game test procedure are in
+`docs/verification/0.5.0-CAP-SPARSE-PERSIST.md`.

@@ -21,8 +21,8 @@ public abstract class WorldBlockReplacementMixin {
     private void pdd$replace(BlockPos pos,BlockState state,boolean moved,CallbackInfoReturnable<BlockState> ci) {
         // LevelChunk#setBlockState returns null on a no-op. A canceled/no-op update
         // must not erase an unrelated persisted damage state.
-        if(level.isClientSide() || ci.getReturnValue()==null)return;
-        WorldBlockMutationTracker.onSetBlockState(level,pos,
-                ((LevelChunk)(Object)this).getBlockState(pos),state);
+        BlockState previous=ci.getReturnValue();
+        if(level.isClientSide() || previous==null || previous.equals(state))return;
+        WorldBlockMutationTracker.onSetBlockState(level,pos,previous,state);
     }
 }

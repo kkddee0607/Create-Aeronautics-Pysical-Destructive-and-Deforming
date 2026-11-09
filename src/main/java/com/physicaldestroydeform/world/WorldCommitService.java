@@ -23,13 +23,13 @@ public final class WorldCommitService {
         Cell(SparseStateKey key){this(key.dimension(),key.x(),key.y(),key.z());}
     }
     private static final int MAX_BOOT_RECONCILE_PER_TICK=32, MAX_COMMIT_LOGS_PER_TICK=20;
-    private static final boolean VERBOSE=Boolean.getBoolean("pdd.world.verbose");
+    private static final boolean VERBOSE=Boolean.getBoolean("pdd.world.verbose")
+            ||Boolean.getBoolean("pdd.persistence.verbose");
     private final MinecraftServer server;
     private final Logger log;
-    private final WorldReceiptJournal journal;
+    private final WorldPersistentJournal journal;
     private final WorldCommitCore core;
     private final NeoForgeWorldGateway gateway;
-    private final Map<Cell,Long> revisions=new HashMap<>();
     private final Set<Cell> watched=new HashSet<>(), quarantined=new HashSet<>();
     private final Map<Cell,Integer> pendingCells=new HashMap<>();
     private final Deque<WorldReceiptJournal.Receipt> unresolved=new ArrayDeque<>();
@@ -39,14 +39,13 @@ public final class WorldCommitService {
     public WorldCommitService(MinecraftServer server,DamageModel.Settings damage,Logger log) throws IOException {
         this.server=Objects.requireNonNull(server);this.log=Objects.requireNonNull(log);
         Path path=server.getWorldPath(LevelResource.ROOT).resolve("data").resolve("pdd-world-0.4.1.wal");
-        journal=new WorldReceiptJournal(path);
+        journal=new WorldPersistentJournal(path.getParent().resolve("pdd-world-0.5.0"),path);
         int limit=Integer.getInteger("pdd.worldBreakCapPerTick",WorldCommitCore.DEFAULT_WORLD_BREAK_CAP_PER_TICK);
         core=new WorldCommitCore(journal,damage,Math.max(1,Math.min(4096,limit)));
         gateway=new NeoForgeWorldGateway(server,this);
         for(var state:journal.stateSnapshot()) {
             Cell cell=new Cell(state.key());watched.add(cell);
-            long revision=parseRevision(state.incarnation());
-            revisions.merge(cell,revision,Math::max);
+
         }
         for(var receipt:journal.uncertain()) {
             Cell cell=new Cell(receipt.key());watched.add(cell);
@@ -57,21 +56,23 @@ public final class WorldCommitService {
                 "blockEntities=VETO multiBlock=VETO " +
                 "unbreakableMaterials=VETO loadedChunk=REQUIRED " +
                 "ownerCAS=REQUIRED breakEventVeto=ON claims=ENFORCED");
-        log.info("[PDD-SAVE] phase=START schema={} storedWorldBlocks={} receipts={} " +
-                        "restartUncertain={} bytes={} mode=APPEND_ONLY_FSYNC replay=NEVER",
-                WorldReceiptJournal.VERSION,journal.size(),journal.receiptCount(),unresolved.size(),journal.bytes());
-    }
-    private static long parseRevision(String incarnation){
-        int p=incarnation.indexOf('-');
-        try {return p<0?0:Math.max(0,Long.parseLong(incarnation.substring(0,p)));}
-        catch(NumberFormatException invalid){return 0;}
+        log.info("[PDD-PERSIST] phase=START legacySchema={} newSchema={} " +
+                        "legacyMigration={} restoredDamage={} restoredReceipts={} " +
+                        "restartUncertain={} storage={} mode=SHARDED_CHECKPOINT_FSYNC",
+                WorldReceiptJournal.VERSION,WorldPersistentJournal.SCHEMA,journal.migrated(),
+                journal.size(),journal.receiptCount(),unresolved.size(),journal.storageStatus());
+        if(journal.repairedTailBytes()>0)log.warn(
+                "[PDD-PERSIST] phase=RECOVERY_TAIL_REPAIR truncatedUncommittedBytes={} " +
+                "validFramesPreserved=true completeCRCFailure=FAIL_CLOSED",
+                journal.repairedTailBytes());
     }
     /** Increment only for an actually watched location; each token also binds exact state fingerprint. */
     public String incarnation(String dimension,BlockPos pos,String fingerprint) {
         Cell cell=new Cell(dimension,pos);
         try {
             byte[] hash=MessageDigest.getInstance("SHA-256").digest(fingerprint.getBytes(StandardCharsets.UTF_8));
-            return revisions.getOrDefault(cell,0L)+"-"+HexFormat.of().formatHex(hash);
+            return journal.revision(dimension,pos.getX(),pos.getY(),pos.getZ())
+                    +"-"+HexFormat.of().formatHex(hash);
         }catch(NoSuchAlgorithmException impossible){throw new IllegalStateException(impossible);}
     }
     /** Called only once for each successful pre-existing ledger Grant; source accounting is unchanged. */
@@ -150,10 +151,36 @@ public final class WorldCommitService {
                 case ABORTED -> rejected++;
                 default -> { }
             }
-            if(shown++<MAX_COMMIT_LOGS_PER_TICK && result.result()!=WorldCommitCore.Outcome.DEFERRED)
-                log.info("[PDD-COMMIT] phase=RESULT result={} reason={} id={} key={}",
-                        result.result(),result.reason(),result.receipt()==null?"NONE":result.receipt().id(),
-                        result.receipt()==null?"NONE":result.receipt().key());
+            if(shown++<MAX_COMMIT_LOGS_PER_TICK && result.result()!=WorldCommitCore.Outcome.DEFERRED){
+                var receipt=result.receipt();
+                var damage=receipt==null?null:journal.get(receipt.key());
+                log.info("[PDD-COMMIT] phase=RESULT result={} reason={} id={} " +
+                                "key={} damageU8={} remainderU8={} materialGeneration={} " +
+                                "receiptStatus={} walBytes={}",
+                        result.result(),result.reason(),receipt==null?"NONE":receipt.id(),
+                        receipt==null?"NONE":receipt.key(),damage==null?0:damage.damage(),
+                        damage==null?0:damage.remainder(),damage==null?"NONE":damage.materialGeneration(),
+                        receipt==null?"NONE":receipt.status(),journal.bytes());
+            }
+        }
+        // Recovery WAL transitions are already fsynced. Snapshot I/O has a bounded
+        // per-tick budget, and never runs inside a Sable collision callback.
+        if(journal.checkpointNeeded() || tick%100==0){
+            try {
+                var before=journal.stats();
+                int flushed=journal.checkpointBatch(WorldPersistentJournal.SAVE_DIRTY_BATCH);
+                var after=journal.stats();
+                if(flushed>0 && (VERBOSE || before.generation()!=after.generation()))
+                    log.info("[PDD-PERSIST] phase=CHECKPOINT flushedShards={} " +
+                                    "generationBefore={} generationAfter={} pending={} state={} receipt={} walBytes={}",
+                            flushed,before.generation(),after.generation(),after.checkpointing(),
+                            after.states(),after.receipts(),after.walBytes());
+            }catch(IOException checkpointFailure){
+                fault=true;
+                log.error("[PDD-PERSIST] phase=CHECKPOINT status=IO_FAULT " +
+                        "action=HALT_WORLD_COMMIT walPreserved=true",checkpointFailure);
+                return;
+            }
         }
         if(tick-lastSummaryTick>=100) {
             lastSummaryTick=tick;
@@ -162,6 +189,7 @@ public final class WorldCommitService {
                             "receipts={} walBytes={} fault={}",
                     accepted,appliedDamage,appliedBreak,rejected,blocked,core.queued(),unresolved.size(),
                     journal.size(),journal.receiptCount(),journal.bytes(),fault||core.ioFault());
+            if(VERBOSE)log.info("[PDD-PERSIST] phase=STORAGE {}",journal.storageStatus());
         }
     }
     private void releasePending(Cell cell) {
@@ -177,7 +205,7 @@ public final class WorldCommitService {
         if(!pendingCells.containsKey(cell) && !quarantined.contains(cell)
                 && !journal.hasPosition(cell.dimension(),cell.x(),cell.y(),cell.z())) {
             watched.remove(cell);
-            revisions.remove(cell);
+            // Replacement generations persist independently of in-memory watchers.
         }
     }
     /** Only after a successful block state change (RETURN injection). */
@@ -187,12 +215,17 @@ public final class WorldCommitService {
         if(!(level instanceof net.minecraft.server.level.ServerLevel serverLevel))return;
         if(!server.isSameThread())return; // Minecraft must enforce this; never access off-thread.
         Cell cell=new Cell(serverLevel.dimension().location().toString(),pos);
-        if(!watched.contains(cell) || cell.equals(ownBreak))return;
+        if(cell.equals(ownBreak) || (!watched.contains(cell)
+                && !journal.trackedPosition(cell.dimension(),cell.x(),cell.y(),cell.z())))return;
         try {
-            journal.discardAtPosition(cell.dimension(),cell.x(),cell.y(),cell.z());
-            long previous=revisions.getOrDefault(cell,0L);
-            if(previous==Long.MAX_VALUE)throw new IOException("incarnation revision overflow");
-            revisions.put(cell,previous+1);
+            long revision=journal.replaceBlock(cell.dimension(),cell.x(),cell.y(),cell.z());
+            // A proven replacement releases the old quarantine on the cell;
+            // old ambiguous ApplyIds stay terminal in the receipt ledger.
+            quarantined.remove(cell);
+            // Durable generation + tombstone share a single WAL frame.
+            if(VERBOSE)log.info("[PDD-PERSIST] phase=REPLACEMENT dimension={} " +
+                    "x={} y={} z={} incarnationRevision={} damageInvalidated=true",
+                    cell.dimension(),cell.x(),cell.y(),cell.z(),revision);
             // Intents already queued will fail their preflight if this block is replaced.
             releaseIfIdle(cell);
         }catch(IOException unexpected) {
@@ -204,10 +237,23 @@ public final class WorldCommitService {
     void endOwnBreak(){ownBreak=null;}
     public void stop(){
         WorldBlockMutationTracker.attach(null);
+        try {
+            // Shutdown attempts a complete checkpoint. An unexpected failure leaves
+            // the already-fsynced old WAL recoverable, not a falsified success.
+            int passes=0,flushed=0;
+            do {
+                flushed+=journal.checkpointBatch(WorldPersistentJournal.SAVE_DIRTY_BATCH);
+            }while(journal.checkpointPending() && ++passes<4096);
+            log.info("[PDD-PERSIST] phase=STOP_CHECKPOINT writtenShards={} pending={} {}",
+                    flushed,journal.checkpointPending(),journal.storageStatus());
+        }catch(IOException failed){
+            fault=true;log.error("[PDD-PERSIST] phase=STOP_CHECKPOINT status=FAILED " +
+                    "recoveryWalStillDurable=true",failed);
+        }
         log.info("[PDD-SAVE] phase=STOP status={} pending={} states={} receipts={} bytes={} " +
-                        "mode=SYNCHRONOUS_PER_RECEIPT_FSYNC",
+                        "mode=SHARDED_FSYNC",
                 fault||core.ioFault()?"IO_FAULT":"CLEAN",core.queued(),journal.size(),
                 journal.receiptCount(),journal.bytes());
-        watched.clear();quarantined.clear();revisions.clear();pendingCells.clear();unresolved.clear();
+        watched.clear();quarantined.clear();pendingCells.clear();unresolved.clear();
     }
 }

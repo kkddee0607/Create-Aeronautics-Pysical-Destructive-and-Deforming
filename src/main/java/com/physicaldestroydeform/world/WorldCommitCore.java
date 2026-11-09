@@ -40,13 +40,13 @@ public final class WorldCommitCore {
         /** Execute at most once. Implementation calls vanilla destroy/drop exactly once; no manual drops. */
         boolean breakVanillaOnce(SparseStateKey key);
     }
-    private final WorldReceiptJournal journal;
+    private final WorldJournal journal;
     private final DamageModel.Settings damageSettings;
     private final Deque<Intent> queue=new ArrayDeque<>();
     private final HashSet<String> queuedIds=new HashSet<>();
     private final int breakCapPerTick;
     private boolean ioFault;
-    public WorldCommitCore(WorldReceiptJournal journal,DamageModel.Settings settings,int breakCapPerTick) {
+    public WorldCommitCore(WorldJournal journal,DamageModel.Settings settings,int breakCapPerTick) {
         this.journal=Objects.requireNonNull(journal);damageSettings=Objects.requireNonNull(settings);
         if(breakCapPerTick<1||breakCapPerTick>4096)throw new IllegalArgumentException("invalid break cap");
         this.breakCapPerTick=breakCapPerTick;
@@ -55,9 +55,17 @@ public final class WorldCommitCore {
     public synchronized Decision submit(Intent intent) {
         if(ioFault)return new Decision(Outcome.QUARANTINED,"IO_FAULT",null);
         var existing=journal.receipt(intent.applyId());
-        if(existing!=null && existing.status()!=WorldReceiptJournal.Status.DEFERRED)
+        if(existing!=null && (existing.status()!=WorldReceiptJournal.Status.DEFERRED
+                || journal.recoveredUncertain(intent.applyId())))
             return new Decision(Outcome.DUPLICATE,"EXISTING_"+existing.status(),existing);
         if(queuedIds.contains(intent.applyId()))return new Decision(Outcome.DUPLICATE,"ALREADY_QUEUED",existing);
+        if(existing==null && journal.admissionRejectReason()!=null){
+            // No more durable Receipt IDs can be created. Halt, do not reuse or
+            // evict old IDs to fake success; source Credit is never re-issued.
+            ioFault=true;
+            return new Decision(Outcome.QUARANTINED,
+                    "SAVE_PRESSURE_"+journal.admissionRejectReason(),null);
+        }
         if(queue.size()>=MAX_QUEUED){
             // An issued Q must not disappear as a fictitious deferred intent.
             // Durably close this ApplyId as rejected instead of dropping it silently.
@@ -98,6 +106,14 @@ public final class WorldCommitCore {
                 continue;
             }
             var prior=journal.get(intent.key());
+            if(prior==null && journal.hasPosition(intent.key().dimension(),intent.key().x(),
+                    intent.key().y(),intent.key().z())){
+                // A different fingerprint/owner occupies the same saved position.
+                // Never reuse it; the real replacement event must invalidate it.
+                results.add(finish(intent,WorldReceiptJournal.Status.ABORTED,Outcome.ABORTED,
+                        "STALE_POSITION_STATE_QUARANTINED",null,tick));
+                continue;
+            }
             BlockDamageState before=new BlockDamageState();
             if(prior!=null && !prior.incarnation().equals(intent.expectedIncarnation())) {
                 try {journal.discardStale(prior.key());}
@@ -156,6 +172,10 @@ public final class WorldCommitCore {
         if(!Objects.equals(world.readIfLoaded(intent.key()),original))
             return finish(intent,WorldReceiptJournal.Status.ABORTED,Outcome.ABORTED,"CAS_AFTER_DAMAGE_EVENT",null,tick);
         if(!plan.thresholdReached()) {
+            if((plan.plannedDamageU8()>0 || plan.plannedRemainderU8()>0)
+                    && !journal.canStore(intent.key()))
+                return finish(intent,WorldReceiptJournal.Status.ABORTED,Outcome.ABORTED,
+                        "SPARSE_CHUNK_CAP_EXCEEDED",null,tick);
             var next=new WorldReceiptJournal.State(intent.key(),intent.expectedIncarnation(),plan.plannedDamageU8(),
                     plan.plannedRemainderU8(),intent.materialGeneration(),tick);
             return finish(intent,WorldReceiptJournal.Status.APPLIED,Outcome.APPLIED_DAMAGE,"FIXED_POINT_APPLIED",next,tick);
@@ -170,6 +190,17 @@ public final class WorldCommitCore {
         try {
             boolean apiResult=world.breakVanillaOnce(intent.key());
             Observation reread=world.readIfLoaded(intent.key());
+            if(reread!=null && reread.loaded() && reread.isAir() && !original.isAir()){
+                // Our own vanilla break suppresses the LevelChunk replacement mixin.
+                // Persist the same-state re-placement generation before publishing APPLIED;
+                // otherwise a queued older collision could hit a newly placed same block.
+                try {journal.replaceBlock(intent.key().dimension(),intent.key().x(),
+                        intent.key().y(),intent.key().z());}
+                catch(IOException failed){
+                    ioFault=true;
+                    return new Decision(Outcome.QUARANTINED,"BREAK_REVISION_FSYNC_FAILED",null);
+                }
+            }
             if(apiResult&&reread!=null&&reread.loaded()&&reread.isAir()&&!reread.hasBlockEntity())
                 return finish(intent,WorldReceiptJournal.Status.APPLIED,Outcome.APPLIED_BREAK,"WORLD_REREAD_AIR",
                         new WorldReceiptJournal.State(intent.key(),intent.expectedIncarnation(),0,0,intent.materialGeneration(),tick),tick);
