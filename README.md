@@ -1,11 +1,52 @@
-# 0.5.0-Fix
-> (T1024 + impact/face diagnostics).** Bundled block and item catalogs were updated, and accumulated World damage now supports 1024 with backwards-compatible save migration. Independent verified moving-region impacts can obtain a new collision episode; source-witnessed noisy corner contacts may reconstruct a wider shape-verified face without multiplying total F/Q. Full limits, tests and two-session validation: [`docs/verification/0.5.0-Fix-T1024-ImpactSurface.md`](docs/verification/0.5.0-Fix-T1024-ImpactSurface.md). **Gradle/Actions and in-game validation remain required.**
+# PDD 0.5.0-Fix — Physical Destruction and Deforming
 
-# PDD 0.4.1-spreadFix — Physical Destruction and Deforming
+**Create Aeronautics: Physical Destruction and Deforming (PDD)** is a Minecraft Java 1.21.1 / NeoForge add-on. It uses Sable collision evidence to calculate impact propagation, accumulated damage and conditional destruction of eligible **static World blocks**. It does not replace the Sable physics solver. **Physical Plot destruction, deformation and stress mutation are not enabled in this version.**
 
-**Create Aeronautics: Physical Destruction and Deforming (PDD)** is a Minecraft Java 1.21.1 / NeoForge add-on that consumes Sable collision evidence to calculate block-level impact propagation and damage. The **0.4.1-spreadFix** release retains the 0.4.1 lineage and extends the read-only 0.4.0finalFix impact pipeline with **server-side damage accumulation and conditional destruction of eligible static World blocks**. Physical Plot block destruction, deformation, and stress mutation are **not enabled** in this release.
+> **Release status:** 0.5.0-Fix source package assembled; official NeoForge Gradle/JUnit, GitHub Actions and in-game verification **not yet performed**. Back up your world and test on a disposable server before deployment. The results below are independent tests, not an official build pass.
 
-> **moreFix (prior release) status:** This source passed 39 Java21 independent stub-based test methods, but the 0.4.1-moreFix Gradle/JUnit build, GitHub Actions, and in-game destruction/contact tests were **not performed** when this ZIP was assembled. Treat it as an **unverified development release**. Back up the world and test on a disposable server first. See [0.4.1 verification report](docs/PDD-0.4.1-RELEASE-VERIFICATION.md).
+## What's new in 0.5.0-Fix
+
+| Area | Change |
+| --- | --- |
+| Destruction threshold (`T`) | Valid range **1–1024**, including four-digit `1024` in CSV parsers |
+| Accumulated World damage | **0–1024**, persisted as unsigned 2-byte value; fixed-point remainder stays byte-range |
+| Persistence | Production schema 2 writes U16 damage; reads previous schema 1 records and retains legacy WAL migration and checkpoint safeguards |
+| Default block materials | Bundled `pdd/materials/blocks.csv` updated to the supplied T1024 sheet (**1,844 rows**) |
+| Default item materials | Bundled `pdd/materials/items.csv` updated from the supplied item sheet (**2,159 rows**) |
+| Collision reauthorization | Independently evidenced moving-region impacts can obtain a new episode after native approach, quiet-force and force-rise checks; high force alone cannot bypass deduplication |
+| Contact-face reconstruction | Bounded noisy near-axis corner witnesses can be grouped; each candidate is checked against the actual owner collision shape |
+| F/Q accounting | One source collision's F and Q budgets are distributed over verified targets; no force multiplication per contact corner |
+| Diagnostics | `[PDD-HIGH-F]`, `[PDD-IMPACT-DECISION]`, `[PDD-CONTACT-PATCH]`, `[PDD-F-LEDGER]`, `[PDD-PERSIST]`, `[PDD-COMMIT]` |
+
+The **F-first 70:30 inward/lateral propagation policy**, Sable callback behavior, server-thread World commits, block fingerprint/CAS protection, receipt deduplication and PREPARED-before-destructive-change durability are preserved.
+
+### Persistence and migration
+
+The existing World store remains `data/pdd-world-0.5.0/`; do not rename or delete it. Back up both that directory and any `data/pdd-world-0.4.1.wal` before upgrading. Schema 1 World damage can be restored and rewritten in schema 2 without truncating damage above 255. The historical `pack24()` form is legacy-only and must not be used to store new U16 damage. Do **not** downgrade against the same live world storage without restoring a matching backup.
+
+### Known limitations
+
+- **A single isolated native contact witness is not proof of an entire large contact face.** Reconstruction is bounded and shape-checked; complete arbitrary-face discovery is not guaranteed.
+- Continuous compression of the same contact region is **not** automatically a new collision. A new episode requires independent pre-solver inward-motion and region/force evidence. Consequently, some high-force, no-break scenarios remain possible.
+- Reconstructed contact candidates are game-side damage targets, **not** additional Sable solver contacts. No new solver impulse or velocity is created.
+- World damage/destruction is implemented; Plot destructive commits are deferred to the separately planned 0.5.1 scope.
+
+### Verification status
+
+| Check | Result |
+| --- | --- |
+| Independent Java 21 compilation of affected pure-Java classes and limited adapters | Passed |
+| Source-level test methods executed with temporary JUnit-compatible harness and API doubles | **100 passed / 0 failed** |
+| `WorldCommitCoreSelfTest` | **44 checks passed** |
+| Schema 1 → schema 2 migration and 1024 roundtrip in independent tests | Passed |
+| Official `./gradlew clean test --no-daemon` and `./gradlew build --no-daemon` | **Not run** |
+| GitHub Actions and Minecraft in-game validation | **Not run** |
+
+These independent results do not establish full NeoForge API/classpath compatibility. See [`docs/verification/0.5.0-Fix-T1024-ImpactSurface.md`](docs/verification/0.5.0-Fix-T1024-ImpactSurface.md) for detailed evidence, limitations, diagnostics and the **two-session in-game test plan**.
+
+## Previous releases (historical reference)
+
+The following 0.4.x notes document earlier behavior and test states; they are **not** the current 0.5.0-Fix release status.
 
 ## Supported environment
 
@@ -20,7 +61,7 @@
 
 PDD does not replace Sable's physics solver or bundle its runtime. Install the required dependencies and the **built PDD JAR** in the server's `mods/` directory. The source ZIP is for development / GitHub Apply and **must not** be installed as a mod. A matching client mod configuration may be required by the mod loader; complete client-server compatibility remains unverified for this build.
 
-## 0.4.1-spreadFix — direction-biased lateral F propagation (2026-11-09)
+## 0.4.1-spreadFix (historical) — direction-biased lateral F propagation (2026-11-09)
 
 - On an approved collision, verified inward children receive **70%** and lateral children **30%** of the parent's outgoing half (when both groups exist). Missing groups release their reservation to present verified children; backward transfers are forbidden. Unknown normal retains equal weighting.
 - Removes the old geometric cone veto which forbade *all* lateral propagation on the initial native contact plane outside sparse contact seeds. Graph still uses six-face owner-local verified neighbors, parent-level half transfer, elasticity, F/Q safety budgets and one source envelope.
