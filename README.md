@@ -1,4 +1,3 @@
-> **
 # 0.5.0-Fix
 > (T1024 + impact/face diagnostics).** Bundled block and item catalogs were updated, and accumulated World damage now supports 1024 with backwards-compatible save migration. Independent verified moving-region impacts can obtain a new collision episode; source-witnessed noisy corner contacts may reconstruct a wider shape-verified face without multiplying total F/Q. Full limits, tests and two-session validation: [`docs/verification/0.5.0-Fix-T1024-ImpactSurface.md`](docs/verification/0.5.0-Fix-T1024-ImpactSurface.md). **Gradle/Actions and in-game validation remain required.**
 
