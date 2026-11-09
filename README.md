@@ -1,4 +1,4 @@
-# PDD 0.4.1-spreadFix — Physical Destruction and Deforming
+# PDD 0.5.0 — Physical Destruction and Deforming
 
 **Create Aeronautics: Physical Destruction and Deforming (PDD)** is a Minecraft Java 1.21.1 / NeoForge add-on that consumes Sable collision evidence to calculate block-level impact propagation and damage. The **0.4.1-spreadFix** release retains the 0.4.1 lineage and extends the read-only 0.4.0finalFix impact pipeline with **server-side damage accumulation and conditional destruction of eligible static World blocks**. Physical Plot block destruction, deformation, and stress mutation are **not enabled** in this release.
 
