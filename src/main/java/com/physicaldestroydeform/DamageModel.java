@@ -4,7 +4,7 @@ import java.util.Objects;
 
 /** IDS 1.0.6 §24.1 game-Q planning only. No block mutation or committed damage. */
 public final class DamageModel {
-    public static final String ALGORITHM_REVISION = "PDD-IDS-1.0.6/0.4.0colFix3";
+    public static final String ALGORITHM_REVISION = "PDD-IDS-1.0.7/0.5.0Fix-T1024";
     public static final double DIRECT_SHARE = 0.60;
     public static final double PLASTIC_SHARE = 0.15;
     public static final double STRESS_SHARE = 0.25;
@@ -42,6 +42,9 @@ public final class DamageModel {
                        double rawDamage, long fixedIncrement, int plannedDamageU8,
                        int plannedRemainderU8, int plannedPlasticIncrement,
                        boolean thresholdReached, String algorithmRevision) {
+        /** Legacy accessor plannedDamageU8 is retained for test/API compatibility,
+         * but its numeric domain is now 0..1024 (U16 on disk). */
+        public int plannedDamageUnits() {return plannedDamageU8;}
         public double accountedQ() {return absorbedQ+directQ+unusedPlannedQ;}
     }
 
@@ -91,7 +94,7 @@ public final class DamageModel {
         double rawDamage=direct*cfg.damageGain()*hardnessFactor(material,cfg);
         if (!Double.isFinite(rawDamage) || rawDamage<0)
             throw new IllegalArgumentException("invalid calculated damage");
-        long increment=(long)Math.floor(Math.min(65535.0,rawDamage*BlockDamageState.FIXED_SCALE));
+        long increment=(long)Math.floor(Math.min((double)BlockDamageState.MAX_FIXED_VALUE,rawDamage*BlockDamageState.FIXED_SCALE));
         BlockDamageState projected=previous.copy();
         projected.addFixedDamage(increment);
         int cap=Math.max(0,material.plasticCapacity()-previous.deformation());
@@ -120,7 +123,7 @@ public final class DamageModel {
     /** No per-impact ceil: sub-unit damage is carried by BlockDamageState.remainder. */
     public static int quantizeDamage(double damage) {
         if (!Double.isFinite(damage) || damage<=0) return 0;
-        return (int)Math.min(255,Math.floor(damage));
+        return (int)Math.min(BlockDamageState.MAX_VALUE,Math.floor(damage));
     }
     public static int damageIncrement(double effectiveDamage,double damageScale) {
         if (!Double.isFinite(effectiveDamage) || effectiveDamage<=0 ||

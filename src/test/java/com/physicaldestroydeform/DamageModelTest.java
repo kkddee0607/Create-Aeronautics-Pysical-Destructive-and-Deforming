@@ -22,7 +22,8 @@ class DamageModelTest {
     @Test void quantizationClampsAndDoesNotRoundUpSmallDamage() {
         assertEquals(0,DamageModel.quantizeDamage(Double.NaN));
         assertEquals(0,DamageModel.quantizeDamage(0.2));
-        assertEquals(255,DamageModel.quantizeDamage(999));
+        assertEquals(999,DamageModel.quantizeDamage(999));
+        assertEquals(1024,DamageModel.quantizeDamage(9999));
     }
 
     @Test void operatorDamageGainIsFinitePositiveAndFallsBackWhenInvalid() {
@@ -46,8 +47,8 @@ class DamageModelTest {
         var previous=new BlockDamageState();
         var material=new MaterialProperties(0,32,25,22,false);
         var plan=DamageModel.plan(32768,material,previous,DamageModel.Settings.defaults());
-        assertEquals(255,plan.plannedDamageU8());
-        assertEquals(255,plan.plannedRemainderU8());
+        assertEquals(1024,plan.plannedDamageU8());
+        assertEquals(0,plan.plannedRemainderU8());
         assertEquals(0,previous.fixedDamage());
         assertEquals(32768,plan.accountedQ(),1e-7);
         assertTrue(plan.thresholdReached());

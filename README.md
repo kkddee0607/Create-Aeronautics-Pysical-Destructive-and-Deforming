@@ -1,4 +1,6 @@
-# PDD 0.5.0 — Physical Destruction and Deforming
+> **0.5.0-Fix (T1024 + impact/face diagnostics).** Bundled block and item catalogs were updated, and accumulated World damage now supports 1024 with backwards-compatible save migration. Independent verified moving-region impacts can obtain a new collision episode; source-witnessed noisy corner contacts may reconstruct a wider shape-verified face without multiplying total F/Q. Full limits, tests and two-session validation: [`docs/verification/0.5.0-Fix-T1024-ImpactSurface.md`](docs/verification/0.5.0-Fix-T1024-ImpactSurface.md). **Gradle/Actions and in-game validation remain required.**
+
+# PDD 0.4.1-spreadFix — Physical Destruction and Deforming
 
 **Create Aeronautics: Physical Destruction and Deforming (PDD)** is a Minecraft Java 1.21.1 / NeoForge add-on that consumes Sable collision evidence to calculate block-level impact propagation and damage. The **0.4.1-spreadFix** release retains the 0.4.1 lineage and extends the read-only 0.4.0finalFix impact pipeline with **server-side damage accumulation and conditional destruction of eligible static World blocks**. Physical Plot block destruction, deformation, and stress mutation are **not enabled** in this release.
 

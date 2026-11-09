@@ -2,8 +2,10 @@ package com.physicaldestroydeform;
 
 /** Compact sparse value. Never allocate one per world block; mutation remains OFF in 0.4.0. */
 public final class BlockDamageState {
-    public static final int MAX_VALUE = 255;
+    public static final int MAX_VALUE = 1024;
+    public static final int MAX_VISUAL = 255;
     public static final int FIXED_SCALE = 256;
+    public static final long MAX_FIXED_VALUE = (long) MAX_VALUE * FIXED_SCALE;
     private int damage;
     private int deformation;
     private int crackVisual;
@@ -14,28 +16,35 @@ public final class BlockDamageState {
     public int remainder() { return remainder; }
     public long fixedDamage() { return damage * (long) FIXED_SCALE + remainder; }
     public void addDamage(int amount) { if (amount > 0) setDamage((int) Math.min(MAX_VALUE,(long)damage+amount)); }
-    public void addDeformation(int amount) { if (amount > 0) setDeformation((int) Math.min(MAX_VALUE,(long)deformation+amount)); }
-    public void setDamage(int value) { damage = requireByteRange("damage", value); }
+    public void addDeformation(int amount) { if (amount > 0) setDeformation((int) Math.min(MAX_VISUAL,(long)deformation+amount)); }
+    public void setDamage(int value) {
+        if(value<0 || value>MAX_VALUE)throw new IllegalArgumentException("damage must be 0.."+MAX_VALUE);
+        damage=value;
+    }
     public void setDeformation(int value) { deformation = requireByteRange("deformation", value); }
     public void setCrackVisual(int value) { crackVisual = requireByteRange("crackVisual", value); }
     public void setRemainder(int value) { remainder = requireByteRange("remainder", value); }
     public void addFixedDamage(long increment) {
         if (increment < 0) throw new IllegalArgumentException("negative fixed increment");
-        long next = Math.min(65535L, fixedDamage() + Math.min(increment, 65535L));
+        long next = Math.min(MAX_FIXED_VALUE, fixedDamage() + Math.min(increment, MAX_FIXED_VALUE));
         damage = (int) (next / FIXED_SCALE);
         remainder = (int) (next % FIXED_SCALE);
     }
     public void addRawDamage(double rawDamage) {
         if (!Double.isFinite(rawDamage) || rawDamage < 0)
             throw new IllegalArgumentException("invalid raw damage");
-        addFixedDamage((long) Math.floor(Math.min(65535.0, rawDamage * FIXED_SCALE)));
+        addFixedDamage((long) Math.floor(Math.min((double)MAX_FIXED_VALUE, rawDamage * FIXED_SCALE)));
     }
     public boolean isPristine() { return damage==0 && deformation==0 && crackVisual==0 && remainder==0; }
     /** Historical three-field representation: remainder is serialized separately. */
-    public int pack24() { return (damage & 255) | ((deformation & 255) << 8) | ((crackVisual & 255) << 16); }
+    public int pack24() {
+        if(damage>255)throw new IllegalStateException("legacy U8 packed state cannot encode T1024 damage");
+        return (damage & 255) | ((deformation & 255) << 8) | ((crackVisual & 255) << 16);
+    }
     public BlockDamageState copy() {
-        BlockDamageState other=unpack24(pack24());
-        other.setRemainder(remainder);
+        BlockDamageState other=new BlockDamageState();
+        other.damage=damage;other.deformation=deformation;other.crackVisual=crackVisual;
+        other.remainder=remainder;
         return other;
     }
     public static BlockDamageState unpack24(int packed) {

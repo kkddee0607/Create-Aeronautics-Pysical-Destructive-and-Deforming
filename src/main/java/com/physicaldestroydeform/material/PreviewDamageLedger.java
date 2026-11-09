@@ -52,7 +52,7 @@ public final class PreviewDamageLedger {
         for(var target:report.plans()) {
             var old=states.get(target.key());
             BlockDamageState next=old==null?new BlockDamageState():old.unpack();
-            next.setDamage(target.plan().plannedDamageU8());
+            next.setDamage(target.plan().plannedDamageUnits());
             next.setRemainder(target.plan().plannedRemainderU8());
             if(!next.isPristine())staged.put(target.key(),
                     SparseDamageState.from(target.key(),next,generation,tick));

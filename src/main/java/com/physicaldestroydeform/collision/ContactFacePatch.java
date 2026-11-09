@@ -24,8 +24,9 @@ import net.minecraft.core.BlockPos;
 final class ContactFacePatch {
     private ContactFacePatch() {}
     static final int MAX_AREA = ContactCreditLedger.MAX_TARGETS_PER_SIDE;
-    private static final double PLANE_EPS = 0.125;
-    private static final double NORMAL_DOT = 0.995;
+    private static final double PLANE_EPS = 0.45;
+    private static final double AXIS_NORMAL_DOT = 0.80;
+    private static final double OBLIQUE_NORMAL_DOT = 0.995;
     private static final double SURFACE_TOLERANCE = 0.51;
     // With only one distinct solver witness there is no evidenced polygon.
     // A one-cell local neighborhood, independently shape-checked, avoids a
@@ -37,7 +38,7 @@ final class ContactFacePatch {
         Result { added = List.copyOf(added); }
     }
     private record Point(double u, double v) {}
-    private record Witness(double[] normal, double plane, Point point, int axis) {}
+    private record Witness(double[] normal,double plane,Point point,int axis,boolean axisAligned) {}
     private static final class Plane {
         final Witness first;
         final List<Point> points=new ArrayList<>();
@@ -77,14 +78,20 @@ final class ContactFacePatch {
             double[] p={point.x()-gridOffset.getX(),point.y()-gridOffset.getY(),
                     point.z()-gridOffset.getZ()};
             int u=(axis+1)%3,v=(axis+2)%3;
-            var witness=new Witness(normal,normal[0]*p[0]+normal[1]*p[1]+normal[2]*p[2],
-                    new Point(p[u],p[v]),axis);
+            // Solver corner normals need not be identical even on one planar
+            // voxel face. Compare the source-local dominant AXIS plane for
+            // near-axis normals; retain exact oblique geometry separately.
+            boolean axisAligned=Math.abs(normal[axis])>=0.90;
+            double plane=axisAligned?p[axis]:normal[0]*p[0]+normal[1]*p[1]+normal[2]*p[2];
+            var witness=new Witness(normal,plane,new Point(p[u],p[v]),axis,axisAligned);
             Plane match=null;
             for(var group:planes) {
-                if(group.first.axis()!=witness.axis())continue;
+                if(group.first.axis()!=witness.axis() || group.first.axisAligned()!=witness.axisAligned())continue;
                 double dot=0;
                 for(int i=0;i<3;i++)dot+=group.first.normal()[i]*normal[i];
-                if(dot>=NORMAL_DOT && Math.abs(group.plane()-witness.plane())<=PLANE_EPS) {
+                if(dot>=(witness.axisAligned()?AXIS_NORMAL_DOT:OBLIQUE_NORMAL_DOT)
+                        && Math.abs(group.plane()-witness.plane())<=
+                            (witness.axisAligned()?PLANE_EPS:0.125)) {
                     match=group;break;
                 }
             }
@@ -128,7 +135,8 @@ final class ContactFacePatch {
             for(var target:verified) {
                 if(!owner.equals(target.ownerKey()))continue;
                 int[] c=parse(target.localBlock());if(c==null)continue;
-                double planeAxis=(plane-normal[u]*(c[u]+0.5)-normal[v]*(c[v]+0.5))/normal[axis];
+                double planeAxis=group.first.axisAligned()?plane
+                        :(plane-normal[u]*(c[u]+0.5)-normal[v]*(c[v]+0.5))/normal[axis];
                 int blockAxis=(int)Math.floor(planeAxis-Math.signum(normal[axis])*GRID_EPS);
                 if(c[axis]==blockAxis &&
                         (localHalo?segmentDistanceSquared(hull.getFirst(),hull.getFirst(),
@@ -143,7 +151,8 @@ final class ContactFacePatch {
                 double cu=a+0.5,cv=b+0.5;
                 if(localHalo?segmentDistanceSquared(hull.getFirst(),hull.getFirst(),cu,cv)
                         >tolerance*tolerance:!inside(hull,cu,cv))continue;
-                double along=(plane-normal[u]*cu-normal[v]*cv)/normal[axis];
+                double along=group.first.axisAligned()?plane
+                        :(plane-normal[u]*cu-normal[v]*cv)/normal[axis];
                 if(!Double.isFinite(along) || along<=Integer.MIN_VALUE+2 || along>=Integer.MAX_VALUE-2)
                     continue;
                 int[] c=new int[3];c[u]=a;c[v]=b;

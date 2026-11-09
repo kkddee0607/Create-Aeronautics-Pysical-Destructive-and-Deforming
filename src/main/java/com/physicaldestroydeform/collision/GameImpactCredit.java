@@ -15,7 +15,7 @@ import java.util.Objects;
  * No Minecraft/Sable mutable object crosses this boundary.</p>
  */
 public final class GameImpactCredit {
-    public static final String POLICY_REVISION = "PDD-IDS-1.0.7/0.4.1-spreadFix-CONTACT-RECOVERY";
+    public static final String POLICY_REVISION = "PDD-IDS-1.0.7/0.5.0Fix-INDEPENDENT-REGION-REIMPACT";
     // User's 100^3 blocks * 4 mass-units/block * 10 m/s. This is a
     // GAME F index (mass * speed); without stopping time it is NOT Newtons.
     public static final double MAX_GAME_F = 100d * 100d * 100d * 4d * 10d;
@@ -147,12 +147,20 @@ public final class GameImpactCredit {
      */
     public record Frame(Pair pair, long tick, List<ObservedForce> records,
                         boolean positivelySeparated, boolean verifiedApproach,
-                        Target targetA, Target targetB, double aggregatedPeak) {
+                        Target targetA, Target targetB, double aggregatedPeak,
+                        boolean independentlyVerifiedReimpact) {
+        /** Existing eight-field source API keeps reimpact disabled by default. */
+        public Frame(Pair pair,long tick,List<ObservedForce> records,
+                     boolean positivelySeparated,boolean verifiedApproach,
+                     Target targetA,Target targetB,double aggregatedPeak){
+            this(pair,tick,records,positivelySeparated,verifiedApproach,targetA,targetB,
+                    aggregatedPeak,false);
+        }
         public Frame(Pair pair, long tick, List<ObservedForce> records,
                      boolean positivelySeparated, boolean verifiedApproach,
                      Target targetA, Target targetB) {
             this(pair,tick,records,positivelySeparated,verifiedApproach,targetA,targetB,
-                    GameImpactCredit.peak(records));
+                    GameImpactCredit.peak(records),false);
         }
         public Frame {
             if (!Double.isFinite(aggregatedPeak) || aggregatedPeak < 0)
@@ -169,6 +177,8 @@ public final class GameImpactCredit {
                 throw new IllegalArgumentException("wrong A target owner");
             if (targetB != null && !targetB.ownerKey().equals(pair.b().stableKey()))
                 throw new IllegalArgumentException("wrong B target owner");
+            if (independentlyVerifiedReimpact && (!verifiedApproach || positivelySeparated))
+                throw new IllegalArgumentException("reimpact needs independent pre-impact approach");
             if (positivelySeparated && !records.isEmpty())
                 throw new IllegalArgumentException("contact and proven separation contradict");
         }
@@ -275,6 +285,15 @@ public final class GameImpactCredit {
             s.authorizationTick=s.pendingApproach?frame.tick():-1;
             s.episodeGeneration++;
             s.burstFrames=0;
+        } else if (s.phase == Phase.ACTIVE && s.episode>0
+                && frame.independentlyVerifiedReimpact() && frame.verifiedApproach()
+                && frame.tick()-s.authorizationTick>=config.quietFrames()) {
+            // A separate, independently velocity-proved regional impact can occur
+            // without complete separation of a very large Plot from the World.
+            // The caller must prove both a quiet/rising force episode AND a
+            // different shape-audited contact region. No raw-force-only bypass.
+            s.pendingApproach=true;s.authorizationTick=frame.tick();s.burstFrames=0;
+            s.episodeGeneration++;
         } else if (s.phase == Phase.ACTIVE && s.episode==0 && frame.verifiedApproach()
                 && (!s.pendingApproach || s.burstFrames>=2)
                 && (s.authorizationTick<0 || frame.tick()-s.authorizationTick>=config.quietFrames())) {

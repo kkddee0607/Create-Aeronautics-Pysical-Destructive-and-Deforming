@@ -103,6 +103,21 @@ final class GameImpactCreditTest {
         e.step(frame(5,List.of(),true,false,TA,TB));
         assertEquals(Phase.ARMED,e.phase(P));
     }
+    @Test void independentlyProvedRegionalReimpactIssuesExactlyOneNewCredit() {
+        var engine=new GameImpactCredit(Settings.provisional());
+        assertTrue(engine.step(frame(10,MANY,false,true,TA,TB)).credited(),
+                "pre-solver verified first hit must be admitted without a previous AABB separation");
+        assertEquals(Reason.DUPLICATE_EPISODE,engine.step(frame(11,MANY,false,true,TA,TB)).reason());
+        assertEquals(Reason.DUPLICATE_EPISODE,engine.step(new Frame(P,20,MANY,false,true,TA,TB,42,false)).reason());
+        assertThrows(IllegalArgumentException.class,
+                ()->new Frame(P,21,MANY,false,false,TA,TB,42,true));
+        var changed=new Target(P.b().stableKey(),"8,5,6","minecraft:stone");
+        var next=engine.step(new Frame(P,22,MANY,false,true,TA,changed,42,true));
+        assertTrue(next.credited());
+        assertEquals(2,next.episode());
+        assertEquals(Reason.DUPLICATE_EPISODE,
+                engine.step(new Frame(P,23,MANY,false,true,TA,changed,42,false)).reason());
+    }
     @Test void noNewCreditDuringTwentySustainedTicks() {
         var e=new GameImpactCredit(new GameImpactCredit.Settings(2,2,0.25,64,2,4096,600));
         e.step(frame(1,List.of(),true,false,TA,TB));

@@ -22,6 +22,8 @@ class MaterialPropertiesTest {
         assertEquals(70,a.ductilityPercent());
         assertEquals(MaterialProperties.defaultYield(70),a.yieldThreshold());
         assertEquals(1,MaterialProperties.defaultThreshold(0));
-        assertEquals(255,MaterialProperties.defaultThreshold(255));
+        assertEquals(1024,MaterialProperties.defaultThreshold(255));
+        assertDoesNotThrow(()->new MaterialProperties(100,1024,25,40,false));
+        assertThrows(IllegalArgumentException.class,()->new MaterialProperties(100,1025,25,40,false));
     }
 }

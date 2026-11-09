@@ -172,11 +172,11 @@ public final class WorldCommitCore {
         if(!Objects.equals(world.readIfLoaded(intent.key()),original))
             return finish(intent,WorldReceiptJournal.Status.ABORTED,Outcome.ABORTED,"CAS_AFTER_DAMAGE_EVENT",null,tick);
         if(!plan.thresholdReached()) {
-            if((plan.plannedDamageU8()>0 || plan.plannedRemainderU8()>0)
+            if((plan.plannedDamageUnits()>0 || plan.plannedRemainderU8()>0)
                     && !journal.canStore(intent.key()))
                 return finish(intent,WorldReceiptJournal.Status.ABORTED,Outcome.ABORTED,
                         "SPARSE_CHUNK_CAP_EXCEEDED",null,tick);
-            var next=new WorldReceiptJournal.State(intent.key(),intent.expectedIncarnation(),plan.plannedDamageU8(),
+            var next=new WorldReceiptJournal.State(intent.key(),intent.expectedIncarnation(),plan.plannedDamageUnits(),
                     plan.plannedRemainderU8(),intent.materialGeneration(),tick);
             return finish(intent,WorldReceiptJournal.Status.APPLIED,Outcome.APPLIED_DAMAGE,"FIXED_POINT_APPLIED",next,tick);
         }

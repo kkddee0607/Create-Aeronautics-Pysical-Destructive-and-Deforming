@@ -155,7 +155,7 @@ public final class WorldCommitService {
                 var receipt=result.receipt();
                 var damage=receipt==null?null:journal.get(receipt.key());
                 log.info("[PDD-COMMIT] phase=RESULT result={} reason={} id={} " +
-                                "key={} damageU8={} remainderU8={} materialGeneration={} " +
+                                "key={} damageU16={} remainderU8={} materialGeneration={} " +
                                 "receiptStatus={} walBytes={}",
                         result.result(),result.reason(),receipt==null?"NONE":receipt.id(),
                         receipt==null?"NONE":receipt.key(),damage==null?0:damage.damage(),

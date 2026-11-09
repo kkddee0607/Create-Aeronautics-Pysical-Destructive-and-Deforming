@@ -42,7 +42,7 @@ import net.minecraft.world.item.Item;
 /** IDS 1.0.6: immutable block-definition and relevant state material tables, atomically swapped on reload. */
 public final class MaterialRegistry {
     public static final MaterialProperties FALLBACK=new MaterialProperties(128,20,30);
-    public static final String ALGORITHM_REVISION="PDD-IDS-1.0.7/CAP-MATERIAL-STATIC-0.4.1";
+    public static final String ALGORITHM_REVISION="PDD-IDS-1.0.7/CAP-MATERIAL-STATIC-0.5.0Fix-T1024";
     public record Snapshot(long generation,Map<ResourceLocation,MaterialProperties> definitions,
                            Map<String,MaterialProperties> stateSpecific,String algorithmRevision,
                            Map<ResourceLocation,MaterialCsvCatalog.Item> itemDefinitions,

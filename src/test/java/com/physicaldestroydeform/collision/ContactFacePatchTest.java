@@ -27,6 +27,23 @@ class ContactFacePatchTest {
             seeds.add(target(x,z));
         return seeds;
     }
+    @Test void noisySolverCornerNormalsStillResolveSingleAxisFaceAndSpreadOneEvent() {
+        // Four native extremal witnesses differ by up to ~20 degrees, but
+        // all locate the same Y=65 world face. Shape checks still gate cells.
+        var contacts=new ArrayList<NativeCollisionTelemetry.Contact>();
+        int i=0;
+        for(int x:new int[]{0,4})for(int z:new int[]{0,4}){
+            double dx=(i%2==0?0.30:-0.24); i++;
+            contacts.add(new NativeCollisionTelemetry.Contact(7,-1,3500,
+                    0,-1,0,dx,1,0.15,0,0,0,x+0.5,65,z+0.5,DIM,5));
+        }
+        var four=List.of(target(0,0),target(0,4),target(4,0),target(4,4));
+        var verified=ContactFacePatch.reconstruct(DIM,OWNER,BlockPos.ZERO,four,contacts,
+                (pos,point)->target(pos.getX(),pos.getZ()));
+        assertEquals(21,verified.added().size(),verified.reason());
+        var all=new HashSet<>(four);all.addAll(verified.added());
+        assertEquals(25,all.size());
+    }
     @Test void fourCornerContactWitnessesRecoverAllTwentyFiveVerifiedCells() {
         var result=ContactFacePatch.reconstruct(DIM,OWNER,BlockPos.ZERO,cornerIslands(),corners(),
                 (pos,point)->target(pos.getX(),pos.getZ()));

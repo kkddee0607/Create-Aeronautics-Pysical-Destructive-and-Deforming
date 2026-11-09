@@ -31,6 +31,26 @@ class SparseStateCodecTest {
         assertEquals(255,decoded.unpack().damage());
         assertEquals(255,decoded.unpack().deformation());
     }
+    @Test void t1024DamageAndLegacySchemaOneReadAreLossless() throws Exception {
+        var k=plot(7);
+        var extended=new SparseDamageState(k,1024,255,255,0,1,100);
+        assertEquals(1024,SparseStateCodec.decode(SparseStateCodec.encode(List.of(extended)))
+                .getFirst().unpack().damage());
+        // Version-1 stores exactly one unsigned damage byte. This fixture is
+        // constructed with the original field order and a fresh valid CRC.
+        var out=new java.io.ByteArrayOutputStream();
+        var stream=new java.io.DataOutputStream(out);
+        stream.writeInt(0x50444434);stream.writeInt(1);stream.writeInt(1);
+        stream.writeUTF(k.dimension());stream.writeUTF(k.ownerSpace());stream.writeUTF(k.ownerId());
+        stream.writeLong(k.ownerGeneration());stream.writeInt(k.x());stream.writeInt(k.y());
+        stream.writeInt(k.z());stream.writeUTF(k.fingerprint());
+        stream.writeByte(250);stream.writeByte(10);stream.writeByte(11);stream.writeByte(255);
+        stream.writeLong(5);stream.writeLong(123);
+        var crc=new java.util.zip.CRC32();crc.update(out.toByteArray());
+        stream.writeInt((int)crc.getValue());stream.flush();
+        var restored=SparseStateCodec.decode(out.toByteArray()).getFirst();
+        assertEquals(250,restored.damageU16());assertEquals(255,restored.remainderU8());
+    }
     @Test void zeroStateCannotBeSerialized() {
         assertThrows(IllegalArgumentException.class,()->new SparseDamageState(plot(1),0,0,0,0,1,1));
         var zero=new BlockDamageState();
@@ -58,7 +78,7 @@ class SparseStateCodecTest {
     }
     @Test void schemaMutationWithValidCrcStillRejected() {
         var payload=SparseStateCodec.encode(List.of(sample(3)));
-        payload[7]=2;
+        payload[7]=3;
         CRC32 crc=new CRC32();crc.update(payload,0,payload.length-4);
         int v=(int)crc.getValue();
         int n=payload.length;

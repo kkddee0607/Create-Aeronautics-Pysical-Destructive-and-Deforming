@@ -1,11 +1,11 @@
 package com.physicaldestroydeform;
 
-/** IDS 1.0.6: immutable definition-level H/T/D/E profile; values are logical unsigned bytes. */
+/** Immutable definition-level material profile: H is U8, T is U16 (1..1024), D/E percentages. */
 public record MaterialProperties(int hardness, int threshold, int ductilityPercent,
                                  int elasticityPercent, boolean unbreakable, double yieldThreshold) {
     public MaterialProperties {
         requireRange("hardness", hardness, 0, 255);
-        requireRange("threshold", threshold, 1, 255);
+        requireRange("threshold", threshold, 1, 1024);
         requireRange("ductilityPercent", ductilityPercent, 0, 100);
         requireRange("elasticityPercent", elasticityPercent, 0, 100);
         if (!Double.isFinite(yieldThreshold) || yieldThreshold < 0)
@@ -24,7 +24,7 @@ public record MaterialProperties(int hardness, int threshold, int ductilityPerce
     }
     public static int defaultThreshold(int hardness) {
         requireRange("hardness", hardness, 0, 255);
-        return Math.max(1, Math.min(255, (int) Math.round(1 + 254 * Math.pow(hardness / 255.0, 0.65))));
+        return Math.max(1, Math.min(1024, (int) Math.round(1 + 1023 * Math.pow(hardness / 255.0, 0.65))));
     }
     public static double defaultYield(int ductilityPercent) {
         requireRange("ductilityPercent", ductilityPercent, 0, 100);

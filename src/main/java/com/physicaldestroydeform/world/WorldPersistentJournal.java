@@ -19,7 +19,7 @@ import static java.nio.file.StandardOpenOption.*;
  * No Plot mutation, forced chunk load, or Minecraft API occurs in this class.
  */
 public final class WorldPersistentJournal implements WorldJournal {
-    public static final int SCHEMA=1, MAX_STATES_PER_CHUNK=4096;
+    public static final int SCHEMA=2, MAX_STATES_PER_CHUNK=4096;
     public static final int MAX_TOTAL_STATES=2_000_000, MAX_RECEIPTS=2_000_000;
     public static final int MAX_REVISIONS_PER_CHUNK=131_072, MAX_TOTAL_REVISIONS=4_000_000;
     public static final int SAVE_DIRTY_BATCH=128;
@@ -59,6 +59,8 @@ public final class WorldPersistentJournal implements WorldJournal {
     private long generation,walBytes,repairedTailBytes;
     private String legacyHash="";
     private boolean staging, migrated;
+    // The committed manifest selects the reader schema; new writes always use SCHEMA=2.
+    private int loadingSchema=SCHEMA;
 
     /** Existing schema-2 WAL stays untouched as an audit and downgrade safety marker. */
     public WorldPersistentJournal(Path directory,Path oldWal) throws IOException {
@@ -66,8 +68,11 @@ public final class WorldPersistentJournal implements WorldJournal {
         legacyPath=Objects.requireNonNull(oldWal).toAbsolutePath().normalize();
         manifestPath=root.resolve("checkpoint.manifest");
         Files.createDirectories(root);
-        if(Files.exists(manifestPath))restore();
-        else bootstrap();
+        if(Files.exists(manifestPath)){
+            loadingSchema=readDiskSchema(manifestPath);
+            restore();
+            if(loadingSchema==1)upgradeSchema1();
+        }else bootstrap();
         for(var receipt:receipts.values())if(receipt.status()==WorldReceiptJournal.Status.DEFERRED
                 || receipt.status()==WorldReceiptJournal.Status.PREPARED)
             recoveredUncertain.add(receipt.id());
@@ -249,6 +254,46 @@ public final class WorldPersistentJournal implements WorldJournal {
         if(next<1)throw new IllegalArgumentException("invalid revision");
         revisions.put(cell,next);revisionChunks.computeIfAbsent(cell.chunk(),ignored->new HashSet<>()).add(cell);
         dirtyChunks.add(cell.chunk());
+    }
+
+    /** Re-encode all schema-1 committed snapshots and replayed WAL data without
+     * modifying the old generation. A crash before the atomic manifest move
+     * replays the untouched previous WAL; after it, schema-2 is self-contained.
+     */
+    private void upgradeSchema1() throws IOException {
+        long next=generation+1;
+        Map<ChunkKey,String> newChunks=new HashMap<>();
+        Map<Integer,String> newBuckets=new HashMap<>();
+        Set<ChunkKey> keys=new TreeSet<>(currentChunks.keySet());
+        keys.addAll(chunkKeys.keySet());keys.addAll(revisionChunks.keySet());
+        for(ChunkKey key:keys){
+            if(chunkKeys.getOrDefault(key,Set.of()).isEmpty()
+                    && revisionChunks.getOrDefault(key,Set.of()).isEmpty())continue;
+            String rel="chunks/"+sha256(key.dimension()).substring(0,32)+"/"
+                    +key.x()+"_"+key.z()+"."+next+".pds";
+            writeDurable(root.resolve(rel),blob(CHUNK,chunkBytes(key)));
+            newChunks.put(key,rel);
+        }
+        for(int id:new TreeSet<>(receiptBucketIndex.keySet())){
+            String rel="receipts/"+id+"."+next+".pdr";
+            writeDurable(root.resolve(rel),blob(RECEIPTS,receiptBytes(id)));
+            newBuckets.put(id,rel);
+        }
+        // The manifest is written last. Do not delete legacy data during migration.
+        createWal(next);
+        writeManifest(next,newChunks,newBuckets);
+        currentChunks.clear();currentChunks.putAll(newChunks);
+        currentBuckets.clear();currentBuckets.putAll(newBuckets);
+        generation=next;loadingSchema=SCHEMA;migrated=true;
+        dirtyChunks.clear();dirtyBuckets.clear();
+    }
+    private static int readDiskSchema(Path path)throws IOException {
+        try(var in=new DataInputStream(Files.newInputStream(path))){
+            if(in.readInt()!=DISK_MAGIC)throw new IOException("unknown PDD checkpoint magic");
+            int version=in.readInt();
+            if(version!=1&&version!=SCHEMA)throw new IOException("unsupported PDD checkpoint schema "+version);
+            return version;
+        }
     }
 
     private void bootstrap()throws IOException {
@@ -435,7 +480,7 @@ public final class WorldPersistentJournal implements WorldJournal {
         long lastValid=16;
         boolean incompleteTail=false;
         try(var in=new DataInputStream(new BufferedInputStream(Files.newInputStream(wal)))){
-            if(in.readInt()!=WAL_MAGIC||in.readInt()!=SCHEMA||in.readLong()!=generation)
+            if(in.readInt()!=WAL_MAGIC||in.readInt()!=loadingSchema||in.readLong()!=generation)
                 throw new IOException("unknown/stale recovery WAL schema");
             long consumed=16;
             while(consumed<length){
@@ -505,12 +550,12 @@ public final class WorldPersistentJournal implements WorldJournal {
         return ByteBuffer.allocate(20+body.length).putInt(DISK_MAGIC).putInt(SCHEMA)
                 .putInt(type).putInt(body.length).putInt(crc(body)).put(body).array();
     }
-    private static byte[] readBlob(Path file,int type)throws IOException {
+    private byte[] readBlob(Path file,int type)throws IOException {
         if(!Files.isRegularFile(file))throw new IOException("missing checkpoint file: "+file);
         long length=Files.size(file);if(length<20||length>MAX_BLOB_BYTES+20L)
             throw new IOException("invalid checkpoint file size: "+file);
         try(var in=new DataInputStream(new BufferedInputStream(Files.newInputStream(file)))){
-            if(in.readInt()!=DISK_MAGIC||in.readInt()!=SCHEMA||in.readInt()!=type)
+            if(in.readInt()!=DISK_MAGIC||in.readInt()!=loadingSchema||in.readInt()!=type)
                 throw new IOException("unsupported checkpoint schema/type: "+file);
             int count=in.readInt(),checksum=in.readInt();
             if(count<0||count>MAX_BLOB_BYTES||count!=length-20)
@@ -543,11 +588,12 @@ public final class WorldPersistentJournal implements WorldJournal {
                 in.readInt(),in.readInt(),in.readInt(),readString(in));
     }
     private static void writeState(DataOutputStream out,WorldReceiptJournal.State s)throws IOException {
-        writeKey(out,s.key());writeString(out,s.incarnation());out.writeByte(s.damage());out.writeByte(s.remainder());
+        writeKey(out,s.key());writeString(out,s.incarnation());out.writeShort(s.damage());out.writeByte(s.remainder());
         out.writeLong(s.materialGeneration());out.writeLong(s.tick());
     }
-    private static WorldReceiptJournal.State readState(DataInputStream in)throws IOException {
-        return new WorldReceiptJournal.State(readKey(in),readString(in),in.readUnsignedByte(),
+    private WorldReceiptJournal.State readState(DataInputStream in)throws IOException {
+        return new WorldReceiptJournal.State(readKey(in),readString(in),
+                loadingSchema==1?in.readUnsignedByte():in.readUnsignedShort(),
                 in.readUnsignedByte(),in.readLong(),in.readLong());
     }
     private static void writeReceipt(DataOutputStream out,WorldReceiptJournal.Receipt r)throws IOException {

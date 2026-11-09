@@ -16,10 +16,18 @@ final class MaterialCsvIntegrationTest {
                     new InputStreamReader(item,StandardCharsets.UTF_8),s->true,s->true,1,"jar");
             assertEquals(1844,data.blocks().size());assertEquals(2159,data.items().size());
             assertEquals(59,data.blocks().get("minecraft:stone").h());
-            // Intentional 0.4.0 collision-balance anchor: built-in slime T64, not the source sheet's T19.
-            assertEquals(64,data.blocks().get("minecraft:slime_block").t());
+            // Match the authoritative T1024 source sheet, not the old 0.4.0 balancing override.
+            assertEquals(19,data.blocks().get("minecraft:slime_block").t());
             assertEquals(100,data.blocks().get("minecraft:slime_block").e());
         }
+    }
+    @Test void t1024FourDigitExternalValuesAreAcceptedWithoutClamping() throws Exception {
+        String src="id,H,T,D,E,unbreakable\n"+
+                "minecraft:stone,,1024,,,\n"+
+                "minecraft:oak_planks,,1025,,,\n";
+        var parsed=MaterialCsvCatalog.parseUser(new StringReader(src),null,s->true,s->true);
+        assertEquals(1,parsed.blocks().size());assertEquals(1,parsed.invalidRows());
+        assertEquals(1024,parsed.blocks().get("minecraft:stone").t());
     }
     @Test void userPartialZeroAndDuplicateQuarantine() throws Exception {
         String head="id,H,T,D,E,unbreakable\n";

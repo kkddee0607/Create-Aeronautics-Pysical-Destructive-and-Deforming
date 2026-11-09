@@ -11,8 +11,8 @@ class BlockDamageStateFixedTest {
     }
     @Test void damageSaturatesAtMaxFixed() {
         BlockDamageState s=new BlockDamageState();s.addFixedDamage(Long.MAX_VALUE);
-        assertEquals(255,s.damage());assertEquals(255,s.remainder());
-        s.addFixedDamage(999);assertEquals(65535,s.fixedDamage());
+        assertEquals(1024,s.damage());assertEquals(0,s.remainder());
+        s.addFixedDamage(999);assertEquals(1024L*256,s.fixedDamage());
     }
     @Test void noPristineSerializationWhenRemainderIsPresent() {
         BlockDamageState s=new BlockDamageState();assertTrue(s.isPristine());

@@ -11,10 +11,10 @@ import java.util.List;
 import java.util.Set;
 import java.util.zip.CRC32;
 
-/** Schema v1, deterministic order, CRC32 and fail-closed validation. Pure Java, no Minecraft storage I/O. */
+/** Schema v2 U16 damage, backwards v1 reader; deterministic CRC32. Pure Java. */
 public final class SparseStateCodec {
     private static final int MAGIC=0x50444434; // PDD4
-    public static final int SCHEMA_VERSION=1;
+    public static final int SCHEMA_VERSION=2;
     public static final int MAX_RECORDS=65536;
     public static final int MAX_BYTES=16*1024*1024;
     private SparseStateCodec() {}
@@ -34,7 +34,7 @@ public final class SparseStateCodec {
                 out.writeUTF(k.dimension());out.writeUTF(k.ownerSpace());out.writeUTF(k.ownerId());
                 out.writeLong(k.ownerGeneration());
                 out.writeInt(k.x());out.writeInt(k.y());out.writeInt(k.z());out.writeUTF(k.fingerprint());
-                out.writeByte(state.damageU8());out.writeByte(state.deformationU8());
+                out.writeShort(state.damageU16());out.writeByte(state.deformationU8());
                 out.writeByte(state.crackVisualU8());out.writeByte(state.remainderU8());
                 out.writeLong(state.materialGeneration());out.writeLong(state.lastUpdateTick());
                 if(payload.size()>MAX_BYTES-4)throw new IllegalArgumentException("sparse payload too large");
@@ -55,7 +55,8 @@ public final class SparseStateCodec {
         if(stored!=(int)crc.getValue())throw new IllegalArgumentException("sparse checksum mismatch");
         try(DataInputStream in=new DataInputStream(new ByteArrayInputStream(encoded,0,size-4))) {
             if(in.readInt()!=MAGIC)throw new IllegalArgumentException("unknown sparse magic");
-            if(in.readInt()!=SCHEMA_VERSION)throw new IllegalArgumentException("unsupported sparse schema");
+            int schema=in.readInt();
+            if(schema!=1&&schema!=SCHEMA_VERSION)throw new IllegalArgumentException("unsupported sparse schema");
             int count=in.readInt();
             if(count<0||count>MAX_RECORDS)throw new IllegalArgumentException("invalid record count");
             List<SparseDamageState> result=new ArrayList<>(count);
@@ -63,7 +64,8 @@ public final class SparseStateCodec {
             for(int i=0;i<count;i++) {
                 SparseStateKey key=new SparseStateKey(in.readUTF(),in.readUTF(),in.readUTF(),in.readLong(),
                         in.readInt(),in.readInt(),in.readInt(),in.readUTF());
-                int damage=in.readUnsignedByte(),deformation=in.readUnsignedByte(),
+                int damage=schema==1?in.readUnsignedByte():in.readUnsignedShort();
+                int deformation=in.readUnsignedByte(),
                         crack=in.readUnsignedByte(),remainder=in.readUnsignedByte();
                 SparseDamageState state=new SparseDamageState(key,damage,deformation,crack,remainder,
                         in.readLong(),in.readLong());

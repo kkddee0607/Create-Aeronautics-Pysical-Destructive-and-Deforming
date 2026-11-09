@@ -94,9 +94,13 @@ public final class RealFixRuntimeBridge {
         Box previousA,previousB;
         long lastSeen=-1;
         long lastProcessed=-1;
+        long lastUncreditedAudit=-1;
         boolean lastPositiveSeparation;
         long lastSeparatedTick=-1;
         double lastPeak=Double.NaN;
+        double lastCreditedPeak=Double.NaN;
+        int quietForceFrames;
+        Target lastCreditedA,lastCreditedB;
         String lastVerfRegion="";
         long lastPlotRogWitnessTick=-1;
         long lastPlotRogEpochTick=-1;
@@ -183,7 +187,7 @@ public final class RealFixRuntimeBridge {
                 DamageModel.PLASTIC_SHARE,DamageModel.STRESS_SHARE,
                 com.physicaldestroydeform.BlockDamageState.FIXED_SCALE,
                 ForcePropagation.MAX_NODES_PER_SIDE,ForcePropagation.MIN_PROPAGATED_F);
-        log.info("[PDD-FACE-POLICY] revision=spreadFix-SURFACE-HALO nativeWitnesses=1+ " +
+        log.info("[PDD-FACE-POLICY] revision=0.5.0Fix-NOISY-AXIS-COPLANAR nativeWitnesses=1+ " +
                 "maxFaceArea=16384 ownerLocalShapeProof=REQUIRED sourceBudget=ONE_COLLISION " +
                 "sparseHaloRadius=1.01 syntheticNativeContact=NONE");
         log.info("[PDD-F-SPREAD-POLICY] revision=spreadFix-DIRECTION-70-30 " +
@@ -342,6 +346,14 @@ public final class RealFixRuntimeBridge {
                 // and the Plot's actual world AABB prove new geometric closure.
                 // Large force alone is not proof, and stationary contacts stay cheap.
                 Tracked priorTracking=tracked.get(pair);
+                Tracked earlyTrack=tracked.get(pair);
+                double currentPeak=group.forcePeak();
+                boolean risingAfterQuiet=earlyTrack!=null && earlyTrack.quietForceFrames>=2
+                        && Double.isFinite(earlyTrack.lastPeak) && earlyTrack.lastPeak>0
+                        && Double.isFinite(earlyTrack.lastCreditedPeak)
+                        && currentPeak>=credit.settings().forceEnter()
+                        && currentPeak>=earlyTrack.lastPeak*credit.settings().risingRatio()
+                        && currentPeak>=earlyTrack.lastCreditedPeak*0.5;
                 boolean recoverFirstApproach=beforeAudit.phase()==Phase.ACTIVE
                         && beforeAudit.episode()==0 && !beforeAudit.pendingApproach()
                         && priorTracking!=null && priorTracking.previousA!=null
@@ -352,8 +364,19 @@ public final class RealFixRuntimeBridge {
                             box(server,pair.b().stableKey(),priorTracking.b,stamp.dimension,worldBounds,knownWorldBlocks));
                 // An exhausted ACTIVE episode cannot mint Q. Audit only a
                 // positive first-approach recovery or an authorized new episode.
+                // An initially unproved first collision must not remain
+                // permanently invisible. Retry a bounded R2 audit at most
+                // once per ten server ticks; a fresh pre-solver velocity proof
+                // is still mandatory before a Credit can be issued.
+                boolean firstUncreditedRetry=beforeAudit.phase()==Phase.ACTIVE
+                        && beforeAudit.episode()==0 && priorTracking!=null
+                        && currentPeak>=credit.settings().forceEnter()
+                        && (priorTracking.lastUncreditedAudit<0
+                            || now-priorTracking.lastUncreditedAudit>=10);
                 boolean auditEligible=beforeAudit.phase()!=Phase.ACTIVE
-                        || beforeAudit.hasUnspentAuthorization() || recoverFirstApproach;
+                        || beforeAudit.hasUnspentAuthorization() || recoverFirstApproach
+                        || risingAfterQuiet || firstUncreditedRetry;
+                if(firstUncreditedRetry)priorTracking.lastUncreditedAudit=now;
                 long r2Start=auditEligible?System.nanoTime():0;
                 var massSafe=auditEligible?massEpochs.validate(stamp.dimension,stamp.tick,records):null;
                 var regions=auditEligible?SableContactRegions.audit(server,stamp.dimension,pair,massSafe.contacts())
@@ -417,13 +440,32 @@ public final class RealFixRuntimeBridge {
                 // For an ACTIVE, never-credited pair, only the stable cached
                 // target/Plot approach may reauthorize the first impact. A
                 // changed world-block target could fake an AABB gap reduction.
+                // All pre-solver substeps must independently show motion INTO the
+                // already R2-shape-verified contact, not just a large Sable F.
+                long normalStart=System.nanoTime();
+                var preAuthNormal=(auditEligible && massSafe!=null && massSafe.maskedFrames()==0)
+                        ?NativeEffectDirection.verify(pair,massSafe.contacts(),pre)
+                        :NativeEffectDirection.unknown("NO_AUTHORIZED_NATIVE_AUDIT");
+                long normalNanos=System.nanoTime()-normalStart;
+                boolean nativeApproach=auditEligible && (a!=null || b!=null)
+                        && NativeApproachEvidence.approaching(pair,pre,preAuthNormal,stamp.tick);
+                boolean regionMoved=risingAfterQuiet &&
+                        (changedRegion(t.lastCreditedA,a) || changedRegion(t.lastCreditedB,b));
+                boolean regionalReimpact=beforeAudit.episode()>0 && risingAfterQuiet
+                        && nativeApproach && regionMoved;
                 boolean approach=(beforeAudit.phase()==Phase.ACTIVE && beforeAudit.episode()==0
                         && !beforeAudit.pendingApproach())
-                        ?recoverFirstApproach
-                        :(aabbClosing || previousSeparated || armedFromGap);
+                        ?recoverFirstApproach || nativeApproach
+                        :(aabbClosing || previousSeparated || armedFromGap || nativeApproach);
                 long separationEvidenceTick=t.lastSeparatedTick;
                 double rise=Double.isFinite(t.lastPeak)?group.forcePeak()-t.lastPeak:Double.NaN;
-                t.lastPeak=group.forcePeak();
+                t.lastPeak=currentPeak;
+                // A sustained resting force cannot reissue Q. Two actual low-F
+                // native frames and a later independent fast approach are needed.
+                if(Double.isFinite(t.lastCreditedPeak) && currentPeak>0
+                        && currentPeak<t.lastCreditedPeak/3.0)
+                    t.quietForceFrames=Math.min(8,t.quietForceFrames+1);
+                else if(!regionalReimpact)t.quietForceFrames=0;
                 t.lastPositiveSeparation=false;
                 Box priorBoxA=t.previousA, priorBoxB=t.previousB;
                 Box sweptA=RealFixBoundsEvidence.swept(t.previousA,boxA);
@@ -516,7 +558,7 @@ public final class RealFixRuntimeBridge {
                     // AABB overlap is UNKNOWN, never 'contact proved'. New Q
                     // requires independently observed prior clearance and a source-
                     // mapped, verified owner-local block. Force is a GAME proxy.
-                    var frame=new Frame(pair,now,group.samples(),false,approach,a,b,group.forcePeak());
+                    var frame=new Frame(pair,now,group.samples(),false,approach,a,b,group.forcePeak(),regionalReimpact);
                     var result=credit.step(frame);
                     // A large force is diagnostic evidence, not permission to
                     // bypass the episode gate. Sample the actual rejection
@@ -527,12 +569,20 @@ public final class RealFixRuntimeBridge {
                         log.info("[PDD-HIGH-F] pair={}/{} nativeTick={} rawF={} cappedF={} " +
                                         "gameMaxF={} phaseBefore={} verifiedApproach={} recoveryAttempt={} " +
                                         "hasTarget={} regionStatus={} approval={} issuedQ={} " +
+                                        "nativeApproach={} regionalReimpact={} quietForceFrames={} " +
                                         "source=POST_EFFECT_GAME_POLICY mutation=OFF",
                                 pair.a().stableKey(),pair.b().stableKey(),stamp.tick,
                                 group.forcePeak(),result.peakForce(),GameImpactCredit.MAX_GAME_F,
                                 gapBefore.phase(),approach,recoverFirstApproach,
-                                a!=null||b!=null,regions.status(),result.reason(),result.issuedQ());
+                                a!=null||b!=null,regions.status(),result.reason(),result.issuedQ(),
+                                nativeApproach,regionalReimpact,t.quietForceFrames);
                         t.lastHighFLogTick=now;
+                        if(!result.credited())log.info("[PDD-IMPACT-DECISION] pair={}/{} tick={} " +
+                                        "source=SABLE_POST_EFFECT rawF={} issuedQ=0 gate={} " +
+                                        "nativeApproach={} regionMoved={} creditStatus=REJECTED " +
+                                        "phase={} regionStatus={} mutation=OFF",
+                                pair.a().stableKey(),pair.b().stableKey(),stamp.tick,currentPeak,
+                                result.reason(),nativeApproach,regionMoved,result.phase(),regions.status());
                     }
                     if(result.credited() && group.forcePeak()>GameImpactCredit.MAX_GAME_F
                             && lines++<MAX_LOG_PER_TICK)
@@ -575,12 +625,8 @@ public final class RealFixRuntimeBridge {
                     // Sable 2.0.6 exports opposing local manifold normals per
                     // native record. Validate each pair, then average all
                     // witnesses in the SAME owner-local effect frame.
-                    long normalStart=System.nanoTime();
-                    var nativeNormal=(!result.credited() || massSafe==null
-                            || massSafe.maskedFrames()>0)
-                            ?NativeEffectDirection.unknown("NATIVE_FRAME_OR_EFFECT_UNVERIFIED")
-                            :NativeEffectDirection.verify(pair,massSafe.contacts(),pre);
-                    long normalNanos=System.nanoTime()-normalStart;
+                    var nativeNormal=result.credited()?preAuthNormal
+                            :NativeEffectDirection.unknown("NOT_CREDITED");
                     // Trace only accepted credits. The ledger buffers edge receipts
                     // transiently, emits after validation and never persists them.
                     final int[] traceCounts={0,0,0,0,0}; // edges, receipts, emitted, nodes, cutoffs
@@ -640,6 +686,17 @@ public final class RealFixRuntimeBridge {
                     long propagationNanos=System.nanoTime()-propagationStart;
                     boolean granted=grant!=null && grant.credited();
                     if(granted) {
+                        t.lastCreditedPeak=currentPeak;
+                        t.quietForceFrames=0;
+                        t.lastCreditedA=a;t.lastCreditedB=b;
+                        log.info("[PDD-IMPACT-DECISION] pair={}/{} tick={} credit={} " +
+                                        "source={} rawF={} issuedQ={} gate={} nativeApproach={} " +
+                                        "regionalReimpact={} movedSurface={} verifiedCells={} " +
+                                        "spreadStatus={} reason={} mutation=WORLD_STATIC_ONLY",
+                                pair.a().stableKey(),pair.b().stableKey(),stamp.tick,grant.id(),
+                                "SABLE_POST_EFFECT",currentPeak,result.issuedQ(),result.reason(),
+                                nativeApproach,regionalReimpact,regionMoved,regions.regions().size(),
+                                grant.status(),"APPROVED");
                         log.info("[PDD-F-PERF] credit={} planNanos={} ownerCount=2 " +
                                         "maxNodesPerSide={} eventF={} eventQCap={} rawPeak={} fSaturated={} " +
                                         "normalMode={} traceEnabled={} includesTraceOutput={} mutation=OFF",
@@ -833,7 +890,7 @@ public final class RealFixRuntimeBridge {
                                             targetPlan.key(),m.hardness(),m.threshold(),m.ductilityPercent(),
                                             m.elasticityPercent(),m.unbreakable(),planned.incomingQ(),
                                             planned.absorbedQ(),planned.directQ(),planned.plasticQ(),planned.stressQ(),
-                                            planned.rawDamage(),planned.fixedIncrement(),planned.plannedDamageU8(),
+                                            planned.rawDamage(),planned.fixedIncrement(),planned.plannedDamageUnits(),
                                             planned.plannedRemainderU8(),planned.thresholdReached(),
                                             planned.plannedPlasticIncrement(),
                                             targetPlan.direction().map(Object::toString).orElse("UNKNOWN"));
@@ -1021,6 +1078,18 @@ public final class RealFixRuntimeBridge {
     }
     private static Target target(String owner,OwnerResolver.TargetKey k) {
         return new Target(owner,k.x()+","+k.y()+","+k.z(),k.fingerprint());
+    }
+    /** A physically distinct impact location, not the jitter of a corner witness.
+     * No cross-owner coordinate comparison; each local lattice is independent. */
+    private static boolean changedRegion(Target before,Target now) {
+        if(before==null||now==null||!before.ownerKey().equals(now.ownerKey()))return false;
+        String[] a=before.localBlock().split(","),b=now.localBlock().split(",");
+        if(a.length!=3||b.length!=3)return false;
+        try {
+            long dist=0;
+            for(int i=0;i<3;i++)dist+=Math.abs((long)Integer.parseInt(a[i])-Integer.parseInt(b[i]));
+            return dist>=2;
+        }catch(NumberFormatException invalid){return false;}
     }
     private static String stable(CollisionFrame.BlockTarget t) {
         if(t==null||!t.valid())return null;

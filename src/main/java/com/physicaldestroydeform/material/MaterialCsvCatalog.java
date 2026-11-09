@@ -14,7 +14,7 @@ public final class MaterialCsvCatalog {
     public static final String SCHEMA="PDD-MATERIAL-0.4.1/CSV-v1";
     public record Block(int h,int t,int d,int e,boolean unbreakable,boolean eligible,
                         String basis,String confidence,String source) {
-        public Block {require(h,0,255);require(t,1,255);require(d,0,100);require(e,0,100);}
+        public Block {require(h,0,255);require(t,1,1024);require(d,0,100);require(e,0,100);}
         public MaterialProperties toProperties(MaterialProperties inferred) {
             // An external data error cannot override Minecraft's intrinsic unbreakability.
             return new MaterialProperties(h,t,d,e,unbreakable||inferred.unbreakable());
@@ -32,7 +32,7 @@ public final class MaterialCsvCatalog {
     public record PartialBlock(Integer h,Integer t,Integer d,Integer e,Boolean unbreakable,
                                String source) {
         public PartialBlock {
-            check(h,0,255);check(t,1,255);check(d,0,100);check(e,0,100);
+            check(h,0,255);check(t,1,1024);check(d,0,100);check(e,0,100);
         }
         public static PartialBlock from(Block b) {
             return new PartialBlock(b.h,b.t,b.d,b.e,b.unbreakable,b.source);
@@ -78,7 +78,7 @@ public final class MaterialCsvCatalog {
                 loadedBlocks.remove(id);bannedBlocks.add(id);duplicates[0]++;continue;
             }
             // Reject an invalid row rather than permitting accidental weak or strong defaults.
-            loadedBlocks.put(id,new Block(integer(row,"H",0,255),integer(row,"T",1,255),
+            loadedBlocks.put(id,new Block(integer(row,"H",0,255),integer(row,"T",1,1024),
                     integer(row,"D",0,100),integer(row,"E",0,100),
                     bool(row,"unbreakable"),"COLLISION_CANDIDATE".equals(row.get("eligibility")),
                     row.getOrDefault("profile_basis",""),row.getOrDefault("confidence",""),
@@ -117,7 +117,7 @@ public final class MaterialCsvCatalog {
     }
     private static int integer(Map<String,String> row,String key,int min,int max){
         String str=required(row,key);
-        if(!str.matches("[0-9]{1,3}"))throw new IllegalArgumentException("invalid "+key+"="+str);
+        if(!str.matches("[0-9]{1,4}"))throw new IllegalArgumentException("invalid "+key+"="+str);
         int number=Integer.parseInt(str);require(number,min,max);return number;
     }
     private static boolean bool(Map<String,String> row,String key) {
@@ -211,7 +211,7 @@ public final class MaterialCsvCatalog {
             if(!blockRegistered.test(id)){unregistered++;continue;}
             if(bannedB.contains(id))continue;
             if(outB.containsKey(id)) {outB.remove(id);bannedB.add(id);duplicate++;continue;}
-            try {outB.put(id,new PartialBlock(optional(r,"H",0,255),optional(r,"T",1,255),
+            try {outB.put(id,new PartialBlock(optional(r,"H",0,255),optional(r,"T",1,1024),
                     optional(r,"D",0,100),optional(r,"E",0,100),optionalBool(r,"unbreakable"),"external-csv"));}
             catch(RuntimeException bad){invalid++;}
         }
@@ -240,7 +240,7 @@ public final class MaterialCsvCatalog {
     private static Integer optional(Map<String,String> row,String name,int min,int max) {
         String value=row.get(name);
         if(value==null||value.isBlank())return null;
-        if(!value.matches("[0-9]{1,3}"))throw new IllegalArgumentException("invalid integer "+name);
+        if(!value.matches("[0-9]{1,4}"))throw new IllegalArgumentException("invalid integer "+name);
         int v=Integer.parseInt(value);require(v,min,max);return v;
     }
     private static Boolean optionalBool(Map<String,String> row,String name) {

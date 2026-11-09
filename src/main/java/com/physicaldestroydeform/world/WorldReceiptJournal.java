@@ -24,7 +24,7 @@ public final class WorldReceiptJournal implements WorldJournal {
                         long materialGeneration,long tick) {
         public State {
             if(key==null||!"WORLD".equals(key.ownerSpace())||incarnation==null
-                ||incarnation.isBlank()||incarnation.length()>512||damage<0||damage>255
+                ||incarnation.isBlank()||incarnation.length()>512||damage<0||damage>1024
                 ||remainder<0||remainder>255||materialGeneration<0||tick<0)
                 throw new IllegalArgumentException("invalid World damage state");
         }
@@ -188,7 +188,8 @@ public final class WorldReceiptJournal implements WorldJournal {
         receipts.putAll(decodedReceipts);sizeBytes=length;
     }
     private static void writeState(DataOutputStream out,State s)throws IOException {
-        writeKey(out,s.key());writeString(out,s.incarnation());out.writeByte(s.damage());
+        writeKey(out,s.key());writeString(out,s.incarnation());if(s.damage()>255)throw new IOException("legacy schema-2 WAL cannot write extended damage");
+        out.writeByte(s.damage());
         out.writeByte(s.remainder());out.writeLong(s.materialGeneration());out.writeLong(s.tick());
     }
     private static State readState(DataInputStream in)throws IOException {

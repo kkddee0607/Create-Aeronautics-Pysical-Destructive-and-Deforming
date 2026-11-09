@@ -58,7 +58,7 @@ public final class MaterialCsvCatalogSelfTest {
                 check(csv.blocks().size()>=1800,"provided blocks count");
                 check(csv.items().size()>=2100,"provided items count");
                 check(csv.blocks().get("minecraft:stone").h()==59,"real stone H59");
-                check(csv.blocks().get("minecraft:stone").t()==91,"real stone T91");
+                check(csv.blocks().get("minecraft:stone").t()==232,"real stone T232");
                 check(csv.items().get("minecraft:stone").d()==10,"real stone item D10");
                 System.out.println("REAL_CSV blocks="+csv.blocks().size()+" items="+csv.items().size()+
                         " duplicateIds="+csv.rejectedDuplicates()+" unregistered="+csv.skippedUnregistered());
