@@ -175,15 +175,16 @@ public final class SableContactRegions {
                     return new GameImpactCredit.Target(owner,
                             key.x()+","+key.y()+","+key.z(),key.fingerprint());
                 });
-                if(side==0)shapeChecksA=additional[0];else shapeChecksB=additional[0];
+                if(side==0){shapeChecksA=additional[0];attemptedA=patch.attempted();}
+                else {shapeChecksB=additional[0];attemptedB=patch.attempted();}
                 int size=originals.size()+patch.added().size();
                 if(!exceeded[0] && size<=ContactCreditLedger.MAX_TARGETS_PER_SIDE
                         && joined.size()+patch.added().size()<=ContactCreditLedger.MAX_REGIONS) {
                     for(var target:patch.added())joined.add(side==0
                             ?new ContactCreditLedger.Region(target,null)
                             :new ContactCreditLedger.Region(null,target));
-                    if(side==0){expandedA=patch.added().size();attemptedA=patch.attempted();}
-                    else {expandedB=patch.added().size();attemptedB=patch.attempted();}
+                    if(side==0)expandedA=patch.added().size();
+                    else expandedB=patch.added().size();
                 }
                 descriptions.append(side==0?"A=":" B=")
                         .append(exceeded[0]?"SHAPE_BUDGET":size>ContactCreditLedger.MAX_TARGETS_PER_SIDE

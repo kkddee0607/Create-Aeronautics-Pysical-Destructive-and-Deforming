@@ -50,9 +50,9 @@ final class SuperFixNativeImpactTest {
                 new GameImpactCredit.Target(pair.a().stableKey(),"1,0,0","stone"),
                 new GameImpactCredit.Target(pair.b().stableKey(),"1,2,0","stone")));
         assertTrue(hit.credited());
-        // scaleFix2 k=0.161 and forceFloor=2: (39733.21875 - 2) * 0.161.
+        // moreFix k=0.1 and forceFloor=2: (39733.21875 - 2) * 0.1.
         // Keep a concrete Q assertion; the former 39.73121875 assumed k=0.001.
-        assertEquals(6396.72621875,hit.issuedQ(),1e-9);
+        assertEquals((39733.21875-2)*0.1,hit.issuedQ(),1e-9);
         assertEquals(GameImpactCredit.Reason.DUPLICATE_EPISODE,
                 policy.step(new GameImpactCredit.Frame(pair,904,
                         List.of(new GameImpactCredit.ObservedForce(2,5,52000,0)),false,false,

@@ -31,6 +31,12 @@ final class NativeApproachEvidenceTest {
         assertFalse(NativeApproachEvidence.approaching(PAIR,List.of(frame(7,0)),normal(),7));
         assertFalse(NativeApproachEvidence.approaching(PAIR,List.of(frame(7,-3)),normal(),7));
     }
+    @Test void closingFollowedByStationaryPreSubstepStillProvesApproach() {
+        assertTrue(NativeApproachEvidence.approaching(PAIR,
+                List.of(frame(7,3),frame(7,0)),normal(),7));
+        assertFalse(NativeApproachEvidence.approaching(PAIR,
+                List.of(frame(7,0),frame(7,0)),normal(),7));
+    }
     @Test void wrongTickAndContradictingSubstepsDoNotApprove() {
         assertFalse(NativeApproachEvidence.approaching(PAIR,List.of(frame(6,3)),normal(),7));
         assertFalse(NativeApproachEvidence.approaching(PAIR,List.of(frame(7,3),frame(7,-3)),normal(),7));

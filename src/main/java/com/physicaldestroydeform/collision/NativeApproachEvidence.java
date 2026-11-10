@@ -18,6 +18,7 @@ public final class NativeApproachEvidence {
         Objects.requireNonNull(pair);
         if(snapshots==null||normals==null||normals.owners().size()!=2)return false;
         int observed=0;
+        boolean closingObserved=false;
         for(var frame:snapshots) {
             if(frame==null||frame.phase()!=CollisionFrame.Phase.PRE_SOLVER
                     ||frame.serverTick()!=tick||!pair.dimension().equals(frame.dimension()))continue;
@@ -33,11 +34,14 @@ public final class NativeApproachEvidence {
                 Vec vb=b==null?new Vec(0,0,0):b.linearRaw();
                 if(va==null||vb==null||!va.finite()||!vb.finite())return false;
                 double closing=-(va.minus(vb)).dot(worldNormal);
-                if(!Double.isFinite(closing)||closing<MIN_CLOSING_SPEED)return false;
+                if(!Double.isFinite(closing) || closing<=-MIN_CLOSING_SPEED)return false;
+                // Solver substeps may stop after impact: a subsequent stationary
+                // pre-frame is not evidence that the earlier closing motion was false.
+                if(closing>=MIN_CLOSING_SPEED)closingObserved=true;
                 observed++;
             }catch(RuntimeException invalid){return false;}
         }
-        return observed>0;
+        return observed>0 && closingObserved;
     }
     // Distinguish the legitimate static World body (null) from invalid ownership.
     private static final CollisionFrame.Body INVALID=new CollisionFrame.Body(

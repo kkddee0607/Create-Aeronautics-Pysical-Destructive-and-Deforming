@@ -15,7 +15,7 @@ import java.util.Objects;
  * No Minecraft/Sable mutable object crosses this boundary.</p>
  */
 public final class GameImpactCredit {
-    public static final String POLICY_REVISION = "PDD-IDS-1.0.7/0.5.0Fix-INDEPENDENT-REGION-REIMPACT";
+    public static final String POLICY_REVISION = "PDD-IDS-1.0.7/0.5.0moreFix-VERIFIED-REGION-REIMPACT";
     // User's 100^3 blocks * 4 mass-units/block * 10 m/s. This is a
     // GAME F index (mass * speed); without stopping time it is NOT Newtons.
     public static final double MAX_GAME_F = 100d * 100d * 100d * 4d * 10d;
@@ -38,17 +38,20 @@ public final class GameImpactCredit {
                 !Double.isFinite(risingRatio) || risingRatio < 1 || quietFrames < 2)
                 throw new IllegalArgumentException("invalid provisional credit settings");
         }
-        /** Experimental unsaturated collision scale (not a measured Sable calibration).
-         * F=400 -> Q=64.078 for the hypothetical mass-1, 10m/s test;
-         * F=40,000 -> Q=6,439.678, distinct from small impacts.
-         * The upper bound limits the total event budget, not per-block damage. */
-        public static Settings provisional() { return new Settings(2, 2, 0.161, 0.161*(MAX_GAME_F-2), 2, 4096, 600); }
+        /** A finite source F above the gameplay cap saturates; it does not reject.
+         * This game-scale factor is provisional, not a calibrated SI force. */
+        public static Settings provisional() { return new Settings(2, 2, 0.1, 0.1*(MAX_GAME_F-2), 2, 4096, 600); }
         /** Per-version developer defaults, operator-overridable after gameplay testing. */
         public static Settings fromSystemProperties() {
             Settings d=provisional();
+            double floor=numeric("forceFloor",d.forceFloor());
+            double gain=boundedGain("forceGain",d.forceGain());
+            // When the operator changes k, the default Q envelope follows it.
+            // An explicitly configured maxGroupQ remains an independent, smaller safety budget.
+            double derivedCap=gain*Math.max(0,MAX_GAME_F-floor);
             return new Settings(
-                numeric("forceEnter",d.forceEnter()),numeric("forceFloor",d.forceFloor()),
-                boundedGain("forceGain",d.forceGain()),numeric("maxGroupQ",d.maxGroupQ()),
+                numeric("forceEnter",d.forceEnter()),floor,
+                gain,numeric("maxGroupQ",derivedCap),
                 Math.max(2,whole("separatedFrames",d.separatedFrames())),
                 whole("maxEntries",d.maxEntries()),
                 positiveTicks("maxIdleTicks",d.maxIdleTicks()),
@@ -290,8 +293,8 @@ public final class GameImpactCredit {
                 && frame.tick()-s.authorizationTick>=config.quietFrames()) {
             // A separate, independently velocity-proved regional impact can occur
             // without complete separation of a very large Plot from the World.
-            // The caller must prove both a quiet/rising force episode AND a
-            // different shape-audited contact region. No raw-force-only bypass.
+            // The caller must prove independently new pre-solver inward motion
+            // and a different shape-audited contact region. No raw-force-only bypass.
             s.pendingApproach=true;s.authorizationTick=frame.tick();s.burstFrames=0;
             s.episodeGeneration++;
         } else if (s.phase == Phase.ACTIVE && s.episode==0 && frame.verifiedApproach()
@@ -315,6 +318,24 @@ public final class GameImpactCredit {
         s.pendingApproach=false; // one-credit, including the burst's following frames
         s.episode++;
         return decision(s,Reason.APPROVED,frame,q);
+    }
+
+    /** A proposed Credit is provisional until the region/F-plan ledger seals it.
+     * Only the exact, still-current accepted episode may be retired. Its
+     * generation is never reused, and a new source-proved impact is required
+     * before any further Q; a failed material/geometry plan cannot turn a
+     * sustained force into an infinite retry loop. */
+    public boolean abortUnissued(Pair pair, Decision attempted) {
+        if (pair == null || attempted == null || !attempted.credited()) return false;
+        State s = states.get(pair);
+        if (s == null || s.tick != attempted.tick()
+                || s.episode != attempted.episode()
+                || s.episodeGeneration != attempted.episodeGeneration()
+                || s.phase != Phase.ACTIVE) return false;
+        s.episode--;
+        s.pendingApproach = false;
+        s.burstFrames = 2;
+        return true;
     }
 
     public void prune(long tick) {

@@ -87,7 +87,7 @@ class DuperFixPropagationTest {
     }
     @Test void mixedSlimeAttenuatesOnlyActualUpstreamPaths() {
         var trace=new ArrayList<ForcePropagation.Trace>();
-        var r=ForcePropagation.plan(OWNER,List.of(at(0,0,0)),100,
+        var r=ForcePropagation.plan(OWNER,List.of(at(0,0,0)),200,
                 (from,x,y,z)->x>0&&x<3&&y==0&&z==0?
                         ForcePropagation.Probe.present(at(x,y,z,x==1?"slime":"stone")):
                         ForcePropagation.Probe.empty(),
@@ -97,8 +97,9 @@ class DuperFixPropagationTest {
         balanced(r);
         assertTrue(r.dampedF()>0);
         assertTrue(r.dampedQ()>0);
-        assertEquals(100,r.assignedF()+r.dampedF()+r.audit().thresholdDiscardF(),1e-8);
-        assertEquals(7.728*.15,r.shares().getFirst().finalQ(),1e-7);
+        assertEquals(200,r.assignedF()+r.dampedF()+r.audit().thresholdDiscardF(),1e-8);
+        assertEquals(GameImpactCredit.Settings.provisional().candidate(100)*.15,
+                r.shares().getFirst().finalQ(),1e-7);
     }
     @Test void unknownBoundaryIsNeverInventedTerminal() {
         var r=ForcePropagation.plan(OWNER,List.of(at(0,0,0)),100,

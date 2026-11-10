@@ -1,4 +1,32 @@
-# PDD 0.5.0-Fix — Physical Destruction and Deforming
+# PDD 0.5.0-moreFix — Physical Destruction and Deforming
+
+**Minecraft Java 1.21.1 / NeoForge 21.1.x · Create 6.0.10 · Create Aeronautics 1.3.2 · Sable 2.0.6**
+
+This release preserves server-authoritative **static World** destruction, Sable's original collision callbacks, material T1024/U16 persistence, source-once F and Q accounting, World owner/CAS checks, and schema-2 durability. Plot destruction and deformation remain preview-only. Source ZIP is intended for GitHub Apply, **not** the game `mods/` folder.
+
+## 0.5.0-moreFix — changes since 0.5.0-Fix
+
+| Component | Change |
+| --- | --- |
+| Default F→Q coefficient | `k = 0.1` (revised from `0.25` in initial moreFix), retaining `forceFloor = 2` |
+| High-force saturation | `maxGameF = 40,000,000` unchanged; **finite** larger inputs are capped, not rejected solely for magnitude |
+| Q envelope | Default `maxGroupQ = 3,999,999.8`; developer `forceGain` override also recomputes the default Q cap; a *separately explicit* `maxGroupQ` remains binding |
+| Genuine independent reimpact | ACTIVE Plot–World pairs can re-audit under independently corroborated **pre-solver inward velocity** even if the earlier collision did not first register a quiet-force period; exactly one new Q can be issued only when a **new owner-local shape-verified target** is found, respecting a two-server-tick cooldown |
+| Contact-face audit | Replaces enclosing-rectangle area rejection with a bounded **column-band/scanline** sweep of shape-proven cells. Thin diagonal contact faces with large rectangular envelopes are no longer discarded purely due to the envelope area. Oversized *actual* audits remain capped and identified as `PATCH_BUDGET`/`SHAPE_BUDGET`/`TARGET_BUDGET`; no guessed contact or unbounded scan |
+| Approval ledger | An approval that fails to seal a Credit and has no ledger receipt is retired without phantom Q; diagnostics emit `[PDD-Q-ISSUE]` |
+| Pre-impact velocity witness | A later neutral substep no longer vetoes an earlier proven inward motion; genuinely receding or stationary-only substeps do not independently authorize reimpact |
+
+**Safety:** One source collision = one capped F/Q envelope; reimpacts need a *new* source-proven contact region and inward motion. The native force is an **uncalibrated game proxy**, not physical newtons. No unsupported mass-versus-force multiplier rejection is introduced; input nonfiniteness, malformed ownership, missing genuine contact, wrong coordinate owner and repeated pressing remain vetoes. A quantitatively calibrated mass/velocity impossibility gate requires synchronized native solver quantities and controlled gameplay calibration. Raising the Q cap alone does **not** guarantee destruction of every contact block, as budget is distributed and material thresholds still apply.
+
+**Initial moreFix verification (before k=0.1):** 15 affected pure-Java source classes compiled using Java 21 and two isolated Minecraft-adapter stubs; 24 standalone assertions passed; 51 test methods passed in a temporary **JUnit-compatible stub harness**. These historical counts are not evidence of the revised coefficient passing tests. See the revised coefficient verification note. Exact NeoForge/Gradle build, real JUnit, GitHub Actions, and in-game behavior are **not verified**. See [0.5.0-moreFix verification report](docs/verification/0.5.0-moreFix.md) for evidence, outstanding risks and two in-game sessions.
+
+**Revised k=0.1 independent checks:** Java 21 compiled the changed `GameImpactCredit` production class and relevant pure-Java dependencies using isolated test doubles. **101 JUnit-shaped test methods passed** with a temporary in-process JUnit-compatible stub, plus **24 independent semantic assertions** passed. These are **not official Gradle/JUnit/NeoForge or in-game runs**. The manually constructed k=0.25 policies in legacy compatibility tests intentionally remain unchanged. The exact current default is k=0.1 and Qmax=3,999,999.8. If runtime overrides `pdd.realfix.forceGain` or `pdd.realfix.maxGroupQ` are supplied, the startup `[PDD-POLICY]` log reflects those operator overrides.
+
+**World safety:** Back up the world and `data/pdd-world-0.5.0/` before installation. No persisted schema/version migration was changed. Do not downgrade a schema-2 world without restoring a corresponding backup.
+
+## Previous release: 0.5.0-Fix (historical reference)
+
+The following 0.5.0-Fix test counts, source labels, and tuning values document the **previous release**, not the 0.5.0-moreFix runtime or current certification.
 
 **Create Aeronautics: Physical Destruction and Deforming (PDD)** is a Minecraft Java 1.21.1 / NeoForge add-on. It uses Sable collision evidence to calculate impact propagation, accumulated damage and conditional destruction of eligible **static World blocks**. It does not replace the Sable physics solver. **Physical Plot destruction, deformation and stress mutation are not enabled in this version.**
 

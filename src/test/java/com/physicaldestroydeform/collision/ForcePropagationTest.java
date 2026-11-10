@@ -36,7 +36,8 @@ class ForcePropagationTest {
             assertEquals("VERIFIED_TERMINAL",r.endReason());
             assertEquals(5,r.shares().size());
             double[] f={50,25,12.5,6.25,6.25};
-            double[] q={7.728,3.703,1.6905,.68425,.68425};
+            // k=0.1 per-node F-to-Q conversion after the existing terminal F accounting.
+            double[] q={4.8,2.3,1.05,.425,.425};
             for(int i=0;i<5;i++) {
                 assertEquals(f[i],r.shares().get(i).allocatedF(),1e-9);
                 assertEquals(q[i],r.shares().get(i).finalQ(),1e-9);

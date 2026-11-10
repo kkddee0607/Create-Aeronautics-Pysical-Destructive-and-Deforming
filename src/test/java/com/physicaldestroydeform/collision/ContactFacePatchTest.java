@@ -215,6 +215,21 @@ class ContactFacePatchTest {
         assertFalse(patch.added().stream().anyMatch(t->t.localBlock().equals("4,64,4")));
     }
 
+    @Test void largeDiagonalFaceDoesNotFailBecauseItsEnclosingRectangleIsHuge() {
+        // A 200x200 bounding rectangle contains 40,000 cells, but the
+        // witnessed diagonal contains only 200 actual owner-local cells.
+        var line=new ArrayList<NativeCollisionTelemetry.Contact>();
+        for(int i:new int[]{0,199})
+            line.add(new NativeCollisionTelemetry.Contact(7,-1,3500,
+                    0,-1,0,0,1,0,0,0,0,i+0.5,65,i+0.5,DIM,5));
+        var patch=ContactFacePatch.reconstruct(DIM,OWNER,BlockPos.ZERO,
+                List.of(target(0,0)),line,(pos,point)->
+                    pos.getX()==pos.getZ()?target(pos.getX(),pos.getZ()):null);
+        assertTrue(patch.reason().startsWith("SHAPE_VERIFIED_SURFACES"),patch.reason());
+        assertEquals(199,patch.added().size());
+        assertTrue(patch.attempted()<=1_000,"scanline must avoid 40,000-cell box scan");
+    }
+
     @Test void oversizedUnverifiedRectangleIsBudgetedWithoutFabricatedTargets() {
         var contacts=new ArrayList<NativeCollisionTelemetry.Contact>();
         for(int x:new int[]{0,199})for(int z:new int[]{0,199})

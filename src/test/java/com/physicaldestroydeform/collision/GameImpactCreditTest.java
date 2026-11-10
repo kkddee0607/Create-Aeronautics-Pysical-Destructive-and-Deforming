@@ -44,14 +44,30 @@ final class GameImpactCreditTest {
     }
     @Test void defaultPolicyIsBoundedAndSeparatesMeasuredImpactStrengths() {
         var d=Settings.provisional();
-        assertEquals(0.161,d.forceGain(),1e-12);
-        assertEquals(0.161*(GameImpactCredit.MAX_GAME_F-2),d.maxGroupQ(),1e-6);
+        assertEquals(0.1,d.forceGain(),1e-12);
+        assertEquals(0.1*(GameImpactCredit.MAX_GAME_F-2),d.maxGroupQ(),1e-6);
         assertEquals(0.0,d.candidate(1.8));
-        assertEquals(0.161*(3849.28271484375-2),d.candidate(3849.28271484375),1e-9);
-        assertEquals(0.161*(30181.88671875-2),d.candidate(30181.88671875),1e-9);
-        assertEquals(0.161*(52421.02-2),d.candidate(52421.02),1e-9);
-        assertEquals(0.161*(100000-2),d.candidate(100000),1e-9);
+        assertEquals(0.1*(3849.28271484375-2),d.candidate(3849.28271484375),1e-9);
+        assertEquals(0.1*(30181.88671875-2),d.candidate(30181.88671875),1e-9);
+        assertEquals(0.1*(52421.02-2),d.candidate(52421.02),1e-9);
+        assertEquals(0.1*(100000-2),d.candidate(100000),1e-9);
         assertTrue(d.candidate(3849.28271484375)<d.candidate(30181.88671875));
+    }
+    @Test void finiteExtremeRawForceSaturatesButMalformedNativeDataIsRejected() {
+        var engine=new GameImpactCredit(GameImpactCredit.Settings.provisional());
+        var extreme=new ObservedForce(-1,1,310_625_472,0);
+        var credited=engine.step(new Frame(P,10,List.of(extreme),false,true,TA,TB));
+        assertEquals(Reason.APPROVED,credited.reason());
+        assertEquals(GameImpactCredit.MAX_GAME_F,credited.peakForce(),0);
+        assertEquals(3_999_999.8,credited.issuedQ(),1e-6);
+        assertTrue(GameImpactCredit.parse(new double[14]).isEmpty());
+        var raw=new double[15];
+        raw[0]=-1;raw[1]=1;raw[2]=Double.POSITIVE_INFINITY;
+        assertTrue(GameImpactCredit.parse(raw).isEmpty());
+        raw[2]=Double.NaN;
+        assertTrue(GameImpactCredit.parse(raw).isEmpty());
+        raw[2]=-100;
+        assertTrue(GameImpactCredit.parse(raw).isEmpty());
     }
     @Test void sourceQBelowOneIsNotIssuedAndDoesNotConsumeTheArmedEpisode() {
         var policy=new GameImpactCredit(GameImpactCredit.Settings.provisional());
@@ -117,6 +133,18 @@ final class GameImpactCreditTest {
         assertEquals(2,next.episode());
         assertEquals(Reason.DUPLICATE_EPISODE,
                 engine.step(new Frame(P,23,MANY,false,true,TA,changed,42,false)).reason());
+    }
+    @Test void unsealedPlanDoesNotPermanentlyConsumeTheNextIndependentImpact() {
+        var e=new GameImpactCredit(Settings.provisional());
+        var first=e.step(frame(10,MANY,false,true,TA,TB));
+        assertTrue(first.credited());
+        assertTrue(e.abortUnissued(P,first));
+        assertFalse(e.abortUnissued(P,first));
+        assertEquals(0,e.evidence(P).episode());
+        assertEquals(Reason.DUPLICATE_EPISODE,
+                e.step(frame(11,MANY,false,false,TA,TB)).reason());
+        assertEquals(Reason.APPROVED,
+                e.step(frame(12,MANY,false,true,TA,TB)).reason());
     }
     @Test void noNewCreditDuringTwentySustainedTicks() {
         var e=new GameImpactCredit(new GameImpactCredit.Settings(2,2,0.25,64,2,4096,600));

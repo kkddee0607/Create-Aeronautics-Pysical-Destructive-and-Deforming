@@ -126,8 +126,13 @@ final class ContactFacePatch {
             if(lowU<Integer.MIN_VALUE+2 || lowV<Integer.MIN_VALUE+2 ||
                     highU>Integer.MAX_VALUE-2 || highV>Integer.MAX_VALUE-2) {limited++;continue;}
             int u0=(int)lowU,u1=(int)highU,v0=(int)lowV,v1=(int)highV;
-            long area=((long)u1-u0+1)*((long)v1-v0+1);
-            if(area<1 || area>MAX_AREA || area>MAX_AREA-attempted) {limited++;continue;}
+            // The rectangular envelope is NOT the verified face. A long thin
+            // diagonal may span millions of envelope cells but only hundreds
+            // of actual shape-proven cells. Bound rows and actual tested cells,
+            // not the area of the enclosing rectangle.
+            if(u1<u0 || v1<v0 || (long)u1-u0+1>MAX_AREA || attempted>=MAX_AREA) {
+                limited++;continue;
+            }
 
             // A witnessed face must have an existing independently verified
             // native contact target on its own plane, not just a nearby Plot.
@@ -146,32 +151,76 @@ final class ContactFacePatch {
                 }
             }
             if(!anchored){insufficient++;continue;}
-            faces++;if(localHalo)sparse++;
-            for(int a=u0;a<=u1;a++)for(int b=v0;b<=v1;b++) {
-                double cu=a+0.5,cv=b+0.5;
-                if(localHalo?segmentDistanceSquared(hull.getFirst(),hull.getFirst(),cu,cv)
-                        >tolerance*tolerance:!inside(hull,cu,cv))continue;
-                double along=group.first.axisAligned()?plane
-                        :(plane-normal[u]*cu-normal[v]*cv)/normal[axis];
-                if(!Double.isFinite(along) || along<=Integer.MIN_VALUE+2 || along>=Integer.MAX_VALUE-2)
-                    continue;
-                int[] c=new int[3];c[u]=a;c[v]=b;
-                c[axis]=(int)Math.floor(along-Math.signum(normal[axis])*GRID_EPS);
-                String key=c[0]+","+c[1]+","+c[2];
-                if(seen.contains(key))continue;
-                double[] p=new double[3];p[u]=cu;p[v]=cv;p[axis]=along;
-                attempted++;
-                var found=shape.apply(new BlockPos(c[0],c[1],c[2]),
-                        new FrameMath.Vec(p[0],p[1],p[2]));
-                if(found!=null && owner.equals(found.ownerKey()) && key.equals(found.localBlock())) {
-                    added.add(found);seen.add(key);
+            int faceStart=added.size();
+            boolean faceOverBudget=false;
+            outer:for(int a=u0;a<=u1;a++) {
+                // Convex hull edges intersected with one grid-column band.
+                // This avoids testing an unverified enclosing rectangle.
+                int[] vRange=rowCandidateRange(hull,a+0.5,v0,v1);
+                for(int b=vRange[0];b<=vRange[1];b++) {
+                    double cu=a+0.5,cv=b+0.5;
+                    if(localHalo?segmentDistanceSquared(hull.getFirst(),hull.getFirst(),cu,cv)
+                            >tolerance*tolerance:!inside(hull,cu,cv))continue;
+                    double along=group.first.axisAligned()?plane
+                            :(plane-normal[u]*cu-normal[v]*cv)/normal[axis];
+                    if(!Double.isFinite(along) || along<=Integer.MIN_VALUE+2 || along>=Integer.MAX_VALUE-2)
+                        continue;
+                    int[] c=new int[3];c[u]=a;c[v]=b;
+                    c[axis]=(int)Math.floor(along-Math.signum(normal[axis])*GRID_EPS);
+                    String key=c[0]+","+c[1]+","+c[2];
+                    if(seen.contains(key))continue;
+                    if(attempted>=MAX_AREA){faceOverBudget=true;break outer;}
+                    double[] p=new double[3];p[u]=cu;p[v]=cv;p[axis]=along;
+                    attempted++;
+                    var found=shape.apply(new BlockPos(c[0],c[1],c[2]),
+                            new FrameMath.Vec(p[0],p[1],p[2]));
+                    if(found!=null && owner.equals(found.ownerKey()) && key.equals(found.localBlock())) {
+                        added.add(found);seen.add(key);
+                    }
                 }
+            }
+            if(faceOverBudget) {
+                // An incomplete face MUST NOT appear to have been fully
+                // recovered. Roll back its new identities, keep earlier
+                // complete faces and report the work budget explicitly.
+                for(int i=added.size()-1;i>=faceStart;i--)
+                    seen.remove(added.remove(i).localBlock());
+                limited++;
+            } else {
+                faces++;
+                if(localHalo)sparse++;
             }
         }
         if(faces==0)return new Result(List.of(),attempted,
                 limited>0?"PATCH_BUDGET":normalsMissing?"NO_VALID_NORMAL":"NO_PROVEN_SURFACE");
         return new Result(added,attempted,"SHAPE_VERIFIED_SURFACES faces="+faces+
                 " sparseLocalHalos="+sparse+" limited="+limited+" unsupported="+insufficient);
+    }
+
+    /** Conservative column-band bound: never removes a cell that could
+     * satisfy the exact hull / distance test below. Broad margin is cheap;
+     * the exact shape verifier remains authoritative. */
+    private static int[] rowCandidateRange(List<Point> hull,double u,int minV,int maxV) {
+        double low=Double.POSITIVE_INFINITY,high=Double.NEGATIVE_INFINITY;
+        for(int i=0;i<hull.size();i++) {
+            Point a=hull.get(i),b=hull.get((i+1)%hull.size());
+            double left=Math.min(a.u(),b.u()),right=Math.max(a.u(),b.u());
+            if(right<u-2 || left>u+2)continue;
+            if(a.u()==b.u()) {
+                low=Math.min(low,Math.min(a.v(),b.v()));
+                high=Math.max(high,Math.max(a.v(),b.v()));
+            } else {
+                double t0=Math.max(0,Math.min(1,(u-2-a.u())/(b.u()-a.u())));
+                double t1=Math.max(0,Math.min(1,(u+2-a.u())/(b.u()-a.u())));
+                double v0=a.v()+t0*(b.v()-a.v());
+                double v1=a.v()+t1*(b.v()-a.v());
+                low=Math.min(low,Math.min(v0,v1));
+                high=Math.max(high,Math.max(v0,v1));
+            }
+        }
+        if(low==Double.POSITIVE_INFINITY)return new int[]{1,0};
+        return new int[]{Math.max(minV,(int)Math.floor(low-2)),
+                Math.min(maxV,(int)Math.ceil(high+2))};
     }
 
     private static int[] parse(String key) {

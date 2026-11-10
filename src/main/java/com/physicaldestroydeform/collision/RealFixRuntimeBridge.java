@@ -100,7 +100,9 @@ public final class RealFixRuntimeBridge {
         double lastPeak=Double.NaN;
         double lastCreditedPeak=Double.NaN;
         int quietForceFrames;
-        Target lastCreditedA,lastCreditedB;
+        RegionalContactProof.Snapshot lastCreditedRegions;
+        long lastCreditedTick=-1;
+        long lastRegionalAuditTick=-1;
         String lastVerfRegion="";
         long lastPlotRogWitnessTick=-1;
         long lastPlotRogEpochTick=-1;
@@ -373,12 +375,33 @@ public final class RealFixRuntimeBridge {
                         && currentPeak>=credit.settings().forceEnter()
                         && (priorTracking.lastUncreditedAudit<0
                             || now-priorTracking.lastUncreditedAudit>=10);
-                boolean auditEligible=beforeAudit.phase()!=Phase.ACTIVE
+                boolean originalAudit=beforeAudit.phase()!=Phase.ACTIVE
                         || beforeAudit.hasUnspentAuthorization() || recoverFirstApproach
                         || risingAfterQuiet || firstUncreditedRetry;
+                // An ACTIVE pair may first contact genuinely new cells while its
+                // previous face remains in contact. A source-verified inward
+                // velocity reopens the R2 audit, without inventing a fresh Q.
+                // This is rate limited per server tick, not per solver substep.
+                boolean probeReimpact=beforeAudit.phase()==Phase.ACTIVE
+                        && beforeAudit.episode()>0 && priorTracking!=null
+                        && priorTracking.lastCreditedTick>=0
+                        && now-priorTracking.lastCreditedTick>=credit.settings().quietFrames()
+                        && (priorTracking.lastRegionalAuditTick<0
+                            || now-priorTracking.lastRegionalAuditTick>=2)
+                        && currentPeak>=credit.settings().forceEnter();
+                boolean needsSource=originalAudit || probeReimpact;
+                var massSafe=needsSource?massEpochs.validate(stamp.dimension,stamp.tick,records):null;
+                long normalStart=System.nanoTime();
+                var preAuthNormal=needsSource && massSafe.maskedFrames()==0
+                        ?NativeEffectDirection.verify(pair,massSafe.contacts(),pre)
+                        :NativeEffectDirection.unknown("NO_AUTHORIZED_NATIVE_SOURCE");
+                boolean preSolverClosing=needsSource
+                        && NativeApproachEvidence.approaching(pair,pre,preAuthNormal,stamp.tick);
+                long normalNanos=System.nanoTime()-normalStart;
+                boolean auditEligible=originalAudit || (probeReimpact && preSolverClosing);
+                if(probeReimpact && auditEligible)priorTracking.lastRegionalAuditTick=now;
                 if(firstUncreditedRetry)priorTracking.lastUncreditedAudit=now;
                 long r2Start=auditEligible?System.nanoTime():0;
-                var massSafe=auditEligible?massEpochs.validate(stamp.dimension,stamp.tick,records):null;
                 var regions=auditEligible?SableContactRegions.audit(server,stamp.dimension,pair,massSafe.contacts())
                         :SableContactRegions.skippedDuplicate();
                 long r2Nanos=auditEligible?System.nanoTime()-r2Start:0;
@@ -440,18 +463,17 @@ public final class RealFixRuntimeBridge {
                 // For an ACTIVE, never-credited pair, only the stable cached
                 // target/Plot approach may reauthorize the first impact. A
                 // changed world-block target could fake an AABB gap reduction.
-                // All pre-solver substeps must independently show motion INTO the
-                // already R2-shape-verified contact, not just a large Sable F.
-                long normalStart=System.nanoTime();
-                var preAuthNormal=(auditEligible && massSafe!=null && massSafe.maskedFrames()==0)
-                        ?NativeEffectDirection.verify(pair,massSafe.contacts(),pre)
-                        :NativeEffectDirection.unknown("NO_AUTHORIZED_NATIVE_AUDIT");
-                long normalNanos=System.nanoTime()-normalStart;
+                // At least one pre-solver sample must prove motion INTO the
+                // contact, none may contradict it, and R2 must verify the target.
                 boolean nativeApproach=auditEligible && (a!=null || b!=null)
-                        && NativeApproachEvidence.approaching(pair,pre,preAuthNormal,stamp.tick);
-                boolean regionMoved=risingAfterQuiet &&
-                        (changedRegion(t.lastCreditedA,a) || changedRegion(t.lastCreditedB,b));
-                boolean regionalReimpact=beforeAudit.episode()>0 && risingAfterQuiet
+                        && preSolverClosing;
+                boolean regionMoved=RegionalContactProof.hasNewCells(
+                        t.lastCreditedRegions,regions.regions());
+                // A new shape-proved cell plus independent pre-solver closing
+                // is stronger than an arbitrary raw-F rising ratio. A persistent
+                // stationary press or tangential slide still cannot mint Q.
+                boolean regionalReimpact=beforeAudit.episode()>0
+                        && now-t.lastCreditedTick>=credit.settings().quietFrames()
                         && nativeApproach && regionMoved;
                 boolean approach=(beforeAudit.phase()==Phase.ACTIVE && beforeAudit.episode()==0
                         && !beforeAudit.pendingApproach())
@@ -685,10 +707,22 @@ public final class RealFixRuntimeBridge {
                             nativeNormal.owners(),fTrace):null;
                     long propagationNanos=System.nanoTime()-propagationStart;
                     boolean granted=grant!=null && grant.credited();
+                    if(result.credited() && !granted) {
+                        var pendingId=new ContactCreditLedger.CreditId(pair,result.episodeGeneration());
+                        boolean aborted=regionLedger.lookup(pendingId)==null
+                                && credit.abortUnissued(pair,result);
+                        log.warn("[PDD-Q-ISSUE] pair={}/{} tick={} rawF={} cappedF={} " +
+                                        "requestedQ={} ledgerStatus={} failure={} rolledBack={} " +
+                                        "reason=UNSEALED_NO_WORLD_COMMIT mutation=OFF",
+                                pair.a().stableKey(),pair.b().stableKey(),stamp.tick,
+                                currentPeak,result.peakForce(),result.issuedQ(),
+                                grant==null?"NULL":grant.status(),regionLedger.lastPropagationFailure(),aborted);
+                    }
                     if(granted) {
                         t.lastCreditedPeak=currentPeak;
                         t.quietForceFrames=0;
-                        t.lastCreditedA=a;t.lastCreditedB=b;
+                        t.lastCreditedTick=now;
+                        t.lastCreditedRegions=RegionalContactProof.capture(regions.regions());
                         log.info("[PDD-IMPACT-DECISION] pair={}/{} tick={} credit={} " +
                                         "source={} rawF={} issuedQ={} gate={} nativeApproach={} " +
                                         "regionalReimpact={} movedSurface={} verifiedCells={} " +
@@ -1078,18 +1112,6 @@ public final class RealFixRuntimeBridge {
     }
     private static Target target(String owner,OwnerResolver.TargetKey k) {
         return new Target(owner,k.x()+","+k.y()+","+k.z(),k.fingerprint());
-    }
-    /** A physically distinct impact location, not the jitter of a corner witness.
-     * No cross-owner coordinate comparison; each local lattice is independent. */
-    private static boolean changedRegion(Target before,Target now) {
-        if(before==null||now==null||!before.ownerKey().equals(now.ownerKey()))return false;
-        String[] a=before.localBlock().split(","),b=now.localBlock().split(",");
-        if(a.length!=3||b.length!=3)return false;
-        try {
-            long dist=0;
-            for(int i=0;i<3;i++)dist+=Math.abs((long)Integer.parseInt(a[i])-Integer.parseInt(b[i]));
-            return dist>=2;
-        }catch(NumberFormatException invalid){return false;}
     }
     private static String stable(CollisionFrame.BlockTarget t) {
         if(t==null||!t.valid())return null;
