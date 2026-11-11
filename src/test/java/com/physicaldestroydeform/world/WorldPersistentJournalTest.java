@@ -215,7 +215,15 @@ class WorldPersistentJournalTest {
         Path receiptDir=a.current().resolve("receipts");
         assertFalse(Files.exists(receiptDir));
         Files.write(receiptDir,new byte[]{0});
-        assertThrows(IOException.class,()->j.checkpointBatch(128));
+        // The checkpoint intentionally has a soft 2ms budget: a successful
+        // chunk write may finish the first call before the receipt shard is tried.
+        assertThrows(IOException.class,()->{
+            int attempts=0;
+            do {
+                j.checkpointBatch(128);
+                if(++attempts>1024)throw new AssertionError("checkpoint did not visit receipt shard");
+            }while(j.checkpointPending());
+        });
         assertNotNull(j.receipt("before-failed-checkpoint"));
         Files.delete(receiptDir);
         var restart=a.open();

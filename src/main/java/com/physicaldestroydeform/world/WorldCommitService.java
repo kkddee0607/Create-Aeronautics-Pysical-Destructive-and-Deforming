@@ -22,7 +22,9 @@ public final class WorldCommitService {
         Cell(String dim,BlockPos pos){this(dim,pos.getX(),pos.getY(),pos.getZ());}
         Cell(SparseStateKey key){this(key.dimension(),key.x(),key.y(),key.z());}
     }
-    private static final int MAX_BOOT_RECONCILE_PER_TICK=32, MAX_COMMIT_LOGS_PER_TICK=20;
+    private static final int MAX_BOOT_RECONCILE_PER_TICK=8, MAX_COMMIT_LOGS_PER_TICK=20;
+    private static final int MAX_RECOVERY_SAMPLES=4;
+    private static final boolean TRACE_RECOVERY=Boolean.getBoolean("pdd.persistence.traceRecovery");
     private static final boolean VERBOSE=Boolean.getBoolean("pdd.world.verbose")
             ||Boolean.getBoolean("pdd.persistence.verbose");
     private final MinecraftServer server;
@@ -36,6 +38,8 @@ public final class WorldCommitService {
     private Cell ownBreak;
     private boolean fault;
     private long lastSummaryTick, rejected, accepted, appliedDamage, appliedBreak, blocked;
+    private long recoveredDeferredAborted, recoveredPreparedQuarantined, recoveryLoadMisses;
+    private int recoverySamples;
     public WorldCommitService(MinecraftServer server,DamageModel.Settings damage,Logger log) throws IOException {
         this.server=Objects.requireNonNull(server);this.log=Objects.requireNonNull(log);
         Path path=server.getWorldPath(LevelResource.ROOT).resolve("data").resolve("pdd-world-0.4.1.wal");
@@ -47,10 +51,35 @@ public final class WorldCommitService {
             Cell cell=new Cell(state.key());watched.add(cell);
 
         }
-        for(var receipt:journal.uncertain()) {
-            Cell cell=new Cell(receipt.key());watched.add(cell);
-            quarantined.add(cell);unresolved.addLast(receipt);
+        int historicalQuarantined=0,historicalDeferredSafe=0,historicalTrueQuarantine=0;
+        for(var receipt:journal.quarantinedSnapshot()){
+            historicalQuarantined++;
+            if(WorldPersistentJournal.isLegacyUnexecutedDeferred(receipt)){
+                // The old code recorded DEFERRED as uncertain even though it never
+                // crossed the PREPARED Vanilla-mutation barrier. Preserve its
+                // terminal ApplyId but do not block future independent collisions.
+                historicalDeferredSafe++;
+                continue;
+            }
+            Cell cell=new Cell(receipt.key());watched.add(cell);quarantined.add(cell);
+            historicalTrueQuarantine++;
         }
+        int startupDeferred=0,startupPrepared=0;
+        for(var receipt:journal.uncertain()) {
+            unresolved.addLast(receipt);
+            if(receipt.status()==WorldReceiptJournal.Status.PREPARED) {
+                Cell cell=new Cell(receipt.key());watched.add(cell);quarantined.add(cell);
+                startupPrepared++;
+            }else if(receipt.status()==WorldReceiptJournal.Status.DEFERRED)startupDeferred++;
+        }
+        log.info("[PDD-RECOVERY] phase=HISTORICAL_QUARANTINE total={} " +
+                        "provenNeverExecutedDeferred={} trueMutationUncertain={} " +
+                        "action=KEEP_RECEIPTS_AND_PROTECT_PREPARED_OR_UNKNOWN",
+                historicalQuarantined,historicalDeferredSafe,historicalTrueQuarantine);
+        log.info("[PDD-RECOVERY] phase=START deferred={} prepared={} " +
+                        "policy=DEFERRED_ABORT_NO_MUTATION_PREPARED_QUARANTINE " +
+                        "intentPayloadPersisted=false forceChunkLoad=false traceEach={}",
+                startupDeferred,startupPrepared,TRACE_RECOVERY);
         WorldBlockMutationTracker.attach(this);
         log.info("[PDD-WORLD-POLICY] revision=0.4.1-spreadFix blockTypeVeto=OFF " +
                 "blockEntities=VETO multiBlock=VETO " +
@@ -122,21 +151,43 @@ public final class WorldCommitService {
             if(tick-lastSummaryTick>=100){lastSummaryTick=tick;log.error("[PDD-SAVE] status=HALTED reason=IO_FAULT required=OPERATOR_INTERVENTION");}
             return;
         }
-        // Boot recovery is bounded. Unknown PREPARED operations must never re-execute.
-        int pending=Math.min(MAX_BOOT_RECONCILE_PER_TICK,unresolved.size());
-        for(int i=0;i<pending;i++){
-            var receipt=unresolved.removeFirst();
-            var observation=gateway.readIfLoaded(receipt.key());
-            if(observation==null){unresolved.addLast(receipt);continue;}
-            try {
-                journal.transition(new WorldReceiptJournal.Receipt(receipt.id(),receipt.key(),
-                        WorldReceiptJournal.Status.PARTIAL_QUARANTINED,
-                        "RESTART_UNCERTAIN_"+receipt.status()+"_"+(observation.isAir()?"AIR":"PRESENT"),tick),null);
-                log.warn("[PDD-SAVE] phase=RECONCILE id={} result=PARTIAL_QUARANTINED " +
-                        "prior={} actualAir={} key={} requiresManualRepair=true",
-                        receipt.id(),receipt.status(),observation.isAir(),receipt.key());
-            }catch(IOException|IllegalArgumentException error){
-                fault=true;log.error("[PDD-SAVE] phase=RECONCILE status=IO_FAULT id={}",receipt.id(),error);return;
+        // Bounded recovery: no physics callback, no forced chunk load, no Q reissue.
+        // DEFERRED has not reached PREPARED (the durable break barrier) and is
+        // safely closed as ABORTED without an unnecessary world read.
+        int recoveryBudget=Math.min(MAX_BOOT_RECONCILE_PER_TICK,unresolved.size());
+        long recoveryStarted=System.nanoTime();
+        for(int i=0;i<recoveryBudget;i++){
+            // Each terminal Receipt is individually fsynced. Soft-budget the
+            // total recovery pass so a large old queue cannot stall a tick.
+            if(i>0 && System.nanoTime()-recoveryStarted>=2_000_000L)break;
+            var prior=unresolved.removeFirst();
+            var observation=prior.status()==WorldReceiptJournal.Status.PREPARED
+                    ?gateway.readIfLoaded(prior.key()):null;
+            var result=core.reconcileRestart(prior,observation,tick);
+            if(core.ioFault() || result.receipt()==null && result.result()==WorldCommitCore.Outcome.QUARANTINED){
+                fault=true;
+                log.error("[PDD-RECOVERY] phase=RECONCILE status=IO_FAULT id={} reason={} " +
+                        "action=HALT_WORLD_COMMIT",prior.id(),result.reason());
+                return;
+            }
+            if(result.result()==WorldCommitCore.Outcome.DEFERRED) {
+                recoveryLoadMisses++;
+                unresolved.addLast(prior);
+                continue;
+            }
+            if(result.result()==WorldCommitCore.Outcome.ABORTED)recoveredDeferredAborted++;
+            else if(result.result()==WorldCommitCore.Outcome.QUARANTINED)recoveredPreparedQuarantined++;
+            if(TRACE_RECOVERY || recoverySamples<MAX_RECOVERY_SAMPLES){
+                recoverySamples++;
+                String format="[PDD-RECOVERY] phase=RESOLVE id={} prior={} result={} reason={} " +
+                        "actualLoaded={} actualAir={} observedFingerprint={} key={} " +
+                        "requiresManualRepair={} unappliedQ=UNKNOWN";
+                Object[] fields={prior.id(),prior.status(),result.result(),result.reason(),
+                        observation!=null&&observation.loaded(),observation!=null&&observation.isAir(),
+                        observation==null?"UNAVAILABLE":observation.fingerprint(),prior.key(),
+                        result.result()==WorldCommitCore.Outcome.QUARANTINED};
+                if(result.result()==WorldCommitCore.Outcome.QUARANTINED)log.warn(format,fields);
+                else log.info(format,fields);
             }
         }
         gateway.clearPermissionCache();
@@ -189,6 +240,12 @@ public final class WorldCommitService {
                             "receipts={} walBytes={} fault={}",
                     accepted,appliedDamage,appliedBreak,rejected,blocked,core.queued(),unresolved.size(),
                     journal.size(),journal.receiptCount(),journal.bytes(),fault||core.ioFault());
+            if(recoveredDeferredAborted>0 || recoveredPreparedQuarantined>0 || !unresolved.isEmpty())
+                log.info("[PDD-RECOVERY] phase=SUMMARY deferredAborted={} " +
+                                "preparedQuarantined={} awaitingLoaded={} loadMissAttempts={} " +
+                                "manualRepairOnlyForPrepared=true",
+                        recoveredDeferredAborted,recoveredPreparedQuarantined,
+                        unresolved.size(),recoveryLoadMisses);
             if(VERBOSE)log.info("[PDD-PERSIST] phase=STORAGE {}",journal.storageStatus());
         }
     }
@@ -250,10 +307,15 @@ public final class WorldCommitService {
             fault=true;log.error("[PDD-PERSIST] phase=STOP_CHECKPOINT status=FAILED " +
                     "recoveryWalStillDurable=true",failed);
         }
-        log.info("[PDD-SAVE] phase=STOP status={} pending={} states={} receipts={} bytes={} " +
-                        "mode=SHARDED_FSYNC",
-                fault||core.ioFault()?"IO_FAULT":"CLEAN",core.queued(),journal.size(),
-                journal.receiptCount(),journal.bytes());
+        log.info("[PDD-RECOVERY] phase=STOP deferredAborted={} " +
+                        "preparedQuarantined={} awaitingLoaded={} loadMissAttempts={} " +
+                        "requiresManualRepair={}",
+                recoveredDeferredAborted,recoveredPreparedQuarantined,unresolved.size(),
+                recoveryLoadMisses,recoveredPreparedQuarantined);
+        log.info("[PDD-SAVE] phase=STOP status={} pending={} restorePending={} " +
+                        "states={} receipts={} bytes={} mode=SHARDED_FSYNC",
+                fault||core.ioFault()?"IO_FAULT":"CLEAN",core.queued(),unresolved.size(),
+                journal.size(),journal.receiptCount(),journal.bytes());
         watched.clear();quarantined.clear();pendingCells.clear();unresolved.clear();
     }
 }

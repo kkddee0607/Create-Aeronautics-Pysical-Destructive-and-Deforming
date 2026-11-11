@@ -1,8 +1,25 @@
-# PDD 0.5.0-moreFix — Physical Destruction and Deforming
+# PDD 0.5.0-rogFix — Physical Destruction and Deforming
 
 **Minecraft Java 1.21.1 / NeoForge 21.1.x · Create 6.0.10 · Create Aeronautics 1.3.2 · Sable 2.0.6**
 
 This release preserves server-authoritative **static World** destruction, Sable's original collision callbacks, material T1024/U16 persistence, source-once F and Q accounting, World owner/CAS checks, and schema-2 durability. Plot destruction and deformation remain preview-only. Source ZIP is intended for GitHub Apply, **not** the game `mods/` folder.
+
+## 0.5.0-rogFix — durability and diagnostics, without physics changes
+
+**Same physical destruction behavior as 0.5.0-moreFix k=0.1 + self-elasticity 90%**.
+Recovery now distinguishes never-started queued `DEFERRED` receipts (durable
+ABORTED, unreplayed Q) from truly uncertain pre-break `PREPARED` receipts
+(quarantine and manual inspection), audits terminal legacy false quarantines,
+logs recovery status summaries and optionally ID-level details, and bounds
+boot WAL reconciliation I/O. An existing checkpoint failure-injection test is
+made independent of the intentional 2 ms checkpoint batch budget. All
+original T1024 values, F/Q coefficients, tests and other source files are
+preserved. See [rogFix verification](docs/verification/0.5.0-rogFix.md).
+
+**Test status:** 54 focused Java 21 test methods passed under isolated
+JUnit-compatible doubles; official Gradle/JUnit, GitHub Actions and Minecraft
+in-game validation remain pending. Back up the world and
+`data/pdd-world-0.5.0/` before running.
 
 ## 0.5.0-moreFix — changes since 0.5.0-Fix
 

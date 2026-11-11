@@ -77,8 +77,64 @@ class WorldPersistentCommitIntegrationTest {
         assertEquals(0,boot.queued());
         assertEquals(0,unloaded.breakCalls);
         var after=new Fake();assertEquals(1,boot.quarantineInterrupted(after,202));
-        assertEquals(WorldReceiptJournal.Status.PARTIAL_QUARANTINED,
+        assertEquals(WorldReceiptJournal.Status.ABORTED,
                 data.open().receipt("deferred").status());
+        assertEquals("RESTART_DEFERRED_NOT_EXECUTED_INTENT_NOT_PERSISTED",
+                data.open().receipt("deferred").reason());
+    }
+    @Test void restartDeferredCanCloseWithoutLoadingChunkOrChangingWorld()throws Exception{
+        var data=area();var k=key(7);
+        var original=new WorldCommitCore(data.open(),DamageModel.Settings.defaults(),64);
+        original.submit(intent("lost-q",k,5000));
+        var rebootJournal=data.open();
+        var reboot=new WorldCommitCore(rebootJournal,DamageModel.Settings.defaults(),64);
+        var inaccessible=new Fake();inaccessible.loaded=false;
+        assertEquals(1,reboot.quarantineInterrupted(inaccessible,203));
+        assertEquals(WorldReceiptJournal.Status.ABORTED,rebootJournal.receipt("lost-q").status());
+        assertEquals(0,inaccessible.breakCalls);
+        assertEquals(0,rebootJournal.size());
+        assertFalse(rebootJournal.recoveredUncertain("lost-q"));
+        assertEquals(WorldCommitCore.Outcome.DUPLICATE,
+                reboot.submit(intent("lost-q",k,5000)).result());
+    }
+    @Test void restartPreparedRemainsUncertainUntilLoadedThenQuarantined()throws Exception{
+        var data=area();var k=key(8);
+        data.open().transition(new WorldReceiptJournal.Receipt("possibly-broken",k,
+                WorldReceiptJournal.Status.PREPARED,"PREPARED_DURABLE",201),null);
+        var journal=data.open();
+        var reboot=new WorldCommitCore(journal,DamageModel.Settings.defaults(),64);
+        var world=new Fake();world.loaded=false;
+        assertEquals(0,reboot.quarantineInterrupted(world,202));
+        assertEquals(WorldReceiptJournal.Status.PREPARED,journal.receipt("possibly-broken").status());
+        world.loaded=true;
+        assertEquals(1,reboot.quarantineInterrupted(world,203));
+        assertEquals(WorldReceiptJournal.Status.PARTIAL_QUARANTINED,
+                data.open().receipt("possibly-broken").status());
+        assertTrue(data.open().receipt("possibly-broken").reason().contains("MUTATION_UNCERTAIN_PRESENT"));
+        assertEquals(0,world.breakCalls);
+        assertEquals(WorldCommitCore.Outcome.DUPLICATE,
+                reboot.submit(intent("possibly-broken",k,5000)).result());
+    }
+    @Test void oldMoreFixFalseQuarantineIsRecognizedWithoutReopeningItsApplyId()throws Exception{
+        var data=area();var key=key(11);
+        var journal=data.open();
+        journal.transition(new WorldReceiptJournal.Receipt("old-deferred",key,
+                WorldReceiptJournal.Status.DEFERRED,"QUEUED_IN_CURRENT_RUN",200),null);
+        journal.transition(new WorldReceiptJournal.Receipt("old-deferred",key,
+                WorldReceiptJournal.Status.PARTIAL_QUARANTINED,
+                "RESTART_UNCERTAIN_DEFERRED_PRESENT",201),null);
+        journal.transition(new WorldReceiptJournal.Receipt("old-prepared",key,
+                WorldReceiptJournal.Status.PREPARED,"PREPARED_DURABLE",201),null);
+        journal.transition(new WorldReceiptJournal.Receipt("old-prepared",key,
+                WorldReceiptJournal.Status.PARTIAL_QUARANTINED,
+                "RESTART_UNCERTAIN_PREPARED_PRESENT",202),null);
+        var reboot=data.open();
+        assertEquals(2,reboot.quarantinedSnapshot().size());
+        assertTrue(WorldPersistentJournal.isLegacyUnexecutedDeferred(reboot.receipt("old-deferred")));
+        assertFalse(WorldPersistentJournal.isLegacyUnexecutedDeferred(reboot.receipt("old-prepared")));
+        assertEquals(WorldCommitCore.Outcome.DUPLICATE,
+                new WorldCommitCore(reboot,DamageModel.Settings.defaults(),64)
+                    .submit(intent("old-deferred",key,5000)).result());
     }
     @Test void loadedChunkGateAndDamageSurviveRestartWithoutWorldScan()throws Exception{
         var data=area();var journal=data.open();var core=new WorldCommitCore(journal,DamageModel.Settings.defaults(),64);

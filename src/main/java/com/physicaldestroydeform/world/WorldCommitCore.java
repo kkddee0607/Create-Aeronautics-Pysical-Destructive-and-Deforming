@@ -142,22 +142,57 @@ public final class WorldCommitCore {
     }
     public synchronized int queued(){return queue.size();}
     public synchronized boolean ioFault(){return ioFault;}
-    /** Interruption before receipt confirmation must NOT lead to re-breaking after restart. */
+    /**
+     * Reconcile durable receipts recovered from a previous process. DEFERRED is only
+     * a queued plan: no Vanilla mutation can precede the PREPARED fsync. Since the
+     * intent's Q/material snapshot is not persisted, it cannot safely be replayed.
+     * PREPARED may have executed Vanilla before crashing, so it stays quarantined.
+     */
+    public synchronized Decision reconcileRestart(WorldReceiptJournal.Receipt prior,
+                                                    Observation observation,long tick) {
+        if(ioFault)return new Decision(Outcome.QUARANTINED,"IO_FAULT",null);
+        if(prior==null)throw new IllegalArgumentException("missing recovery receipt");
+        var current=journal.receipt(prior.id());
+        if(current==null || !current.key().equals(prior.key())
+                || current.status()!=prior.status())
+            return new Decision(Outcome.DUPLICATE,"RECOVERY_RECEIPT_ALREADY_CHANGED",current);
+        WorldReceiptJournal.Status next;
+        Outcome outcome;
+        String reason;
+        if(prior.status()==WorldReceiptJournal.Status.DEFERRED){
+            next=WorldReceiptJournal.Status.ABORTED;
+            outcome=Outcome.ABORTED;
+            reason="RESTART_DEFERRED_NOT_EXECUTED_INTENT_NOT_PERSISTED";
+        }else if(prior.status()==WorldReceiptJournal.Status.PREPARED){
+            if(observation==null || !observation.loaded())
+                return new Decision(Outcome.DEFERRED,"RECOVERY_AWAIT_LOADED_CHUNK",prior);
+            next=WorldReceiptJournal.Status.PARTIAL_QUARANTINED;
+            outcome=Outcome.QUARANTINED;
+            reason="RESTART_PREPARED_MUTATION_UNCERTAIN_"+(observation.isAir()?"AIR":"PRESENT");
+        }else return new Decision(Outcome.DUPLICATE,"RECOVERY_ALREADY_TERMINAL",prior);
+        var resolved=new WorldReceiptJournal.Receipt(prior.id(),prior.key(),next,reason,tick);
+        try {
+            journal.transition(resolved,null);
+            return new Decision(outcome,reason,resolved);
+        }catch(IOException|IllegalArgumentException failure){
+            ioFault=true;
+            return new Decision(Outcome.QUARANTINED,
+                    "RECOVERY_JOURNAL_WRITE_FAILED_"+failure.getClass().getSimpleName(),null);
+        }
+    }
+    /** Compatibility entry point for focused crash-recovery tests. */
     public synchronized int quarantineInterrupted(WorldGateway world,long tick) {
         if(!world.isServerThread())throw new IllegalStateException("server thread required");
-        int reconciled=0;
+        int resolved=0;
         for(var prior:journal.uncertain()) {
-            var observation=world.readIfLoaded(prior.key());
-            if(observation==null||!observation.loaded())continue; // bounded deferred quarantine until accessible
-            try {
-                journal.transition(new WorldReceiptJournal.Receipt(prior.id(),prior.key(),
-                        WorldReceiptJournal.Status.PARTIAL_QUARANTINED,
-                        "RESTART_UNCERTAIN_"+prior.status()+"_ACTUAL_"+
-                                (observation.isAir()?"AIR":"PRESENT"),tick),null);
-                reconciled++;
-            } catch(IOException e){ioFault=true;break;}
+            Observation observed=prior.status()==WorldReceiptJournal.Status.PREPARED
+                    ?world.readIfLoaded(prior.key()):null;
+            Decision result=reconcileRestart(prior,observed,tick);
+            if(result.receipt()!=null && (result.result()==Outcome.ABORTED
+                    ||result.result()==Outcome.QUARANTINED))resolved++;
+            if(ioFault)break;
         }
-        return reconciled;
+        return resolved;
     }
     private Decision apply(WorldGateway world,Intent intent,Observation original,DamageModel.Plan plan,long tick) {
         String invalid=preflight(intent,original);

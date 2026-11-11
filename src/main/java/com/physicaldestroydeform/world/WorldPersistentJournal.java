@@ -113,6 +113,19 @@ public final class WorldPersistentJournal implements WorldJournal {
         return receipts.values().stream().filter(r->r.status()==WorldReceiptJournal.Status.PREPARED
                 ||r.status()==WorldReceiptJournal.Status.DEFERRED).toList();
     }
+    /** Startup-only enumeration; never scan the full receipt ledger each tick. */
+    public synchronized List<WorldReceiptJournal.Receipt> quarantinedSnapshot(){
+        return receipts.values().stream()
+                .filter(r->r.status()==WorldReceiptJournal.Status.PARTIAL_QUARANTINED).toList();
+    }
+    /** Earlier moreFix builds misclassified QUEUED DEFERRED as ambiguous mutation.
+     * The reason itself names the previous state; no Vanilla break begins before
+     * a separately fsynced PREPARED record. Do not rewrite the terminal receipt.
+     */
+    public static boolean isLegacyUnexecutedDeferred(WorldReceiptJournal.Receipt receipt){
+        return receipt.status()==WorldReceiptJournal.Status.PARTIAL_QUARANTINED
+                && receipt.reason().startsWith("RESTART_UNCERTAIN_DEFERRED_");
+    }
     /** Positions with durable replacement history, including currently undamaged blocks. */
     public synchronized boolean trackedPosition(String dimension,int x,int y,int z){
         Cell cell=new Cell(dimension,x,y,z);
@@ -127,7 +140,8 @@ public final class WorldPersistentJournal implements WorldJournal {
                 +" states="+states.size()+" revisions="+revisions.size()+" receipts="+receipts.size()
                 +" walBytes="+walBytes+" repairedTailBytes="+repairedTailBytes
                 +" dirtyChunks="+dirtyChunks.size()
-                +" dirtyReceipts="+dirtyBuckets.size()+" checkpointing="+staging;
+                +" dirtyReceipts="+dirtyBuckets.size()+" recoveredPending="+recoveredUncertain.size()
+                +" checkpointing="+staging;
     }
     @Override public synchronized void transition(WorldReceiptJournal.Receipt r,
             WorldReceiptJournal.State next) throws IOException {
@@ -225,6 +239,10 @@ public final class WorldPersistentJournal implements WorldJournal {
     }
     private void applyTransition(WorldReceiptJournal.Receipt r,WorldReceiptJournal.State next){
         receipts.put(r.id(),r);
+        if(r.status()==WorldReceiptJournal.Status.APPLIED
+                ||r.status()==WorldReceiptJournal.Status.ABORTED
+                ||r.status()==WorldReceiptJournal.Status.PARTIAL_QUARANTINED)
+            recoveredUncertain.remove(r.id());
         int receiptBucket=bucket(r.id());
         receiptBucketIndex.computeIfAbsent(receiptBucket,k->new HashSet<>()).add(r.id());
         dirtyBuckets.add(receiptBucket);
