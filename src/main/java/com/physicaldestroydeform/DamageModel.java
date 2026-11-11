@@ -4,7 +4,7 @@ import java.util.Objects;
 
 /** IDS 1.0.6 §24.1 game-Q planning only. No block mutation or committed damage. */
 public final class DamageModel {
-    public static final String ALGORITHM_REVISION = "PDD-IDS-1.0.7/0.5.0Fix-T1024";
+    public static final String ALGORITHM_REVISION = "PDD-IDS-1.0.7/0.5.0moreFix-SELF-ELASTIC-90";
     public static final double DIRECT_SHARE = 0.60;
     public static final double PLASTIC_SHARE = 0.15;
     public static final double STRESS_SHARE = 0.25;
@@ -65,6 +65,24 @@ public final class DamageModel {
         return cfg.minElasticFactor()+(1-cfg.minElasticFactor())
                 * Math.pow(1-percent/100.0,cfg.elasticExponent());
     }
+    /** Only the block's own final DAMAGE is capped by this retention curve.
+     * The already-accounted local Q and parent/child F/Q propagation are unchanged.
+     * At 100% elasticity, damage is at most 10% of the E=0 baseline, not
+     * 90% of the previously damped damage. An existing stronger reduction wins.
+     */
+    public static double ownDamageRetentionPercent(int percent, Settings cfg) {
+        double propagationRetention=elasticityTransmissionPercent(percent,cfg);
+        double maxSelfRetention=1.0-0.90*(percent/100.0);
+        return Math.min(propagationRetention,maxSelfRetention);
+    }
+    /** Apply only the EXTRA self-damage reduction: local elasticity is already
+     * accounted for once in activeQ. Never reapply this factor to Q or stress.
+     */
+    private static double extraOwnDamageFactor(MaterialProperties material,Settings cfg) {
+        double existing=elasticityTransmission(material,cfg);
+        return ownDamageRetentionPercent(material.elasticityPercent(),cfg)/existing;
+    }
+
     /** Immutable prediction. Plastic/stress are *reserved then unused*, not added to direct. */
     public static Plan plan(double incomingQ, MaterialProperties material, BlockDamageState previous,
                             Settings cfg) {
@@ -91,7 +109,8 @@ public final class DamageModel {
         double direct=active*DIRECT_SHARE;
         double plastic=active*PLASTIC_SHARE;
         double stress=Math.max(0,active-direct-plastic);
-        double rawDamage=direct*cfg.damageGain()*hardnessFactor(material,cfg);
+        double rawDamage=direct*cfg.damageGain()*hardnessFactor(material,cfg)
+                *extraOwnDamageFactor(material,cfg);
         if (!Double.isFinite(rawDamage) || rawDamage<0)
             throw new IllegalArgumentException("invalid calculated damage");
         long increment=(long)Math.floor(Math.min((double)BlockDamageState.MAX_FIXED_VALUE,rawDamage*BlockDamageState.FIXED_SCALE));

@@ -23,7 +23,7 @@ class MaterialPlanningTest {
         assertEquals(1.5,plan.stressQ(),1e-9);
         assertEquals(2.4,plan.unusedPlannedQ(),1e-9);
         assertEquals(40,plan.accountedQ(),1e-9);
-        assertEquals(3.6*POLICY.damageGain(),plan.rawDamage(),1e-9);
+        assertEquals(3.6*POLICY.damageGain()*(0.10/0.15),plan.rawDamage(),1e-9);
         assertEquals(0,plan.plannedPlasticIncrement()); // yield not reached: no invented deformation
     }
     @Test void plasticCapacityAndYieldAreIndependentOfDirectDamage() {
