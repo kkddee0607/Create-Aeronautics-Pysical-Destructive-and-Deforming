@@ -87,13 +87,26 @@ public final class WorldCommitCore {
     }
     /** At most breakCapPerTick actual break attempts; bounded non-break budget as well. */
     public synchronized List<Decision> tick(WorldGateway world,long tick) {
+        return tick(world,tick,Math.max(64,breakCapPerTick));
+    }
+    /** Plot 0.5.1 caps ALL journal/mutation operations, not only final breaks. */
+    public synchronized List<Decision> tick(WorldGateway world,long tick,int maxOperations) {
+        if(maxOperations<1||maxOperations>MAX_QUEUED)
+            throw new IllegalArgumentException("invalid operation cap");
         if(!world.isServerThread())throw new IllegalStateException("server thread required");
         if(ioFault)return List.of(new Decision(Outcome.QUARANTINED,"IO_FAULT",null));
         var results=new ArrayList<Decision>();
         // One WAL fsync per receipt: bound the entire operation batch, not only breaks.
-        int attemptedBreaks=0,operations=0,limit=Math.min(MAX_QUEUED,Math.max(64,breakCapPerTick));
+        int attemptedBreaks=0,operations=0,limit=Math.min(MAX_QUEUED,maxOperations);
         while(!queue.isEmpty() && operations++<limit) {
             Intent intent=queue.removeFirst();queuedIds.remove(intent.applyId());
+            // External split quarantine may durably terminalize a queued Plot intent.
+            // A terminal receipt must NEVER be re-executed from an older in-memory queue.
+            var terminal=journal.receipt(intent.applyId());
+            if(terminal!=null && terminal.status()!=WorldReceiptJournal.Status.DEFERRED){
+                results.add(new Decision(Outcome.DUPLICATE,"TERMINAL_RECEIPT_"+terminal.status(),terminal));
+                continue;
+            }
             if(tick>intent.eventTick() && tick-intent.eventTick()>MAX_DEFER_TICKS){
                 results.add(finish(intent,WorldReceiptJournal.Status.ABORTED,Outcome.ABORTED,
                         "DEFER_TTL_EXPIRED",null,tick));
@@ -139,6 +152,28 @@ public final class WorldCommitCore {
             if(plan.thresholdReached() && result.result()!=Outcome.DEFERRED)attemptedBreaks++;
         }
         return List.copyOf(results);
+    }
+    /** Terminalize an old-owner queue before split/orphan state cleanup, with WAL durability. */
+    public synchronized int abortMatching(java.util.function.Predicate<Intent> ownerFilter,
+                                          String reason,long tick) {
+        Objects.requireNonNull(ownerFilter);
+        if(reason==null||reason.isBlank()||reason.length()>512||tick<0)
+            throw new IllegalArgumentException("invalid quarantine reason");
+        if(ioFault)return 0;
+        int closed=0;
+        for(var iterator=queue.iterator();iterator.hasNext();) {
+            Intent intent=iterator.next();
+            if(!ownerFilter.test(intent))continue;
+            var previous=journal.receipt(intent.applyId());
+            if(previous!=null && previous.status()==WorldReceiptJournal.Status.DEFERRED) {
+                try {
+                    journal.transition(new WorldReceiptJournal.Receipt(intent.applyId(),intent.key(),
+                            WorldReceiptJournal.Status.ABORTED,reason,tick),null);
+                } catch(IOException failure) {ioFault=true;break;}
+            }
+            iterator.remove();queuedIds.remove(intent.applyId());closed++;
+        }
+        return closed;
     }
     public synchronized int queued(){return queue.size();}
     public synchronized boolean ioFault(){return ioFault;}
