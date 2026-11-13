@@ -16,6 +16,16 @@ public final class WorldCommitCore {
     public static final long MAX_DEFER_TICKS=1200;
     public enum Outcome { APPLIED_DAMAGE, APPLIED_BREAK, DEFERRED, ABORTED, QUARANTINED, DUPLICATE }
     public enum Permission { ALLOW, DENY, UNKNOWN }
+    /** Diagnostic classification only; a native/API acknowledgement is not a verified block mutation. */
+    public enum BreakReadback { CONFIRMED_AIR, API_REJECTED, OWNER_OR_CHUNK_UNAVAILABLE,
+        CHUNK_UNLOADED, BLOCK_REMAINS, AIR_WITH_BLOCK_ENTITY }
+    public static BreakReadback classifyBreakReadback(boolean apiResult,Observation reread) {
+        if(!apiResult)return BreakReadback.API_REJECTED;
+        if(reread==null)return BreakReadback.OWNER_OR_CHUNK_UNAVAILABLE;
+        if(!reread.loaded())return BreakReadback.CHUNK_UNLOADED;
+        if(!reread.isAir())return BreakReadback.BLOCK_REMAINS;
+        return reread.hasBlockEntity()?BreakReadback.AIR_WITH_BLOCK_ENTITY:BreakReadback.CONFIRMED_AIR;
+    }
     public record Observation(String dimension,String fingerprint,long ownerGeneration,String incarnation,
                               boolean loaded,boolean isAir,boolean hasBlockEntity,boolean unsafeMultiblock,
                               boolean unbreakable,boolean unsafePhysicsPhase) {
@@ -39,6 +49,10 @@ public final class WorldCommitCore {
         Permission canBreak(SparseStateKey key,Observation expected);
         /** Execute at most once. Implementation calls vanilla destroy/drop exactly once; no manual drops. */
         boolean breakVanillaOnce(SparseStateKey key);
+        /** Non-authoritative, read-only diagnostic. Must never influence a durable receipt. */
+        default void onBreakReadback(SparseStateKey key,boolean apiResult,
+                                     Observation reread,BreakReadback status) { }
+        default void onBreakException(SparseStateKey key,RuntimeException failure) { }
     }
     private final WorldJournal journal;
     private final DamageModel.Settings damageSettings;
@@ -271,12 +285,18 @@ public final class WorldCommitCore {
                     return new Decision(Outcome.QUARANTINED,"BREAK_REVISION_FSYNC_FAILED",null);
                 }
             }
-            if(apiResult&&reread!=null&&reread.loaded()&&reread.isAir()&&!reread.hasBlockEntity())
+            BreakReadback readback=classifyBreakReadback(apiResult,reread);
+            // The observer cannot promote uncertain results to APPLIED, even if it fails.
+            try {world.onBreakReadback(intent.key(),apiResult,reread,readback);}
+            catch(RuntimeException|LinkageError ignored) { /* diagnostic failure is not a block outcome */ }
+            if(readback==BreakReadback.CONFIRMED_AIR)
                 return finish(intent,WorldReceiptJournal.Status.APPLIED,Outcome.APPLIED_BREAK,"WORLD_REREAD_AIR",
                         new WorldReceiptJournal.State(intent.key(),intent.expectedIncarnation(),0,0,intent.materialGeneration(),tick),tick);
             return finish(intent,WorldReceiptJournal.Status.PARTIAL_QUARANTINED,Outcome.QUARANTINED,
                     "BREAK_RESULT_UNCERTAIN_API_"+apiResult,null,tick);
         }catch(RuntimeException unknown){
+            try {world.onBreakException(intent.key(),unknown);}
+            catch(RuntimeException|LinkageError ignored) { /* diagnostics must not affect receipt */ }
             return finish(intent,WorldReceiptJournal.Status.PARTIAL_QUARANTINED,Outcome.QUARANTINED,
                     "BREAK_EXCEPTION_"+unknown.getClass().getSimpleName(),null,tick);
         }

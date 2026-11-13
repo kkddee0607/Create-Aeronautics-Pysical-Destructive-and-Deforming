@@ -9,6 +9,9 @@
     "SableStepSnapshotMixin",
     "WorldBlockReplacementMixin"
   ],
+  "client": [
+    "SableSnapshotPacketDiagnosticMixin"
+  ],
   "injectors": {
     "defaultRequire": 1
   }

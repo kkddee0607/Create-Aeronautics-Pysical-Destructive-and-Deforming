@@ -20,9 +20,12 @@ import net.minecraft.world.level.block.state.properties.BlockStateProperties;
 import net.neoforged.neoforge.common.NeoForge;
 import net.neoforged.neoforge.common.util.FakePlayerFactory;
 import net.neoforged.neoforge.event.level.BlockEvent;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /** Actual Sable 2.0.6 Plot adapter: never transform into World permission/mutation. */
 public final class NeoForgePlotGateway implements WorldCommitCore.WorldGateway {
+    private static final Logger LOG=LoggerFactory.getLogger(NeoForgePlotGateway.class);
     private static final GameProfile ACTOR=new GameProfile(
             UUID.nameUUIDFromBytes("PDD:PLOT_COMMIT:0.5.1".getBytes(StandardCharsets.UTF_8)),
             "[PDD] Plot");
@@ -117,7 +120,12 @@ public final class NeoForgePlotGateway implements WorldCommitCore.WorldGateway {
             if(container==null)continue;
             var raw=container.getSubLevel(owner.uuid());
             if(raw instanceof ServerSubLevel sub && !sub.isRemoved() && sub.getPlot()!=null) {
-                if(!fence.verify(owner,stamp(sub),sub.getSplitFromSubLevel()!=null))fence.orphan(owner);
+                if(!fence.verify(owner,stamp(sub),sub.getSplitFromSubLevel()!=null)){
+                    LOG.warn("[PDD-PLOT-LIFECYCLE] sessionId={} phase=OWNER_EPOCH_MISMATCH dim={} owner={} " +
+                            "generation={} runtimeBodyId={} splitFrom={} action=ORPHAN_QUARANTINE",
+                            PlotPhysicsProbe.sessionId(),owner.dimension(),owner.uuid(),owner.generation(),sub.getRuntimeId(),sub.getSplitFromSubLevel());
+                    fence.orphan(owner);
+                }
             }
             // Missing owners may merely be unloaded. Never infer a split from absence.
         }
@@ -179,8 +187,65 @@ public final class NeoForgePlotGateway implements WorldCommitCore.WorldGateway {
         // The supported embedded accessor delegates to the allocated LevelChunk;
         // Sable LevelChunkMixin handles its normal block-change notification.
         // Never call force rebuild, removeSubLevel, or fabricate split/physics state.
+        String dim=cell.real().dimension();
+        String target=cell.real().ownerId()+":"+cell.local();
+        PlotPhysicsProbe.beforeBreak(cell.sub(),dim,target);
         inMutation=true;service.beginOwnBreak(virtual);
-        try {return cell.accessor().destroyBlock(cell.local(),true,null,512);}
-        finally {service.endOwnBreak();inMutation=false;}
+        try {
+            boolean result=cell.accessor().destroyBlock(cell.local(),true,null,512);
+            PlotPhysicsProbe.afterBreak(cell.sub(),dim,target,result);
+            return result;
+        } finally {service.endOwnBreak();inMutation=false;}
     }
+    @Override public void onBreakException(SparseStateKey virtual,RuntimeException failure){
+        LOG.error("[PDD-PLOT-BREAK] phase=EXCEPTION key={} result=PARTIAL_QUARANTINED " +
+                "mutation=UNCERTAIN action=NO_RETRY",virtual,failure);
+    }
+    @Override public void onBreakReadback(SparseStateKey virtual,boolean apiResult,
+            WorldCommitCore.Observation reread,WorldCommitCore.BreakReadback status){
+        if(status==WorldCommitCore.BreakReadback.CONFIRMED_AIR)return;
+        String explanation=reread==null?readbackMissingReason(virtual):
+                (reread.loaded()?"PRESENT_OR_BE":"UNLOADED");
+        SparseStateKey real;
+        try{real=PlotKeyCodec.real(virtual);}catch(RuntimeException malformed){real=virtual;}
+        LOG.warn("[PDD-PLOT-REREAD] sessionId={} phase=AFTER_BREAK result={} reason={} apiResult={} " +
+                "owner={} generation={} dim={} local={},{},{} " +
+                "readLoaded={} readAir={} readBE={} nativeMassCollider=UNVERIFIED " +
+                "receiptPolicy=QUARANTINE_NO_RETRY",
+                PlotPhysicsProbe.sessionId(),status,explanation,apiResult,real.ownerId(),real.ownerGeneration(),real.dimension(),
+                real.x(),real.y(),real.z(),reread!=null&&reread.loaded(),
+                reread!=null&&reread.isAir(),reread!=null&&reread.hasBlockEntity());
+    }
+    /** Explain a failed read without changing the fence, loading chunks or rebuilding Sable. */
+    private String readbackMissingReason(SparseStateKey virtual){
+        if(!isServerThread())return "NOT_SERVER_THREAD";
+        try {
+            SparseStateKey real=PlotKeyCodec.real(virtual);
+            var owner=PlotOwnerFence.Owner.of(real);
+            if(fence.orphaned(owner))return "OWNER_ORPHANED";
+            if(service.isSplitParent(real.dimension(),owner.uuid()))return "SPLIT_PARENT";
+            ServerLevel level=dimension(real.dimension());
+            if(level==null)return "DIMENSION_UNAVAILABLE";
+            var container=SubLevelContainer.getContainer(level);
+            if(container==null)return "CONTAINER_UNAVAILABLE";
+            var raw=container.getSubLevel(owner.uuid());
+            if(!(raw instanceof ServerSubLevel sub))return "SUBLEVEL_UNAVAILABLE";
+            if(sub.isRemoved())return "SUBLEVEL_REMOVED";
+            if(sub.getPlot()==null)return "PLOT_UNAVAILABLE";
+            if(sub.getLevel()!=level||!sub.getUniqueId().equals(owner.uuid()))return "OWNER_MISMATCH";
+            if(!fence.verify(owner,stamp(sub),false))return "OWNER_EPOCH_MISMATCH";
+            var plot=sub.getPlot();
+            BlockPos center=plot.getCenterBlock();
+            BlockPos allocated=new BlockPos(Math.addExact(real.x(),center.getX()),
+                    Math.addExact(real.y(),center.getY()),Math.addExact(real.z(),center.getZ()));
+            ChunkPos chunk=new ChunkPos(allocated);
+            if(container.getPlot(chunk)!=plot)return "CHUNK_PLOT_MISMATCH";
+            var accessor=plot.getEmbeddedLevelAccessor();
+            if(accessor==null)return "EMBEDDED_ACCESSOR_MISSING";
+            if(!accessor.hasChunk(chunk.x-plot.getCenterChunk().x,
+                    chunk.z-plot.getCenterChunk().z))return "EMBEDDED_CHUNK_UNLOADED";
+            return "BLOCK_READ_FAILED";
+        }catch(RuntimeException|LinkageError failure){return "READ_EXCEPTION_"+failure.getClass().getSimpleName();}
+    }
+
 }

@@ -74,6 +74,9 @@ public final class PlotCommitService {
         for(var owner:quarantined){
             for(Coordinate cell:active.getOrDefault(owner,Set.of()))queueOrphanCleanup(cell);
             active.remove(owner);
+            log.info("[PDD-PLOT-ORPHAN] phase=RECOVERY owner={} generation={} " +
+                    "cleanupQueued={} marker=RESTORED transfer=FORBIDDEN",
+                    owner.uuid(),owner.generation(),orphanCleanup.size());
         }
         // No old sparse damage may become live merely because a new ship uses the same coordinates.
         log.info("[PDD-PLOT] phase=START revision=0.5.1 cap={} BE=VETO_UNSAFE " +
@@ -260,8 +263,10 @@ public final class PlotCommitService {
         // Bounded sparse-state deletion: owner is blocked from writes as soon as
         // the marker is durable, cleanup does not block the server tick unboundedly.
         for(int i=0;i<mutationCap && !orphanCleanup.isEmpty();i++){
-            Coordinate c=orphanCleanup.removeFirst();orphanCleanupSet.remove(c);
-            try {journal.discardAtPosition(c.dimension(),c.x(),c.y(),c.z());}
+            Coordinate c=orphanCleanup.peekFirst();
+            try {journal.discardAtPosition(c.dimension(),c.x(),c.y(),c.z());
+                orphanCleanup.removeFirst();orphanCleanupSet.remove(c);
+            }
             catch(IOException e){fault=true;log.error("[PDD-PLOT] phase=ORPHAN_CLEANUP status=IO_FAULT",e);return;}
         }
         int recovery=Math.min(MAX_RECOVERY_PER_TICK,unresolved.size());

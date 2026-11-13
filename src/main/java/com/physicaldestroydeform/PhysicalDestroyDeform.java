@@ -11,6 +11,7 @@ import com.physicaldestroydeform.material.MaterialRegistry;
 import com.physicaldestroydeform.world.WorldCommitService;
 import com.physicaldestroydeform.world.WorldBlockMutationTracker;
 import com.physicaldestroydeform.plot.PlotCommitService;
+import com.physicaldestroydeform.plot.PlotPhysicsProbe;
 import net.neoforged.fml.common.Mod;
 import net.neoforged.neoforge.common.NeoForge;
 import net.neoforged.neoforge.event.OnDatapackSyncEvent;
@@ -27,7 +28,7 @@ import org.slf4j.LoggerFactory;
 @Mod(PhysicalDestroyDeform.MOD_ID)
 public final class PhysicalDestroyDeform {
     public static final String MOD_ID = "physical_destroy_deform";
-    public static final String BUILD_VERSION = "0.5.1";
+    public static final String BUILD_VERSION = "0.5.1-Fix";
     private static final Logger LOGGER = LoggerFactory.getLogger(PhysicalDestroyDeform.class);
     private final AcceptanceReport acceptanceReport = new AcceptanceReport();
     private final RealFixRuntimeBridge bridge = new RealFixRuntimeBridge();
@@ -41,13 +42,15 @@ public final class PhysicalDestroyDeform {
         NeoForge.EVENT_BUS.addListener(this::onDatapackSync);
         NeoForge.EVENT_BUS.addListener(this::onServerStopped);
         NeoForge.EVENT_BUS.addListener(this::onServerTick);
-        LOGGER.info("[PDD-DIAG] INIT modId={} version={} revision=IDS-1.0.7 source=SABLE_ORIGINAL_POST_EFFECT " +
+        LOGGER.info("[PDD-DIAG] INIT modId={} version={} releaseSpec=IDS-1.0.8 policyMath=IDS-1.0.7 source=SABLE_ORIGINAL_POST_EFFECT " +
                 "target=NATIVE_BODY_LOCAL_INDEPENDENT_R2_R3_UNCALIBRATED_R4_PROVISIONAL state=FOUR_PHASE_REGIONAL_LEDGER " +
-                "worldMutation=WORLD_AND_SABLE_PLOT",MOD_ID,BUILD_VERSION);
+                "worldMutation=WORLD_STATIC_ONLY plotMutation=SABLE_PLOT",MOD_ID,BUILD_VERSION);
         PddDiagnostics.runModelSelfTest(LOGGER);
     }
 
     private void onServerStarted(ServerStartedEvent event) {
+        // A new integrated server may reuse the same JVM; discard prior session diagnostics.
+        PlotPhysicsProbe.clear();
         MaterialRegistry.rebuild(event.getServer(), LOGGER);
         bridge.loadPreview(event.getServer(), LOGGER);
         try {
@@ -86,6 +89,7 @@ public final class PhysicalDestroyDeform {
         bridge.clear();
         MaterialRegistry.clear();
         NativeCollisionTelemetry.drain();
+        PlotPhysicsProbe.clear();
         SableContactQueue.drain();
         SableFrameCapture.clear();
         acceptanceReport.close();
@@ -125,7 +129,7 @@ public final class PhysicalDestroyDeform {
         if(++ticks%100!=0)return;
         acceptanceReport.log(LOGGER);
         LOGGER.info("[PDD-OBS] phase=SUMMARY physicsSnapshots={} nativeRecords={} callbackRecords={} " +
-                "nativeDropped={} callbackDropped={} nativeMalformed={} nativeCapSaturatedPolls={} reason=READ_ONLY " +
+                "nativeDropped={} callbackDropped={} nativeMalformed={} nativeCapSaturatedPolls={} sourceTruncation=UNVERIFIED reason=READ_ONLY " +
                 "worldMutation={}",SableFrameCapture.summary(),
                 NativeCollisionTelemetry.total()-lastNative,
                 SableContactQueue.total()-lastCallbacks,

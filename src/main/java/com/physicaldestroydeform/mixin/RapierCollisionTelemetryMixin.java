@@ -11,6 +11,9 @@ import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
+import org.spongepowered.asm.mixin.injection.Inject;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+import com.physicaldestroydeform.plot.PlotPhysicsProbe;
 
 /** Preserve Sable original array; tag the tick and dimension of its post-solver
  * native effects for conservative, independent Plot-Plot normal verification. */
@@ -19,6 +22,12 @@ public abstract class RapierCollisionTelemetryMixin {
     @Shadow @Final private ServerLevel level;
     // Actual Sable 2.0.6 Rapier JAR field: map from native runtime IDs to owners.
     @Shadow @Final private Int2ObjectMap<ServerSubLevel> activeSubLevels;
+
+    @Inject(method="prePhysicsTicks()V",at=@At("HEAD"),remap=false,require=1)
+    private void pdd$beforeNativePhysics(CallbackInfo ci) {
+        try {PlotPhysicsProbe.beforeNativeTick(level,activeSubLevels);}
+        catch(RuntimeException|LinkageError observerError) {NativeCollisionTelemetry.observerError();}
+    }
 
     private OwnerFrame pdd$nativeOwner(int runtimeId) {
         ServerSubLevel sub=activeSubLevels.get(runtimeId);
