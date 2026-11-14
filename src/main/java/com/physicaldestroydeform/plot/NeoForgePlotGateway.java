@@ -35,6 +35,8 @@ public final class NeoForgePlotGateway implements WorldCommitCore.WorldGateway {
     private final PlotCommitService service;
     private final PlotOwnerFence fence=new PlotOwnerFence();
     private boolean inMutation;
+    private SparseStateKey lastBreakKey;
+    private boolean lastBreakWitness;
     public NeoForgePlotGateway(MinecraftServer server,PlotCommitService service){
         this.server=Objects.requireNonNull(server);this.service=Objects.requireNonNull(service);
     }
@@ -178,6 +180,8 @@ public final class NeoForgePlotGateway implements WorldCommitCore.WorldGateway {
         }catch(RuntimeException|LinkageError error){return WorldCommitCore.Permission.UNKNOWN;}
     }
     @Override public boolean breakVanillaOnce(SparseStateKey virtual){
+        lastBreakKey=null;
+        lastBreakWitness=false;
         if(!isServerThread())return false;
         Cell cell=locate(virtual,false);
         if(cell==null||inMutation)return false;
@@ -190,12 +194,24 @@ public final class NeoForgePlotGateway implements WorldCommitCore.WorldGateway {
         String dim=cell.real().dimension();
         String target=cell.real().ownerId()+":"+cell.local();
         PlotPhysicsProbe.beforeBreak(cell.sub(),dim,target);
+        BlockState expected=cell.accessor().getBlockState(cell.local());
+        if(expected==null || expected.isAir()
+                || !(BuiltInRegistries.BLOCK.getKey(expected.getBlock())+"|"+expected)
+                    .equals(observation.fingerprint()))return false;
+        PlotBreakMutationWitness.begin(cell.level(),cell.allocated(),expected);
+        lastBreakKey=virtual;
         inMutation=true;service.beginOwnBreak(virtual);
         try {
             boolean result=cell.accessor().destroyBlock(cell.local(),true,null,512);
             PlotPhysicsProbe.afterBreak(cell.sub(),dim,target,result);
             return result;
-        } finally {service.endOwnBreak();inMutation=false;}
+        } finally {
+            lastBreakWitness=PlotBreakMutationWitness.end();
+            service.endOwnBreak();inMutation=false;
+        }
+    }
+    @Override public boolean witnessedBreakToAir(SparseStateKey key){
+        return isServerThread() && lastBreakWitness && key.equals(lastBreakKey);
     }
     @Override public void onBreakException(SparseStateKey virtual,RuntimeException failure){
         LOG.error("[PDD-PLOT-BREAK] phase=EXCEPTION key={} result=PARTIAL_QUARANTINED " +
@@ -204,6 +220,13 @@ public final class NeoForgePlotGateway implements WorldCommitCore.WorldGateway {
     @Override public void onBreakReadback(SparseStateKey virtual,boolean apiResult,
             WorldCommitCore.Observation reread,WorldCommitCore.BreakReadback status){
         if(status==WorldCommitCore.BreakReadback.CONFIRMED_AIR)return;
+        if(status==WorldCommitCore.BreakReadback.CONFIRMED_AIR_MUTATION_WITNESS){
+            LOG.info("[PDD-PLOT-WITNESS] sessionId={} phase=CONFIRMED_BLOCK_TO_AIR " +
+                    "key={} result=APPLIED_BREAK source=LEVEL_CHUNK_RETURN " +
+                    "nativeMassCollider=UNVERIFIED",
+                    PlotPhysicsProbe.sessionId(),virtual);
+            return;
+        }
         String explanation=reread==null?readbackMissingReason(virtual):
                 (reread.loaded()?"PRESENT_OR_BE":"UNLOADED");
         SparseStateKey real;

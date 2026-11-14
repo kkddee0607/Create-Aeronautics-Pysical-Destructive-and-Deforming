@@ -18,7 +18,7 @@ public final class WorldCommitCore {
     public enum Permission { ALLOW, DENY, UNKNOWN }
     /** Diagnostic classification only; a native/API acknowledgement is not a verified block mutation. */
     public enum BreakReadback { CONFIRMED_AIR, API_REJECTED, OWNER_OR_CHUNK_UNAVAILABLE,
-        CHUNK_UNLOADED, BLOCK_REMAINS, AIR_WITH_BLOCK_ENTITY }
+        CHUNK_UNLOADED, BLOCK_REMAINS, AIR_WITH_BLOCK_ENTITY, CONFIRMED_AIR_MUTATION_WITNESS }
     public static BreakReadback classifyBreakReadback(boolean apiResult,Observation reread) {
         if(!apiResult)return BreakReadback.API_REJECTED;
         if(reread==null)return BreakReadback.OWNER_OR_CHUNK_UNAVAILABLE;
@@ -49,6 +49,11 @@ public final class WorldCommitCore {
         Permission canBreak(SparseStateKey key,Observation expected);
         /** Execute at most once. Implementation calls vanilla destroy/drop exactly once; no manual drops. */
         boolean breakVanillaOnce(SparseStateKey key);
+        /** Authoritative only when the gateway observed the *same* loaded chunk cell
+         * complete its original-state -> AIR mutation during this one break call.
+         * Never infer success from API=true or owner removal by itself.
+         */
+        default boolean witnessedBreakToAir(SparseStateKey key) { return false; }
         /** Non-authoritative, read-only diagnostic. Must never influence a durable receipt. */
         default void onBreakReadback(SparseStateKey key,boolean apiResult,
                                      Observation reread,BreakReadback status) { }
@@ -274,10 +279,17 @@ public final class WorldCommitCore {
         try {
             boolean apiResult=world.breakVanillaOnce(intent.key());
             Observation reread=world.readIfLoaded(intent.key());
-            if(reread!=null && reread.loaded() && reread.isAir() && !original.isAir()){
-                // Our own vanilla break suppresses the LevelChunk replacement mixin.
-                // Persist the same-state re-placement generation before publishing APPLIED;
-                // otherwise a queued older collision could hit a newly placed same block.
+            BreakReadback readback=classifyBreakReadback(apiResult,reread);
+            // The Plot may disappear during Sable's synchronous onBlockChange hook.
+            // Accept its lost readback ONLY with a matching RETURN-of-setBlockState
+            // witness. API=true alone does not prove the intended block changed.
+            boolean witnessed=confirmedMutationWitness(world,intent.key());
+            if(apiResult && readback==BreakReadback.OWNER_OR_CHUNK_UNAVAILABLE && witnessed)
+                readback=BreakReadback.CONFIRMED_AIR_MUTATION_WITNESS;
+            if((reread!=null && reread.loaded() && reread.isAir() && !original.isAir())
+                    || witnessed){
+                // Durable incarnation revision BEFORE APPLIED, also when Sable
+                // removes the Plot and makes ordinary readback impossible.
                 try {journal.replaceBlock(intent.key().dimension(),intent.key().x(),
                         intent.key().y(),intent.key().z());}
                 catch(IOException failed){
@@ -285,21 +297,37 @@ public final class WorldCommitCore {
                     return new Decision(Outcome.QUARANTINED,"BREAK_REVISION_FSYNC_FAILED",null);
                 }
             }
-            BreakReadback readback=classifyBreakReadback(apiResult,reread);
             // The observer cannot promote uncertain results to APPLIED, even if it fails.
             try {world.onBreakReadback(intent.key(),apiResult,reread,readback);}
             catch(RuntimeException|LinkageError ignored) { /* diagnostic failure is not a block outcome */ }
-            if(readback==BreakReadback.CONFIRMED_AIR)
-                return finish(intent,WorldReceiptJournal.Status.APPLIED,Outcome.APPLIED_BREAK,"WORLD_REREAD_AIR",
+            if(readback==BreakReadback.CONFIRMED_AIR
+                    || readback==BreakReadback.CONFIRMED_AIR_MUTATION_WITNESS)
+                return finish(intent,WorldReceiptJournal.Status.APPLIED,Outcome.APPLIED_BREAK,
+                        readback==BreakReadback.CONFIRMED_AIR?"WORLD_REREAD_AIR":"PLOT_RETURN_WITNESSED_AIR",
                         new WorldReceiptJournal.State(intent.key(),intent.expectedIncarnation(),0,0,intent.materialGeneration(),tick),tick);
             return finish(intent,WorldReceiptJournal.Status.PARTIAL_QUARANTINED,Outcome.QUARANTINED,
                     "BREAK_RESULT_UNCERTAIN_API_"+apiResult,null,tick);
         }catch(RuntimeException unknown){
+            // If the block did change before an exception, invalidate the old
+            // incarnation, but NEVER claim a successful break: the API result
+            // and drop side effects are now uncertain.
+            if(confirmedMutationWitness(world,intent.key())){
+                try {journal.replaceBlock(intent.key().dimension(),intent.key().x(),
+                        intent.key().y(),intent.key().z());}
+                catch(IOException failed){
+                    ioFault=true;
+                    return new Decision(Outcome.QUARANTINED,"BREAK_EXCEPTION_REVISION_FSYNC_FAILED",null);
+                }
+            }
             try {world.onBreakException(intent.key(),unknown);}
             catch(RuntimeException|LinkageError ignored) { /* diagnostics must not affect receipt */ }
             return finish(intent,WorldReceiptJournal.Status.PARTIAL_QUARANTINED,Outcome.QUARANTINED,
                     "BREAK_EXCEPTION_"+unknown.getClass().getSimpleName(),null,tick);
         }
+    }
+    private static boolean confirmedMutationWitness(WorldGateway world,SparseStateKey key) {
+        try {return world.witnessedBreakToAir(key);}
+        catch(RuntimeException|LinkageError unavailable){return false;}
     }
     private static String preflight(Intent intent,Observation read) {
         SparseStateKey k=intent.key();

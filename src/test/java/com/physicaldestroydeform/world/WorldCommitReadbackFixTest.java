@@ -14,9 +14,9 @@ class WorldCommitReadbackFixTest {
     private static final SparseStateKey KEY=new SparseStateKey("minecraft:overworld","WORLD",
             "minecraft:overworld",1,1,64,1,"minecraft:dirt");
     private static final MaterialProperties MATERIAL=new MaterialProperties(30,80,0,0,false);
-    private static final class Fake implements WorldCommitCore.WorldGateway {
+    private static class Fake implements WorldCommitCore.WorldGateway {
         int breaks,drops,observations;
-        boolean air,apiResult=true,vanishAfterBreak,throwFromObserver,throwFromBreak;
+        boolean air,apiResult=true,vanishAfterBreak,throwFromObserver,throwFromBreak,witness;
         boolean exceptionObserved;
         WorldCommitCore.BreakReadback status;
         @Override public boolean isServerThread(){return true;}
@@ -36,6 +36,7 @@ class WorldCommitReadbackFixTest {
             if(throwFromBreak)throw new IllegalStateException("mutated before exception");
             return apiResult;
         }
+        @Override public boolean witnessedBreakToAir(SparseStateKey k){return witness;}
         @Override public void onBreakException(SparseStateKey k,RuntimeException failure){
             exceptionObserved=true;
         }
@@ -79,6 +80,52 @@ class WorldCommitReadbackFixTest {
         assertEquals(WorldCommitCore.Outcome.QUARANTINED,result.result());
         assertEquals(true,fake.exceptionObserved);
         assertEquals(WorldReceiptJournal.Status.PARTIAL_QUARANTINED,result.receipt().status());
+    }
+    @Test void vanishedOwnerWithMatchingChunkWitnessIsAppliedExactlyOnce() throws Exception {
+        var fake=new Fake();fake.vanishAfterBreak=true;fake.witness=true;
+        var result=execute("witness",fake);
+        assertEquals(WorldCommitCore.Outcome.APPLIED_BREAK,result.result());
+        assertEquals(WorldReceiptJournal.Status.APPLIED,result.receipt().status());
+        assertEquals("PLOT_RETURN_WITNESSED_AIR",result.reason());
+        assertEquals(WorldCommitCore.BreakReadback.CONFIRMED_AIR_MUTATION_WITNESS,fake.status);
+        var restored=new WorldPersistentJournal(temp.resolve("witness"),temp.resolve("witness.legacy.wal"));
+        assertEquals(1,restored.revision(KEY.dimension(),KEY.x(),KEY.y(),KEY.z()),
+                "incarnation tombstone must be durable before publishing APPLIED");
+        assertEquals(WorldReceiptJournal.Status.APPLIED,restored.receipt("witness").status());
+    }
+    @Test void falseApiCannotBecomeAppliedEvenWithWitness() throws Exception {
+        var fake=new Fake();fake.vanishAfterBreak=true;fake.apiResult=false;fake.witness=true;
+        var result=execute("falseWitness",fake);
+        assertEquals(WorldCommitCore.Outcome.QUARANTINED,result.result());
+        assertEquals(WorldReceiptJournal.Status.PARTIAL_QUARANTINED,result.receipt().status());
+        var restored=new WorldPersistentJournal(temp.resolve("falseWitness"),
+                temp.resolve("falseWitness.legacy.wal"));
+        assertEquals(1,restored.revision(KEY.dimension(),KEY.x(),KEY.y(),KEY.z()),
+                "even an uncertain API result must invalidate a proven changed cell");
+    }
+    @Test void exceptionWithWitnessInvalidatesStateButDoesNotClaimSuccess() throws Exception {
+        var fake=new Fake();fake.throwFromBreak=true;fake.vanishAfterBreak=true;fake.witness=true;
+        var result=execute("exceptionWitness",fake);
+        assertEquals(WorldCommitCore.Outcome.QUARANTINED,result.result());
+        var restored=new WorldPersistentJournal(temp.resolve("exceptionWitness"),
+                temp.resolve("exceptionWitness.legacy.wal"));
+        assertEquals(1,restored.revision(KEY.dimension(),KEY.x(),KEY.y(),KEY.z()));
+        assertEquals(WorldReceiptJournal.Status.PARTIAL_QUARANTINED,
+                restored.receipt("exceptionWitness").status());
+    }
+    @Test void witnessCannotOverrideNonAirReadback() throws Exception {
+        var fake=new Fake(){
+            @Override public WorldCommitCore.Observation readIfLoaded(SparseStateKey k){
+                var o=super.readIfLoaded(k);
+                if(breaks>0)return new WorldCommitCore.Observation(k.dimension(),k.fingerprint(),
+                        k.ownerGeneration(),"incarnation",true,false,false,false,false,false);
+                return o;
+            }
+        };
+        fake.witness=true;
+        var result=execute("rereplaced",fake);
+        assertEquals(WorldCommitCore.Outcome.QUARANTINED,result.result());
+        assertEquals(WorldCommitCore.BreakReadback.BLOCK_REMAINS,fake.status);
     }
     @Test void classificationNamesAllReadbackBranches(){
         var unloaded=new WorldCommitCore.Observation("x","y",1,"i",false,false,false,false,false,false);
