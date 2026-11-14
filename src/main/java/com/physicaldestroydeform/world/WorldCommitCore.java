@@ -54,6 +54,11 @@ public final class WorldCommitCore {
          * Never infer success from API=true or owner removal by itself.
          */
         default boolean witnessedBreakToAir(SparseStateKey key) { return false; }
+        /** Plot-only read-only safety gate, before PREPARED. Null means eligible.
+         * A deferred intent retains its original durable DEFERRED receipt and Q.
+         * World gateways use the default and remain unaffected.
+         */
+        default String deferBreakReason(SparseStateKey key) { return null; }
         /** Non-authoritative, read-only diagnostic. Must never influence a durable receipt. */
         default void onBreakReadback(SparseStateKey key,boolean apiResult,
                                      Observation reread,BreakReadback status) { }
@@ -117,7 +122,10 @@ public final class WorldCommitCore {
         var results=new ArrayList<Decision>();
         // One WAL fsync per receipt: bound the entire operation batch, not only breaks.
         int attemptedBreaks=0,operations=0,limit=Math.min(MAX_QUEUED,maxOperations);
-        while(!queue.isEmpty() && operations++<limit) {
+        // One visit per entry per tick: a deferred owner must not monopolize
+        // an otherwise short queue or be rechecked repeatedly in this tick.
+        int candidates=queue.size();
+        while(!queue.isEmpty() && candidates-->0 && operations++<limit) {
             Intent intent=queue.removeFirst();queuedIds.remove(intent.applyId());
             // External split quarantine may durably terminalize a queued Plot intent.
             // A terminal receipt must NEVER be re-executed from an older in-memory queue.
@@ -166,7 +174,21 @@ public final class WorldCommitCore {
                 results.add(new Decision(Outcome.DEFERRED,"BREAK_CAP",journal.receipt(intent.applyId())));
                 break;
             }
+            if(plan.thresholdReached()) {
+                String hold=world.deferBreakReason(intent.key());
+                if(hold!=null) {
+                    queue.addLast(intent);queuedIds.add(intent.applyId());
+                    results.add(new Decision(Outcome.DEFERRED,hold,journal.receipt(intent.applyId())));
+                    continue;
+                }
+            }
             Decision result=apply(world,intent,observation,plan,tick);
+            if(result.result()==Outcome.DEFERRED && result.reason().startsWith("AFTER_EVENTS_PLOT_GATE_")) {
+                // A protection callback may itself change Sable's HeatMap.
+                // Defer with the original unprepared ApplyId instead of
+                // pretending that Vanilla was invoked or reissuing Q.
+                queue.addLast(intent);queuedIds.add(intent.applyId());
+            }
             results.add(result);
             if(plan.thresholdReached() && result.result()!=Outcome.DEFERRED)attemptedBreaks++;
         }
@@ -274,6 +296,10 @@ public final class WorldCommitCore {
         // Recheck after event/claim hook in case another mod changed the block.
         if(!Objects.equals(world.readIfLoaded(intent.key()),original))
             return finish(intent,WorldReceiptJournal.Status.ABORTED,Outcome.ABORTED,"CAS_AFTER_EVENT",null,tick);
+        String changedLifecycle=world.deferBreakReason(intent.key());
+        if(changedLifecycle!=null)
+            return new Decision(Outcome.DEFERRED,"AFTER_EVENTS_PLOT_GATE_"+changedLifecycle,
+                    journal.receipt(intent.applyId()));
         Decision prepared=finish(intent,WorldReceiptJournal.Status.PREPARED,Outcome.DEFERRED,"PREPARED_DURABLE",null,tick);
         if(prepared.result()!=Outcome.DEFERRED || ioFault)return prepared;
         try {

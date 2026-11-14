@@ -1,4 +1,4 @@
-# Physical Destruction and Deforming (PDD) — 0.5.1-moreFix
+# Physical Destruction and Deforming (PDD) — 0.5.1-safeFix
 
 **Minecraft Java 1.21.1 · NeoForge 21.1.228+ · Create 6.0.10 · Create Aeronautics 1.3.2 · Sable 2.0.6**
 
@@ -16,10 +16,12 @@ PDD is a server-authoritative Create Aeronautics addon that consumes **Sable's o
 | Split and owner lifecycle | Tracks physical object identity, runtime ID, UUID, generation and Plot center. Sable `getSplitFromSubLevel` and owner mismatches trigger **durable ORPHAN_QUARANTINE** before bounded cleanup of old-owner damage. It never copies ghost damage to another Plot. |
 | Plot removal during break | A tightly scoped thread-local witness detects completed original-block→AIR changes from `LevelChunk.setBlockState` without resolving a removed owner. Only matching owner/allocated position/original state and API=true may close an otherwise unavailable readback; split-parent state remains quarantined and no physics rebuild is fabricated. |
 | Plot storage | Independent `data/pdd-plot-0.5.1/` schema-2 snapshot/WAL with per-Plot virtual namespace, CRC and durable receipts. It cannot alias the existing `data/pdd-world-0.5.0/` or two Plot UUIDs at the same local coordinates. |
-| Per-tick protection | `pdd.plotMutationCapPerTick` defaults to **32** (caps total Plot commit operations, including damage-only); no forced chunk generation or loading. |
+| Per-tick protection | `pdd.plotMutationCapPerTick` defaults to **32** (caps all Plot commits). A per-owner break gate waits for Sable 2.0.6 HeatMap to finish its queued split work and spaces destructive attempts at least **3 server ticks** apart; no forced chunk loading. Existing DEFERRED receipts retain their original Q and expire safely. |
 | Deformation preparation | An immutable owner-local **MovePlan candidate** contract with D/K yield, break-first precedence, signed-axis validation and reserved-Q accounting exists and is testable. **0.5.1 does not move blocks**, infer a direction from unverified normals, or claim a planned move as applied. |
 
 The later roadmap, including actual physical movement, full split lineage migration, stress-graph mutation, cracks/UI, and explosion/projectile/entity causes, **is not claimed as implemented in 0.5.1**. See [`docs/PDD-1.0.8-Integrated-Design-Specification.md`](docs/PDD-1.0.8-Integrated-Design-Specification.md) for version boundaries.
+
+**0.5.1-safeFix limitation:** Sable 2.0.6 itself can still fail inside `SubLevelHeatMapManager.split()` even with single-break pacing. PDD cannot repair Sable's internal ownership registry without a verified Sable change. The HeatMap gate is a fail-closed prevention layer, **not proof that native split or save failures are fixed**. Test on a copy of the world.
 
 ## Numerical and persistence contracts
 
@@ -49,6 +51,7 @@ Local commands, when a full NeoForge Gradle environment is available:
 | Java system property | Default | Effect |
 |---|---:|---|
 | `-Dpdd.plotMutationCapPerTick=32` | `32` | Bounded Plot commit operations per server tick; clamped to `1..4096`. |
+| `-Dpdd.plotBreakSpacingTicks=3` | `3` | Minimum tick spacing between PDD structural break attempts for the same Plot; clamped to `2..40`. Sable HeatMap pending work always defers independently. |
 | `-Dpdd.worldBreakCapPerTick=64` | `64` | Existing World break attempts per tick. |
 | `-Dpdd.realfix.forceGain=0.1` | `0.1` | Existing source F→Q coefficient. |
 | `-Dpdd.material.damageGain=2.6` | `2.6` | Existing damage gain. |

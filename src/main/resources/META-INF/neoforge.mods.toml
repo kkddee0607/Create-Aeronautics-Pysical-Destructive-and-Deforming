@@ -4,10 +4,10 @@ license="MIT"
 
 [[mods]]
 modId="physical_destroy_deform"
-version="0.5.1-moreFix"
+version="0.5.1-safeFix"
 displayName="Create Aeronautics: Physical Destruction and Deforming"
 authors="PDD contributors"
-description='''PDD 0.5.1-moreFix: Sable Plot owner-local safe block damage and destruction with separate durable WAL/receipts, owner epoch and split orphan quarantine, BE/multiblock and claim veto, bounded per-tick mutation, and non-executable deformation MovePlan preparation. Preserves 0.5.0 World commit and sealed F/Q source accounting. Actual Plot movement, split lineage transfer, stress mutation and client damage visuals remain roadmap features.'''
+description='''PDD 0.5.1-safeFix: Sable Plot owner-local safe block damage and destruction with separate durable WAL/receipts, owner epoch and split orphan quarantine, BE/multiblock and claim veto, bounded per-tick mutation plus Sable HeatMap-safe per-owner Plot break spacing, and non-executable deformation MovePlan preparation. Preserves 0.5.0 World commit and sealed F/Q source accounting. Actual Plot movement, split lineage transfer, stress mutation and client damage visuals remain roadmap features.'''
 
 [[mixins]]
 config="pdd.mixins.json"

@@ -85,6 +85,10 @@ public final class PlotCommitService {
                         "massCollider=SABLE_NORMAL_BLOCK_CHANGE_HOOK_NOT_INDEPENDENTLY_VERIFIED",
                 cap,journal.size(),journal.receiptCount(),unresolved.size(),quarantined.size(),
                 WorldPersistentJournal.SCHEMA);
+        log.info("[PDD-PLOT-SAFE] phase=POLICY source=SABLE_2_0_6_HEATMAP_READ_ONLY " +
+                "breakSpacingTicks={} pendingAction=DEFER_BEFORE_PREPARED " +
+                "unknownState=FAIL_CLOSED splitAndNativeSave=NOT_INDEPENDENTLY_VERIFIED",
+                gateway.breakSpacingTicks());
     }
     private void unregisterState(SparseStateKey virtual){
         if(!PlotKeyCodec.isPlotStorage(virtual))return;
@@ -258,6 +262,7 @@ public final class PlotCommitService {
             return;
         }
         gateway.detectLifecycle();
+        gateway.pruneSafetyHistory(tick);
         for(var owner:gateway.fence().orphanedSnapshot())orphan(owner,"OWNER_ID_OR_EPOCH_CHANGED");
         if(fault)return;
         // Bounded sparse-state deletion: owner is blocked from writes as soon as
@@ -314,8 +319,10 @@ public final class PlotCommitService {
             lastSummary=tick;
             log.info("[PDD-PLOT] phase=SUMMARY accepted={} damaged={} broken={} rejected={} " +
                             "blocked={} splitOrphans={} pending={} orphanCleanup={} persistentStates={} receipts={} " +
-                            "walBytes={} fault={}",accepted,damaged,broken,rejected,blocked,splitOrphans,
-                    core.queued(),orphanCleanup.size(),journal.size(),journal.receiptCount(),journal.bytes(),fault||core.ioFault());
+                            "walBytes={} fault={} heatMapHolds={} breakSpacingHolds={} " +
+                            "breakSpacingTicks={}",accepted,damaged,broken,rejected,blocked,splitOrphans,
+                    core.queued(),orphanCleanup.size(),journal.size(),journal.receiptCount(),journal.bytes(),
+                    fault||core.ioFault(),gateway.heatMapHolds(),gateway.spacingHolds(),gateway.breakSpacingTicks());
         }
     }
     public void stop(){

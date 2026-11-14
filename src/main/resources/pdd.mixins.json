@@ -7,7 +7,8 @@
     "RapierCollisionTelemetryMixin",
     "SableUniversalCallbackMixin",
     "SableStepSnapshotMixin",
-    "WorldBlockReplacementMixin"
+    "WorldBlockReplacementMixin",
+    "SableHeatMapSafetyAccessor"
   ],
   "client": [
     "SableSnapshotPacketDiagnosticMixin"

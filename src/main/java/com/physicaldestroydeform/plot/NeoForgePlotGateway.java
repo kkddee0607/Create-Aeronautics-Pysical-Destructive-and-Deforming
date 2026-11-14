@@ -2,6 +2,7 @@ package com.physicaldestroydeform.plot;
 
 import com.mojang.authlib.GameProfile;
 import com.physicaldestroydeform.state.SparseStateKey;
+import com.physicaldestroydeform.mixin.SableHeatMapSafetyAccessor;
 import com.physicaldestroydeform.world.WorldCommitCore;
 import dev.ryanhcode.sable.api.sublevel.SubLevelContainer;
 import dev.ryanhcode.sable.sublevel.ServerSubLevel;
@@ -37,6 +38,11 @@ public final class NeoForgePlotGateway implements WorldCommitCore.WorldGateway {
     private boolean inMutation;
     private SparseStateKey lastBreakKey;
     private boolean lastBreakWitness;
+    /** At most one structural break attempt per owner over the configured tick gap. */
+    private final Map<PlotOwnerFence.Owner,Long> lastBreakTick=new HashMap<>();
+    private final int breakSpacingTicks=Math.max(2,Math.min(40,
+            Integer.getInteger("pdd.plotBreakSpacingTicks",3)));
+    private long heatMapHolds,spacingHolds;
     public NeoForgePlotGateway(MinecraftServer server,PlotCommitService service){
         this.server=Objects.requireNonNull(server);this.service=Objects.requireNonNull(service);
     }
@@ -132,6 +138,55 @@ public final class NeoForgePlotGateway implements WorldCommitCore.WorldGateway {
             // Missing owners may merely be unloaded. Never infer a split from absence.
         }
     }
+    /** Sable 2.0.6 HeatMap split can remain unfinished for multiple server ticks.
+     * Never submit another PDD Plot break while it has pending work. Sable's
+     * own split/assembly/collider code is not changed by PDD.
+     */
+    @Override public String deferBreakReason(SparseStateKey virtual) {
+        if(!isServerThread())return "PLOT_NOT_SERVER_THREAD";
+        Cell cell=locate(virtual,false);
+        if(cell==null)return "PLOT_OWNER_NOT_READY";
+        try {
+            var heat=cell.sub().getHeatMapManager();
+            if(!(heat instanceof SableHeatMapSafetyAccessor s)) {
+                if(++heatMapHolds==1 || heatMapHolds%256==0)
+                    LOG.warn("[PDD-PLOT-SAFE] phase=HEATMAP_UNVERIFIED owner={} " +
+                                    "runtimeBodyId={} holdCount={} action=DEFER_BEFORE_PREPARED",
+                            cell.sub().getUniqueId(),cell.sub().getRuntimeId(),heatMapHolds);
+                return "SABLE_HEATMAP_UNVERIFIED";
+            }
+            boolean initialized=s.pdd$initialized(), complete=s.pdd$splitComplete();
+            int flood=s.pdd$floodfill().size(), removed=s.pdd$removed().size(),
+                    starts=s.pdd$newStarts().size(), splitCells=s.pdd$subLevelSplits().size();
+            if(!initialized || !complete || flood>0 || removed>0 || starts>0 || splitCells>0) {
+                if(++heatMapHolds==1 || heatMapHolds%256==0)
+                    LOG.warn("[PDD-PLOT-SAFE] phase=WAIT_SABLE_HEATMAP " +
+                                    "owner={} generation={} runtimeBodyId={} initialized={} " +
+                                    "splitComplete={} floodfill={} removed={} newStarts={} splitCells={} " +
+                                    "holdCount={} action=DEFER_BEFORE_PREPARED",
+                            cell.sub().getUniqueId(),cell.real().ownerGeneration(),cell.sub().getRuntimeId(),
+                            initialized,complete,flood,removed,starts,splitCells,heatMapHolds);
+                return "SABLE_HEATMAP_PENDING_SPLIT";
+            }
+            var owner=PlotOwnerFence.Owner.of(cell.real());
+            Long previous=lastBreakTick.get(owner);
+            if(previous!=null && server.getTickCount()-previous<breakSpacingTicks) {
+                spacingHolds++;
+                return "PLOT_BREAK_SPACING";
+            }
+            return null;
+        } catch(RuntimeException|LinkageError unsafe) {
+            heatMapHolds++;
+            // A failed observation cannot grant a destructive mutation.
+            return "SABLE_HEATMAP_UNVERIFIED";
+        }
+    }
+    void pruneSafetyHistory(long tick){
+        if(tick%100==0)lastBreakTick.entrySet().removeIf(e->tick-e.getValue()>1200);
+    }
+    long heatMapHolds(){return heatMapHolds;}
+    long spacingHolds(){return spacingHolds;}
+    int breakSpacingTicks(){return breakSpacingTicks;}
     @Override public WorldCommitCore.Observation readIfLoaded(SparseStateKey virtual){
         Cell cell=locate(virtual,false);
         if(cell==null)return null;
@@ -199,6 +254,9 @@ public final class NeoForgePlotGateway implements WorldCommitCore.WorldGateway {
                 || !(BuiltInRegistries.BLOCK.getKey(expected.getBlock())+"|"+expected)
                     .equals(observation.fingerprint()))return false;
         PlotBreakMutationWitness.begin(cell.level(),cell.allocated(),expected);
+        // Reserve the owner slot BEFORE the irreversible Sable API call.
+        // A false return/exception is still one attempted mutation.
+        lastBreakTick.put(PlotOwnerFence.Owner.of(cell.real()),(long)server.getTickCount());
         lastBreakKey=virtual;
         inMutation=true;service.beginOwnBreak(virtual);
         try {

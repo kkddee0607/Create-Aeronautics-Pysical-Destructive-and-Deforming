@@ -28,7 +28,7 @@ import org.slf4j.LoggerFactory;
 @Mod(PhysicalDestroyDeform.MOD_ID)
 public final class PhysicalDestroyDeform {
     public static final String MOD_ID = "physical_destroy_deform";
-    public static final String BUILD_VERSION = "0.5.1-moreFix";
+    public static final String BUILD_VERSION = "0.5.1-safeFix";
     private static final Logger LOGGER = LoggerFactory.getLogger(PhysicalDestroyDeform.class);
     private final AcceptanceReport acceptanceReport = new AcceptanceReport();
     private final RealFixRuntimeBridge bridge = new RealFixRuntimeBridge();
@@ -74,7 +74,7 @@ public final class PhysicalDestroyDeform {
             LOGGER.error("[PDD-PLOT] phase=START status=DISABLED reason=JOURNAL_INIT_FAILED " +
                     "plotMutation=OFF worldMutation=UNCHANGED",unsafePlotJournal);
         }
-        LOGGER.info("[PDD-0.5.1] phase=START bridge=READ_ONLY nativeScalar=GAME_FORCE_PROXY " +
+        LOGGER.info("[PDD-0.5.1-safeFix] phase=START bridge=READ_ONLY nativeScalar=GAME_FORCE_PROXY " +
                 "newNativeABI=NOT_REQUIRED customNullCallback=DISABLED faceRecovery=MULTI_SURFACE_PLUS_SPARSE_SHAPE_HALO worldMutation={} plotMutation={} ",
                 worldCommit==null?"DISABLED":"WORLD_STATIC_ONLY",plotCommit==null?"DISABLED":"SABLE_PLOT");
     }
@@ -93,7 +93,7 @@ public final class PhysicalDestroyDeform {
         SableContactQueue.drain();
         SableFrameCapture.clear();
         acceptanceReport.close();
-        LOGGER.info("[PDD-0.5.1] phase=STOP state=CLEARED worldMutation=STOPPED");
+        LOGGER.info("[PDD-0.5.1-safeFix] phase=STOP state=CLEARED worldMutation=STOPPED");
     }
     private void onServerTick(ServerTickEvent.Post event) {
         // Snapshot and native inputs are consumed exactly once on the server tick.
