@@ -39,10 +39,10 @@ public final class NeoForgePlotGateway implements WorldCommitCore.WorldGateway {
     private SparseStateKey lastBreakKey;
     private boolean lastBreakWitness;
     /** At most one structural break attempt per owner over the configured tick gap. */
-    private final Map<PlotOwnerFence.Owner,Long> lastBreakTick=new HashMap<>();
-    private final int breakSpacingTicks=Math.max(2,Math.min(40,
-            Integer.getInteger("pdd.plotBreakSpacingTicks",3)));
-    private long heatMapHolds,spacingHolds;
+    private final Map<PlotOwnerFence.Owner,PlotBreakPacing.Attempt> lastBreakAttempt=new HashMap<>();
+    private final int breakSpacingTicks=PlotBreakPacing.spacing(
+            Integer.getInteger("pdd.plotBreakSpacingTicks",1));
+    private long heatMapHolds,spacingHolds,tickWitnessHolds;
     public NeoForgePlotGateway(MinecraftServer server,PlotCommitService service){
         this.server=Objects.requireNonNull(server);this.service=Objects.requireNonNull(service);
     }
@@ -146,7 +146,11 @@ public final class NeoForgePlotGateway implements WorldCommitCore.WorldGateway {
         if(!isServerThread())return "PLOT_NOT_SERVER_THREAD";
         Cell cell=locate(virtual,false);
         if(cell==null)return "PLOT_OWNER_NOT_READY";
+        return deferBreakReason(cell);
+    }
+    private String deferBreakReason(Cell cell) {
         try {
+            if(cell.sub().isRemoved())return "PLOT_OWNER_NOT_READY";
             var heat=cell.sub().getHeatMapManager();
             if(!(heat instanceof SableHeatMapSafetyAccessor s)) {
                 if(++heatMapHolds==1 || heatMapHolds%256==0)
@@ -169,12 +173,18 @@ public final class NeoForgePlotGateway implements WorldCommitCore.WorldGateway {
                 return "SABLE_HEATMAP_PENDING_SPLIT";
             }
             var owner=PlotOwnerFence.Owner.of(cell.real());
-            Long previous=lastBreakTick.get(owner);
-            if(previous!=null && server.getTickCount()-previous<breakSpacingTicks) {
-                spacingHolds++;
-                return "PLOT_BREAK_SPACING";
+            long completed=(Object)cell.sub() instanceof PlotHeatMapTickWitness witness
+                    ?witness.pdd$completedHeatMapServerTick():-1;
+            long tick=server.getTickCount();
+            String hold=PlotBreakPacing.holdReason(tick,completed,lastBreakAttempt.get(owner),breakSpacingTicks);
+            if("PLOT_BREAK_SPACING".equals(hold)) spacingHolds++;
+            else if(hold!=null) {
+                if(++tickWitnessHolds==1 || tickWitnessHolds%256==0)
+                    LOG.warn("[PDD-PLOT-SAFE] phase=WAIT_SABLE_TICK owner={} generation={} " +
+                                    "serverTick={} completedHeatMapTick={} holdCount={} action=DEFER_BEFORE_PREPARED",
+                            owner.uuid(),owner.generation(),tick,completed,tickWitnessHolds);
             }
-            return null;
+            return hold;
         } catch(RuntimeException|LinkageError unsafe) {
             heatMapHolds++;
             // A failed observation cannot grant a destructive mutation.
@@ -182,10 +192,11 @@ public final class NeoForgePlotGateway implements WorldCommitCore.WorldGateway {
         }
     }
     void pruneSafetyHistory(long tick){
-        if(tick%100==0)lastBreakTick.entrySet().removeIf(e->tick-e.getValue()>1200);
+        if(tick%100==0)lastBreakAttempt.entrySet().removeIf(e->tick-e.getValue().tick()>1200);
     }
     long heatMapHolds(){return heatMapHolds;}
     long spacingHolds(){return spacingHolds;}
+    long tickWitnessHolds(){return tickWitnessHolds;}
     int breakSpacingTicks(){return breakSpacingTicks;}
     @Override public WorldCommitCore.Observation readIfLoaded(SparseStateKey virtual){
         Cell cell=locate(virtual,false);
@@ -253,10 +264,14 @@ public final class NeoForgePlotGateway implements WorldCommitCore.WorldGateway {
         if(expected==null || expected.isAir()
                 || !(BuiltInRegistries.BLOCK.getKey(expected.getBlock())+"|"+expected)
                     .equals(observation.fingerprint()))return false;
+        // Last defensive check at the irreversible call boundary. The core has
+        // already checked before PREPARED; a newly uncertain state is not retried.
+        if(deferBreakReason(cell)!=null)return false;
         PlotBreakMutationWitness.begin(cell.level(),cell.allocated(),expected);
         // Reserve the owner slot BEFORE the irreversible Sable API call.
         // A false return/exception is still one attempted mutation.
-        lastBreakTick.put(PlotOwnerFence.Owner.of(cell.real()),(long)server.getTickCount());
+        lastBreakAttempt.put(PlotOwnerFence.Owner.of(cell.real()),
+                new PlotBreakPacing.Attempt(server.getTickCount(),false));
         lastBreakKey=virtual;
         inMutation=true;service.beginOwnBreak(virtual);
         try {
@@ -277,6 +292,14 @@ public final class NeoForgePlotGateway implements WorldCommitCore.WorldGateway {
     }
     @Override public void onBreakReadback(SparseStateKey virtual,boolean apiResult,
             WorldCommitCore.Observation reread,WorldCommitCore.BreakReadback status){
+        if(apiResult && virtual.equals(lastBreakKey) &&
+                (status==WorldCommitCore.BreakReadback.CONFIRMED_AIR
+                    || status==WorldCommitCore.BreakReadback.CONFIRMED_AIR_MUTATION_WITNESS)){
+            var owner=PlotOwnerFence.Owner.of(PlotKeyCodec.real(virtual));
+            var attempt=lastBreakAttempt.get(owner);
+            if(attempt!=null && attempt.tick()==server.getTickCount())
+                lastBreakAttempt.put(owner,new PlotBreakPacing.Attempt(attempt.tick(),true));
+        }
         if(status==WorldCommitCore.BreakReadback.CONFIRMED_AIR)return;
         if(status==WorldCommitCore.BreakReadback.CONFIRMED_AIR_MUTATION_WITNESS){
             LOG.info("[PDD-PLOT-WITNESS] sessionId={} phase=CONFIRMED_BLOCK_TO_AIR " +

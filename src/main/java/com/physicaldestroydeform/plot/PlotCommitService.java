@@ -85,8 +85,8 @@ public final class PlotCommitService {
                         "massCollider=SABLE_NORMAL_BLOCK_CHANGE_HOOK_NOT_INDEPENDENTLY_VERIFIED",
                 cap,journal.size(),journal.receiptCount(),unresolved.size(),quarantined.size(),
                 WorldPersistentJournal.SCHEMA);
-        log.info("[PDD-PLOT-SAFE] phase=POLICY source=SABLE_2_0_6_HEATMAP_READ_ONLY " +
-                "breakSpacingTicks={} pendingAction=DEFER_BEFORE_PREPARED " +
+        log.info("[PDD-PLOT-SAFE] phase=POLICY source=SABLE_2_0_6_HEATMAP_READ_ONLY tickWitness=REQUIRED_CURRENT_SERVER_TICK " +
+                "breakSpacingTicks={} uncertainSpacingMin=3 pendingAction=DEFER_BEFORE_PREPARED " +
                 "unknownState=FAIL_CLOSED splitAndNativeSave=NOT_INDEPENDENTLY_VERIFIED",
                 gateway.breakSpacingTicks());
     }
@@ -302,10 +302,10 @@ public final class PlotCommitService {
             if(result.result()==WorldCommitCore.Outcome.QUARANTINED)blocked++;
             if(count++<MAX_LOGS_PER_TICK && result.result()!=WorldCommitCore.Outcome.DEFERRED){
                 var r=result.receipt();var state=r==null?null:journal.get(r.key());
-                log.info("[PDD-PLOT] phase=COMMIT result={} reason={} id={} target={} " +
+                log.info("[PDD-PLOT] phase=COMMIT serverTick={} result={} reason={} id={} target={} " +
                                 "damage={} remainder={} status={} blockMutation={} " +
                                 "sableLifecycle=VANILLA_CHANGE_HOOK_REQUIRES_INGAME_VERIFICATION",
-                        result.result(),result.reason(),r==null?"NONE":r.id(),
+                        tick,result.result(),result.reason(),r==null?"NONE":r.id(),
                         r==null?"NONE":PlotKeyCodec.real(r.key()),
                         state==null?0:state.damage(),state==null?0:state.remainder(),
                         r==null?"NONE":r.status(),result.result()==WorldCommitCore.Outcome.APPLIED_BREAK);
@@ -320,9 +320,9 @@ public final class PlotCommitService {
             log.info("[PDD-PLOT] phase=SUMMARY accepted={} damaged={} broken={} rejected={} " +
                             "blocked={} splitOrphans={} pending={} orphanCleanup={} persistentStates={} receipts={} " +
                             "walBytes={} fault={} heatMapHolds={} breakSpacingHolds={} " +
-                            "breakSpacingTicks={}",accepted,damaged,broken,rejected,blocked,splitOrphans,
+                            "breakSpacingTicks={} tickWitnessHolds={}",accepted,damaged,broken,rejected,blocked,splitOrphans,
                     core.queued(),orphanCleanup.size(),journal.size(),journal.receiptCount(),journal.bytes(),
-                    fault||core.ioFault(),gateway.heatMapHolds(),gateway.spacingHolds(),gateway.breakSpacingTicks());
+                    fault||core.ioFault(),gateway.heatMapHolds(),gateway.spacingHolds(),gateway.breakSpacingTicks(),gateway.tickWitnessHolds());
         }
     }
     public void stop(){

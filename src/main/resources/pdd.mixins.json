@@ -8,7 +8,8 @@
     "SableUniversalCallbackMixin",
     "SableStepSnapshotMixin",
     "WorldBlockReplacementMixin",
-    "SableHeatMapSafetyAccessor"
+    "SableHeatMapSafetyAccessor",
+    "SablePlotTickWitnessMixin"
   ],
   "client": [
     "SableSnapshotPacketDiagnosticMixin"

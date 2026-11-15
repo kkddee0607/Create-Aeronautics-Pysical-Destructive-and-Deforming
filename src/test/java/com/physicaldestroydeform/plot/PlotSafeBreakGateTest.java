@@ -14,7 +14,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import static org.junit.jupiter.api.Assertions.*;
 
-/** 0.5.1-safeFix contract: no PREPARED receipt while the Plot is splitting. */
+/** No PREPARED receipt while the Plot is splitting or lacks a fresh tick witness. */
 class PlotSafeBreakGateTest {
     @TempDir Path temp;
     private static final MaterialProperties DIRT=new MaterialProperties(59,90,10,0,false);
@@ -27,9 +27,9 @@ class PlotSafeBreakGateTest {
     }
     private static final class Backend implements WorldCommitCore.WorldGateway {
         final Set<SparseStateKey> air=new HashSet<>();
-        final Map<String,Integer> lastBreak=new HashMap<>();
-        boolean heatMapStable=true,becomesUnstableDuringBreakEvent;
-        int tick,breakCalls,permissionCalls;
+        final Map<String,PlotBreakPacing.Attempt> lastBreak=new HashMap<>();
+        boolean heatMapStable=true,becomesUnstableDuringBreakEvent,staleWitness,failBreak;
+        int tick,breakCalls,permissionCalls,spacing=1;
         @Override public boolean isServerThread(){return true;}
         @Override public WorldCommitCore.Observation readIfLoaded(SparseStateKey key){
             boolean removed=air.contains(key);
@@ -47,12 +47,16 @@ class PlotSafeBreakGateTest {
         @Override public String deferBreakReason(SparseStateKey key){
             if(!heatMapStable)return "SABLE_HEATMAP_PENDING_SPLIT";
             String owner=PlotKeyCodec.real(key).ownerId();
-            Integer prior=lastBreak.get(owner);
-            return prior!=null && tick-prior<3 ? "PLOT_BREAK_SPACING" : null;
+            return PlotBreakPacing.holdReason(tick,staleWitness?tick-1:tick,lastBreak.get(owner),spacing);
         }
         @Override public boolean breakVanillaOnce(SparseStateKey key){
-            lastBreak.put(PlotKeyCodec.real(key).ownerId(),tick);
-            breakCalls++;return air.add(key);
+            lastBreak.put(PlotKeyCodec.real(key).ownerId(),new PlotBreakPacing.Attempt(tick,false));
+            breakCalls++;return !failBreak && air.add(key);
+        }
+        @Override public void onBreakReadback(SparseStateKey key,boolean apiResult,
+                WorldCommitCore.Observation reread,WorldCommitCore.BreakReadback status) {
+            if(apiResult && status==WorldCommitCore.BreakReadback.CONFIRMED_AIR)
+                lastBreak.put(PlotKeyCodec.real(key).ownerId(),new PlotBreakPacing.Attempt(tick,true));
         }
     }
     @Test void holdsSameOwnerWithoutPreparingOrDuplicatingThenExecutesAfterStableHeatMap() throws Exception {
@@ -75,15 +79,55 @@ class PlotSafeBreakGateTest {
         assertEquals("SABLE_HEATMAP_PENDING_SPLIT",held.getFirst().reason());
         assertEquals(2,backend.breakCalls);
         assertEquals(WorldReceiptJournal.Status.DEFERRED,journal.receipt("a2").status());
-        backend.tick=32; backend.heatMapStable=true;
-        assertEquals("PLOT_BREAK_SPACING",core.tick(backend,backend.tick,32).getFirst().reason());
+        backend.tick=32; backend.heatMapStable=true;backend.staleWitness=true;
+        assertEquals("SABLE_HEATMAP_TICK_UNCONFIRMED",core.tick(backend,backend.tick,32).getFirst().reason());
         assertEquals(2,backend.breakCalls);
-        backend.tick=33;
+        backend.tick=33;backend.staleWitness=false;
         var success=core.tick(backend,backend.tick,32).getFirst();
         assertEquals(WorldCommitCore.Outcome.APPLIED_BREAK,success.result());
         assertEquals(3,backend.breakCalls);
         assertEquals(WorldReceiptJournal.Status.APPLIED,journal.receipt("a2").status());
         assertEquals(0,core.queued());
+    }
+    @Test void stableOwnerBreaksOnceEveryTickAndLegacySpacingStillWorks() throws Exception {
+        var journal=new WorldReceiptJournal(temp.resolve("fast-receipts.bin"));
+        var core=new WorldCommitCore(journal,DamageModel.Settings.defaults(),32);
+        var backend=new Backend();
+        for(int i=0;i<4;i++)core.submit(hit("fast"+i,A,i));
+        for(int tick=30;tick<=33;tick++){
+            backend.tick=tick;
+            core.tick(backend,tick,32);
+            assertEquals(tick-29,backend.breakCalls);
+            assertEquals(33-tick,core.queued());
+        }
+        assertEquals(1,PlotBreakPacing.spacing(0));
+        assertEquals(40,PlotBreakPacing.spacing(41));
+        var prior=new PlotBreakPacing.Attempt(30,true);
+        assertEquals("PLOT_BREAK_SPACING",PlotBreakPacing.holdReason(31,31,prior,3));
+        assertEquals("PLOT_BREAK_SPACING",PlotBreakPacing.holdReason(32,32,prior,3));
+        assertNull(PlotBreakPacing.holdReason(33,33,prior,3));
+        assertEquals("SABLE_HEATMAP_TICK_UNCONFIRMED",PlotBreakPacing.holdReason(30,-1,null,1));
+    }
+    @Test void failedNativeAttemptStillReservesSameTickAndIsNotRetried() throws Exception {
+        var journal=new WorldReceiptJournal(temp.resolve("failed-receipts.bin"));
+        var core=new WorldCommitCore(journal,DamageModel.Settings.defaults(),32);
+        var backend=new Backend();backend.failBreak=true;backend.tick=30;
+        core.submit(hit("failed",A,1));core.submit(hit("next",A,2));
+        var results=core.tick(backend,30,32);
+        assertEquals(WorldCommitCore.Outcome.QUARANTINED,results.getFirst().result());
+        assertEquals("PLOT_BREAK_SPACING",results.get(1).reason());
+        assertEquals(1,backend.breakCalls);
+        assertEquals(WorldReceiptJournal.Status.PARTIAL_QUARANTINED,journal.receipt("failed").status());
+        backend.failBreak=false;
+        for(int tick=31;tick<=32;tick++){
+            backend.tick=tick;
+            assertEquals("PLOT_BREAK_SPACING",core.tick(backend,tick,32).getFirst().reason());
+            assertEquals(1,backend.breakCalls);
+        }
+        backend.tick=33;
+        assertEquals(WorldCommitCore.Outcome.APPLIED_BREAK,core.tick(backend,33,32).getFirst().result());
+        assertEquals(2,backend.breakCalls);
+        assertEquals(WorldCommitCore.Outcome.DUPLICATE,core.submit(hit("failed",A,1)).result());
     }
     @Test void unfinishedSplitAlwaysExpiresWithoutAPreparedOrNativeBreak() throws Exception {
         var journal=new WorldReceiptJournal(temp.resolve("split-receipts.bin"));
