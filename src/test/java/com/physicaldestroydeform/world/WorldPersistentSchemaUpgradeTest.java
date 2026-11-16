@@ -10,6 +10,30 @@ import static org.junit.jupiter.api.Assertions.*;
 /** Fixture was produced by the original PDD 0.5.0 schema-1 implementation,
  * not a hand-written reinterpretation of its old binary format. */
 final class WorldPersistentSchemaUpgradeTest {
+    @Test void schemaTwoDamageRevisionAndLegacyReceiptsSurviveSchemaThreeMigration() throws Exception {
+        Path source=Paths.get(getClass().getResource("/pdd-schema2-fixture/checkpoint.manifest").toURI()).getParent();
+        Path root=Files.createTempDirectory("pdd-persistfix-schema2-");
+        try(var paths=Files.walk(source)){
+            for(var p:paths.toList()){
+                Path dest=root.resolve(source.relativize(p).toString());
+                if(Files.isDirectory(p))Files.createDirectories(dest);
+                else {Files.createDirectories(dest.getParent());Files.copy(p,dest);}
+            }
+        }
+        var key=new SparseStateKey("minecraft:overworld","WORLD","minecraft:overworld",1,4,64,5,"minecraft:stone");
+        var old=root.resolve("absent.wal");
+        var j=new WorldPersistentJournal(root,old);
+        assertTrue(j.migrated());assertEquals(3,j.stats().generation());
+        assertEquals(777,j.get(key).damage());assertEquals(123,j.get(key).remainder());
+        assertEquals(1,j.revision(key.dimension(),key.x(),key.y(),key.z()));
+        assertEquals(7,j.get(key).materialGeneration());
+        assertNull(j.receipt("schema2-deferred").pending());
+        assertEquals(WorldReceiptJournal.Status.PREPARED,j.receipt("schema2-prepared").status());
+        var reopened=new WorldPersistentJournal(root,old);
+        assertEquals(j.get(key),reopened.get(key));
+        assertEquals(j.receipt("schema2-deferred"),reopened.receipt("schema2-deferred"));
+        assertEquals(j.receipt("schema2-prepared"),reopened.receipt("schema2-prepared"));
+    }
     @Test void schemaOneCheckpointIsMigratedAtomicallyAndNewU16DamageSurvivesRestart() throws Exception {
         Path source=Paths.get(WorldPersistentSchemaUpgradeTest.class
                 .getResource("/pdd-schema1-fixture/checkpoint.manifest").toURI()).getParent();

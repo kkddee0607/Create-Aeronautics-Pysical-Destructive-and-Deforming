@@ -15,6 +15,12 @@ public interface WorldJournal {
     List<WorldReceiptJournal.State> stateSnapshot();
     boolean hasPosition(String dimension,int x,int y,int z);
     void transition(WorldReceiptJournal.Receipt receipt,WorldReceiptJournal.State state) throws IOException;
+    /** Legacy test/migration WAL intentionally cannot replay payloads. */
+    default void enqueue(WorldCommitCore.Intent intent,com.physicaldestroydeform.DamageModel.Settings settings,
+                         long expiresGameTick) throws IOException {
+        transition(new WorldReceiptJournal.Receipt(intent.applyId(),intent.key(),
+                WorldReceiptJournal.Status.DEFERRED,"QUEUED_IN_CURRENT_RUN",intent.eventTick()),null);
+    }
     void discardAtPosition(String dimension,int x,int y,int z) throws IOException;
     void discardStale(SparseStateKey key) throws IOException;
     default boolean recoveredUncertain(String applyId) { return false; }

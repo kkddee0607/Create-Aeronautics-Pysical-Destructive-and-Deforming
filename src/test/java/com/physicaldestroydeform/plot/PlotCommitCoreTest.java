@@ -125,5 +125,43 @@ class PlotCommitCoreTest {
         assertEquals(1,new WorldPersistentJournal(root,temp.resolve("none.wal"))
                 .quarantinedSnapshot().size());
     }
+    @Test void recoveredPlotRespectsHeatMapGateAndOrphanAbort()throws Exception{
+        var root=temp.resolve("plot-persistfix");var legacy=temp.resolve("none.wal");
+        var journal=new WorldPersistentJournal(root,legacy);
+        var core=new WorldCommitCore(journal,DamageModel.Settings.defaults(),32);
+        var a=plot(OWNER);
+        core.submit(intent("resume",a,10000),20,1000);
+        var restored=new WorldPersistentJournal(root,legacy);
+        var boot=new WorldCommitCore(restored,DamageModel.Settings.defaults(),32);
+        var fake=new FakePlot(){
+            @Override public String deferBreakReason(SparseStateKey key){return "HEATMAP_PENDING";}
+        };
+        assertEquals("HEATMAP_PENDING",boot.tick(fake,1,32,1001).getFirst().reason());
+        assertEquals(0,fake.breaks);
+        assertEquals(WorldReceiptJournal.Status.DEFERRED,restored.receipt("resume").status());
+        assertEquals(1,boot.abortMatching(i->PlotKeyCodec.real(i.key()).ownerId().equals(OWNER),
+                "ORPHAN_QUARANTINE_SPLIT",2));
+        assertEquals(0,new WorldCommitCore(new WorldPersistentJournal(root,legacy),
+                DamageModel.Settings.defaults(),32).queued());
+        assertEquals(0,fake.breaks);
+    }
+    @Test void recoveredPlotEventuallyBreaksThroughNormalGateExactlyOnce()throws Exception{
+        var root=temp.resolve("plot-persistfix-break");var legacy=temp.resolve("none.wal");
+        var core=new WorldCommitCore(new WorldPersistentJournal(root,legacy),DamageModel.Settings.defaults(),32);
+        var i=intent("resume-break",plot(OWNER),10000);
+        core.submit(i,20,1000);
+        var boot=new WorldCommitCore(new WorldPersistentJournal(root,legacy),DamageModel.Settings.defaults(),32);
+        var fake=new FakePlot(){
+            int checks;
+            @Override public String deferBreakReason(SparseStateKey key){return checks++==0?"HEATMAP_PENDING":null;}
+        };
+        assertEquals(WorldCommitCore.Outcome.DEFERRED,boot.tick(fake,1,32,1001).getFirst().result());
+        assertEquals(0,fake.breaks);
+        assertEquals(WorldCommitCore.Outcome.APPLIED_BREAK,boot.tick(fake,2,32,1002).getFirst().result());
+        assertEquals(1,fake.breaks);assertEquals(1,fake.drops);
+        var next=new WorldCommitCore(new WorldPersistentJournal(root,legacy),DamageModel.Settings.defaults(),32);
+        assertEquals(0,next.queued());
+        assertEquals(WorldCommitCore.Outcome.DUPLICATE,next.submit(i).result());
+    }
 
 }

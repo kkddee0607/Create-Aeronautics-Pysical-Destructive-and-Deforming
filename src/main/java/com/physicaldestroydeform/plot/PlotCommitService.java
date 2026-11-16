@@ -45,6 +45,8 @@ public final class PlotCommitService {
     private final Set<PlotOwnerFence.Owner> quarantined=new HashSet<>();
     private final Set<String> knownSplitParents=new HashSet<>();
     private final Map<PlotOwnerFence.Owner,Set<Coordinate>> active=new HashMap<>();
+    // Startup-only owners remain watched before Sable has loaded/bound their Plot.
+    private final Map<UUID,Set<PlotOwnerFence.Owner>> restoredOwners=new HashMap<>();
     private SparseStateKey ownBreak;
     private boolean fault;
     private long accepted,rejected,damaged,broken,blocked,splitOrphans,lastSummary;
@@ -68,7 +70,22 @@ public final class PlotCommitService {
                 }catch(RuntimeException malformed){throw new IOException("malformed persistent Plot orphan marker",malformed);}
             }
         }
-        for(var receipt:journal.uncertain())unresolved.add(receipt);
+        int restored=0;
+        for(var receipt:journal.uncertain()){
+            if(receipt.pending()!=null){
+                var owner=PlotOwnerFence.Owner.of(PlotKeyCodec.real(receipt.key()));
+                restoredOwners.computeIfAbsent(owner.uuid(),ignored->new HashSet<>()).add(owner);
+                restored++;
+            }else{
+                unresolved.add(receipt);
+                // Prevent any sibling pending intent on a PREPARED owner before
+                // the bounded recovery pass writes its orphan marker.
+                if(receipt.status()==WorldReceiptJournal.Status.PREPARED)
+                    gateway.fence().orphan(PlotOwnerFence.Owner.of(PlotKeyCodec.real(receipt.key())));
+            }
+        }
+        log.info("[PDD-PLOT-RECOVERY] phase=START restoredPending={} legacyOrPrepared={} intentPayloadPersisted=true",
+                restored,unresolved.size());
         // Power loss after the durable orphan marker but before state tombstones:
         // re-queue cleanup without allowing stale data to become live.
         for(var owner:quarantined){
@@ -150,7 +167,7 @@ public final class PlotCommitService {
                     log.warn("[PDD-DEFORM-PLAN] phase=PREVIEW reason=INVALID_CANDIDATE " +
                             "mutation=OFF id={}",intent.applyId(),invalidPlan);
                 }
-                var decision=core.submit(intent);
+                var decision=core.submit(intent,server.getTickCount(),server.overworld().getGameTime());
                 if(decision.result()==WorldCommitCore.Outcome.DEFERRED){
                     accepted++;
                 }else{
@@ -184,6 +201,7 @@ public final class PlotCommitService {
         if(!knownSplitParents.add(parentKey))return;
         Set<PlotOwnerFence.Owner> known=new HashSet<>(active.keySet());
         known.addAll(gateway.fence().boundSnapshot());
+        known.addAll(restoredOwners.getOrDefault(uuid,Set.of()));
         for(var receipt:unresolved){
             if(PlotKeyCodec.isPlotStorage(receipt.key()))
                 known.add(PlotOwnerFence.Owner.of(PlotKeyCodec.real(receipt.key())));
@@ -237,6 +255,7 @@ public final class PlotCommitService {
             // this process sees its first fresh impact and binds a new owner.
             Set<PlotOwnerFence.Owner> candidates=new HashSet<>(active.keySet());
             candidates.addAll(gateway.fence().boundSnapshot());
+            candidates.addAll(restoredOwners.getOrDefault(sub.getUniqueId(),Set.of()));
             for(var owner:candidates){
                 if(!owner.dimension().equals(dimension)||!owner.uuid().equals(sub.getUniqueId()))continue;
                 var sample=PlotKeyCodec.storage(new SparseStateKey(dimension,"PLOT",owner.uuid().toString(),
@@ -292,7 +311,7 @@ public final class PlotCommitService {
             }
         }
         int count=0;
-        for(var result:core.tick(gateway,tick,mutationCap)){
+        for(var result:core.tick(gateway,tick,mutationCap,server.overworld().getGameTime())){
             if(result.result()==WorldCommitCore.Outcome.APPLIED_DAMAGE){damaged++;registerState(result.receipt().key());}
             if(result.result()==WorldCommitCore.Outcome.APPLIED_BREAK){
                 broken++;
@@ -327,14 +346,16 @@ public final class PlotCommitService {
     }
     public void stop(){
         try{
+            if(!fault&&!core.ioFault())journal.stagePendingOrder(core.pendingSnapshot());
             int n=0;
             do{journal.checkpointBatch(WorldPersistentJournal.SAVE_DIRTY_BATCH);}
             while(journal.checkpointPending()&&++n<4096);
-            log.info("[PDD-PLOT] phase=STOP checkpointPending={} retained={} receipts={}",
-                    journal.checkpointPending(),journal.size(),journal.receiptCount());
+            log.info("[PDD-PLOT] phase=STOP checkpointPending={} retained={} receipts={} pending={}",
+                    journal.checkpointPending(),journal.size(),journal.receiptCount(),core.queued());
         }catch(IOException failed){
             log.error("[PDD-PLOT] phase=STOP status=CHECKPOINT_FAILED wal=RETAINED",failed);
         }
         active.clear();quarantined.clear();knownSplitParents.clear();unresolved.clear();orphanCleanup.clear();orphanCleanupSet.clear();
+        restoredOwners.clear();
     }
 }

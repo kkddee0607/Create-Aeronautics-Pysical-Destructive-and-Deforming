@@ -29,11 +29,25 @@ public final class WorldReceiptJournal implements WorldJournal {
                 throw new IllegalArgumentException("invalid World damage state");
         }
     }
-    public record Receipt(String id,SparseStateKey key,Status status,String reason,long tick) {
+    /** Only a durable, never-executed DEFERRED receipt may carry replay data. */
+    public record Pending(WorldCommitCore.Intent intent,com.physicaldestroydeform.DamageModel.Settings settings,
+                          long order,long expiresGameTick) {
+        public Pending {
+            Objects.requireNonNull(intent);Objects.requireNonNull(settings);
+            if(order<0||expiresGameTick<0)throw new IllegalArgumentException("invalid pending order/deadline");
+        }
+    }
+    public record Receipt(String id,SparseStateKey key,Status status,String reason,long tick,Pending pending) {
+        public Receipt(String id,SparseStateKey key,Status status,String reason,long tick) {
+            this(id,key,status,reason,tick,null);
+        }
         public Receipt {
             if(id==null||id.isBlank()||id.length()>1024||key==null||status==null
                 ||!"WORLD".equals(key.ownerSpace())||reason==null||reason.length()>512||tick<0)
                 throw new IllegalArgumentException("invalid World ApplyReceipt");
+            if(pending!=null && (status!=Status.DEFERRED || !id.equals(pending.intent().applyId())
+                    || !key.equals(pending.intent().key()) || tick!=pending.intent().eventTick()))
+                throw new IllegalArgumentException("pending payload/receipt mismatch");
         }
     }
     private record Cell(String dimension,int x,int y,int z) {
@@ -85,6 +99,7 @@ public final class WorldReceiptJournal implements WorldJournal {
 
     /** Atomic receipt+state WAL frame: never expose an APPLIED receipt without its state. */
     public synchronized void transition(Receipt r,State next) throws IOException {
+        if(r.pending()!=null)throw new IOException("legacy WAL does not support pending intent payload");
         Receipt prior=receipts.get(r.id());
         if(prior!=null&&!prior.key().equals(r.key()))throw new IllegalArgumentException("ApplyId alias");
         if(prior!=null&&(prior.status==Status.APPLIED||prior.status==Status.ABORTED

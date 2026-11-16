@@ -68,7 +68,7 @@ public final class NeoForgeWorldGateway implements WorldCommitCore.WorldGateway 
                 || state.getBlock() instanceof DoorBlock;
     }
     @Override public WorldCommitCore.Permission canDamage(SparseStateKey key,WorldCommitCore.Observation expected) {
-        if(!isServerThread())return WorldCommitCore.Permission.UNKNOWN;
+        if(!isServerThread()||lifecycle.isQuarantined(key))return WorldCommitCore.Permission.UNKNOWN;
         var seen=readIfLoaded(key);
         if(seen==null || !expected.equals(seen) || seen.isAir()
                 || seen.hasBlockEntity() || seen.unsafeMultiblock() || seen.unbreakable())
@@ -83,6 +83,9 @@ public final class NeoForgeWorldGateway implements WorldCommitCore.WorldGateway 
             // when the block remains intact. Reserve BreakEvent for real breaks.
             return WorldCommitCore.Permission.ALLOW;
         }catch(RuntimeException|LinkageError unsafe){return WorldCommitCore.Permission.UNKNOWN;}
+    }
+    @Override public String rejectRecoveredReason(WorldCommitCore.Intent intent){
+        return lifecycle.isQuarantined(intent.key())?"RECOVERY_CELL_QUARANTINED":null;
     }
     @Override public WorldCommitCore.Permission canBreak(SparseStateKey key,WorldCommitCore.Observation expected) {
         if(!isServerThread())return WorldCommitCore.Permission.UNKNOWN;

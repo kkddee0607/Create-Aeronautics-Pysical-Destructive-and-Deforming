@@ -50,6 +50,7 @@ class WorldPersistentCommitIntegrationTest {
                     // Independent read from disk during the gateway mutation call.
                     var fromDisk=data.open();
                     assertEquals(WorldReceiptJournal.Status.PREPARED,fromDisk.receipt("single-break").status());
+                    assertNull(fromDisk.receipt("single-break").pending());
                     assertTrue(fromDisk.recoveredUncertain("single-break"));
                 }catch(Exception broken){throw new AssertionError(broken);}
                 return super.breakVanillaOnce(target);
@@ -66,7 +67,7 @@ class WorldPersistentCommitIntegrationTest {
                 reboot.submit(intent("single-break",k,5000)).result());
         assertEquals(1,world.drops);
     }
-    @Test void restartDeferredApplyIdIsNotRescheduledAsNewBreak()throws Exception{
+    @Test void restartDeferredApplyIdResumesOriginalBreakExactlyOnce()throws Exception{
         var data=area();var journal=data.open();var k=key(6);
         var first=new WorldCommitCore(journal,DamageModel.Settings.defaults(),64);
         assertEquals(WorldCommitCore.Outcome.DEFERRED,first.submit(intent("deferred",k,1000)).result());
@@ -74,18 +75,20 @@ class WorldPersistentCommitIntegrationTest {
         assertEquals(WorldCommitCore.Outcome.DEFERRED,first.tick(unloaded,201).getFirst().result());
         var boot=new WorldCommitCore(data.open(),DamageModel.Settings.defaults(),64);
         assertEquals(WorldCommitCore.Outcome.DUPLICATE,boot.submit(intent("deferred",k,1000)).result());
-        assertEquals(0,boot.queued());
+        assertEquals(1,boot.queued());
         assertEquals(0,unloaded.breakCalls);
-        var after=new Fake();assertEquals(1,boot.quarantineInterrupted(after,202));
-        assertEquals(WorldReceiptJournal.Status.ABORTED,
+        var after=new Fake();assertEquals(0,boot.quarantineInterrupted(after,202));
+        assertEquals(WorldCommitCore.Outcome.APPLIED_BREAK,boot.tick(after,202).getFirst().result());
+        assertEquals(1,after.breakCalls);assertEquals(1,after.drops);
+        assertEquals(WorldReceiptJournal.Status.APPLIED,
                 data.open().receipt("deferred").status());
-        assertEquals("RESTART_DEFERRED_NOT_EXECUTED_INTENT_NOT_PERSISTED",
-                data.open().receipt("deferred").reason());
+        assertEquals(0,new WorldCommitCore(data.open(),DamageModel.Settings.defaults(),64).queued());
     }
     @Test void restartDeferredCanCloseWithoutLoadingChunkOrChangingWorld()throws Exception{
         var data=area();var k=key(7);
-        var original=new WorldCommitCore(data.open(),DamageModel.Settings.defaults(),64);
-        original.submit(intent("lost-q",k,5000));
+        // Legacy DEFERRED receipt has no original payload: must still abort.
+        data.open().transition(new WorldReceiptJournal.Receipt("lost-q",k,
+                WorldReceiptJournal.Status.DEFERRED,"QUEUED_IN_CURRENT_RUN",200),null);
         var rebootJournal=data.open();
         var reboot=new WorldCommitCore(rebootJournal,DamageModel.Settings.defaults(),64);
         var inaccessible=new Fake();inaccessible.loaded=false;
@@ -96,6 +99,87 @@ class WorldPersistentCommitIntegrationTest {
         assertFalse(rebootJournal.recoveredUncertain("lost-q"));
         assertEquals(WorldCommitCore.Outcome.DUPLICATE,
                 reboot.submit(intent("lost-q",k,5000)).result());
+    }
+    @Test void checkpointRestoresExactQMaterialSettingsOrderAndFixedPointResult()throws Exception{
+        var data=area();var j=data.open();var k=key(20);
+        var settings=DamageModel.Settings.defaults();
+        var uninterruptedData=area();var uninterruptedJournal=uninterruptedData.open();
+        var uninterrupted=new WorldCommitCore(uninterruptedJournal,settings,64);
+        var queued=new WorldCommitCore(j,settings,64);
+        var a=intent("z-first",k,1.23456789);
+        var b=new WorldCommitCore.Intent("a-second",k,"0-real-fingerprint",2.718281828,
+                new MaterialProperties(59,91,10,9,false,3.125),7,200,false);
+        for(var i:java.util.List.of(a,b)){
+            uninterrupted.submit(i,200,10000);
+            queued.submit(i,200,10000);
+        }
+        var fromWal=data.open();
+        assertEquals(a,fromWal.receipt(a.applyId()).pending().intent());
+        assertEquals(b,fromWal.receipt(b.applyId()).pending().intent());
+        assertEquals(settings,fromWal.receipt(b.applyId()).pending().settings());
+        assertTrue(fromWal.trackedPosition(k.dimension(),k.x(),k.y(),k.z()));
+        do{fromWal.checkpointBatch(128);}while(fromWal.checkpointPending());
+        var restored=data.open();
+        var differentSettings=new DamageModel.Settings(0.08,1.5,0.15,1.5,9,1);
+        var boot=new WorldCommitCore(restored,differentSettings,64);
+        var fake=new Fake();fake.loaded=false;
+        assertEquals(2,boot.tick(fake,1,64,10001).size());
+        assertEquals(2,boot.queued());assertEquals(0,fake.breakCalls);
+        fake.loaded=true;
+        var outcomes=boot.tick(fake,2,64,10002);
+        assertEquals("z-first",outcomes.get(0).receipt().id());
+        assertEquals("a-second",outcomes.get(1).receipt().id());
+        uninterrupted.tick(new Fake(),201);
+        assertEquals(uninterruptedJournal.get(k).damage(),restored.get(k).damage());
+        assertEquals(uninterruptedJournal.get(k).remainder(),restored.get(k).remainder());
+        assertNull(restored.receipt(a.applyId()).pending());
+        assertNull(restored.receipt(b.applyId()).pending());
+    }
+    @Test void restoredExpiredOrReplacedCellNeverConsumesQ()throws Exception{
+        var data=area();var j=data.open();var k=key(21);
+        var core=new WorldCommitCore(j,DamageModel.Settings.defaults(),64);
+        core.submit(intent("expire",k,1000),200,10000);
+        var restored=data.open();var boot=new WorldCommitCore(restored,DamageModel.Settings.defaults(),64);
+        var fake=new Fake();
+        assertEquals("DEFER_TTL_EXPIRED",boot.tick(fake,1,64,11201).getFirst().reason());
+        assertEquals(0,fake.breakCalls);
+        boot.submit(intent("changed",k,1000),200,12000);
+        restored.replaceBlock(k.dimension(),k.x(),k.y(),k.z());
+        var next=data.open();
+        var reboot=new WorldCommitCore(next,DamageModel.Settings.defaults(),64);
+        var replaced=new Fake(){
+            @Override public WorldCommitCore.Observation readIfLoaded(SparseStateKey key){
+                return new WorldCommitCore.Observation(DIM,key.fingerprint(),1,"1-real-fingerprint",
+                        true,false,false,false,false,false);
+            }
+        };
+        assertEquals("REPLACED_SAME_STATE",reboot.tick(replaced,1,64,12001).getFirst().reason());
+        assertEquals(0,replaced.breakCalls);
+        assertNull(next.get(k));
+    }
+    @Test void cleanCheckpointPreservesRotatedQueueOrder()throws Exception{
+        var data=area();var j=data.open();
+        var core=new WorldCommitCore(j,DamageModel.Settings.defaults(),64);
+        var a=intent("first",key(30),1);var b=intent("second",key(31),1);
+        core.submit(a);core.submit(b);
+        var fake=new Fake();fake.loaded=false;
+        core.tick(fake,201,1); // first moves to tail, second must remain first at clean stop
+        j.stagePendingOrder(core.pendingSnapshot());
+        do{j.checkpointBatch(128);}while(j.checkpointPending());
+        var restored=new WorldCommitCore(data.open(),DamageModel.Settings.defaults(),64);
+        assertEquals(java.util.List.of(b,a),restored.pendingSnapshot());
+    }
+    @Test void recoveredSiblingOnQuarantinedCellAbortsBeforeReading()throws Exception{
+        var data=area();var j=data.open();var k=key(32);
+        var core=new WorldCommitCore(j,DamageModel.Settings.defaults(),64);
+        core.submit(intent("sibling",k,5000));
+        var boot=new WorldCommitCore(data.open(),DamageModel.Settings.defaults(),64);
+        var fake=new Fake(){
+            @Override public String rejectRecoveredReason(WorldCommitCore.Intent i){return "RECOVERY_CELL_QUARANTINED";}
+            @Override public WorldCommitCore.Observation readIfLoaded(SparseStateKey key){throw new AssertionError("read despite quarantine");}
+        };
+        assertEquals("RECOVERY_CELL_QUARANTINED",boot.tick(fake,201).getFirst().reason());
+        assertEquals(0,fake.breakCalls);
     }
     @Test void restartPreparedRemainsUncertainUntilLoadedThenQuarantined()throws Exception{
         var data=area();var k=key(8);

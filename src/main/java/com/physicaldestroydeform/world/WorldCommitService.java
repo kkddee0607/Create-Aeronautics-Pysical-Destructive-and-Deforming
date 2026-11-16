@@ -64,8 +64,14 @@ public final class WorldCommitService {
             Cell cell=new Cell(receipt.key());watched.add(cell);quarantined.add(cell);
             historicalTrueQuarantine++;
         }
-        int startupDeferred=0,startupPrepared=0;
+        int startupDeferred=0,startupPrepared=0,restored=0;
         for(var receipt:journal.uncertain()) {
+            if(receipt.pending()!=null){
+                Cell cell=new Cell(receipt.key());watched.add(cell);
+                pendingCells.merge(cell,1,Integer::sum);
+                restored++;
+                continue;
+            }
             unresolved.addLast(receipt);
             if(receipt.status()==WorldReceiptJournal.Status.PREPARED) {
                 Cell cell=new Cell(receipt.key());watched.add(cell);quarantined.add(cell);
@@ -76,10 +82,10 @@ public final class WorldCommitService {
                         "provenNeverExecutedDeferred={} trueMutationUncertain={} " +
                         "action=KEEP_RECEIPTS_AND_PROTECT_PREPARED_OR_UNKNOWN",
                 historicalQuarantined,historicalDeferredSafe,historicalTrueQuarantine);
-        log.info("[PDD-RECOVERY] phase=START deferred={} prepared={} " +
-                        "policy=DEFERRED_ABORT_NO_MUTATION_PREPARED_QUARANTINE " +
-                        "intentPayloadPersisted=false forceChunkLoad=false traceEach={}",
-                startupDeferred,startupPrepared,TRACE_RECOVERY);
+        log.info("[PDD-RECOVERY] phase=START legacyDeferred={} prepared={} restoredPending={} " +
+                        "policy=DURABLE_DEFERRED_RESUME_LEGACY_ABORT_PREPARED_QUARANTINE " +
+                        "intentPayloadPersisted=true forceChunkLoad=false traceEach={}",
+                startupDeferred,startupPrepared,restored,TRACE_RECOVERY);
         WorldBlockMutationTracker.attach(this);
         log.info("[PDD-WORLD-POLICY] revision=0.4.1-spreadFix blockTypeVeto=OFF " +
                 "blockEntities=VETO multiBlock=VETO " +
@@ -121,7 +127,7 @@ public final class WorldCommitService {
                     });
             int count=0;
             for(var intent:projected.world()) {
-                var status=core.submit(intent);
+                var status=core.submit(intent,server.getTickCount(),server.overworld().getGameTime());
                 if(status.result()==WorldCommitCore.Outcome.DEFERRED) {
                     Cell cell=new Cell(intent.key());
                     watched.add(cell);
@@ -152,8 +158,8 @@ public final class WorldCommitService {
             return;
         }
         // Bounded recovery: no physics callback, no forced chunk load, no Q reissue.
-        // DEFERRED has not reached PREPARED (the durable break barrier) and is
-        // safely closed as ABORTED without an unnecessary world read.
+        // Only legacy payload-less DEFERRED and ambiguous PREPARED remain here.
+        // Fully sealed DEFERRED is already in the bounded core queue.
         int recoveryBudget=Math.min(MAX_BOOT_RECONCILE_PER_TICK,unresolved.size());
         long recoveryStarted=System.nanoTime();
         for(int i=0;i<recoveryBudget;i++){
@@ -192,7 +198,7 @@ public final class WorldCommitService {
         }
         gateway.clearPermissionCache();
         int shown=0;
-        for(var result:core.tick(gateway,tick)){
+        for(var result:core.tickAtGameTime(gateway,tick,server.overworld().getGameTime())){
             if(result.result()!=WorldCommitCore.Outcome.DEFERRED && result.receipt()!=null)
                 releasePending(new Cell(result.receipt().key()));
             switch(result.result()) {
@@ -249,6 +255,7 @@ public final class WorldCommitService {
             if(VERBOSE)log.info("[PDD-PERSIST] phase=STORAGE {}",journal.storageStatus());
         }
     }
+    boolean isQuarantined(SparseStateKey key){return quarantined.contains(new Cell(key));}
     private void releasePending(Cell cell) {
         Integer pending=pendingCells.get(cell);
         if(pending!=null) {
@@ -297,6 +304,7 @@ public final class WorldCommitService {
         try {
             // Shutdown attempts a complete checkpoint. An unexpected failure leaves
             // the already-fsynced old WAL recoverable, not a falsified success.
+            if(!fault&&!core.ioFault())journal.stagePendingOrder(core.pendingSnapshot());
             int passes=0,flushed=0;
             do {
                 flushed+=journal.checkpointBatch(WorldPersistentJournal.SAVE_DIRTY_BATCH);

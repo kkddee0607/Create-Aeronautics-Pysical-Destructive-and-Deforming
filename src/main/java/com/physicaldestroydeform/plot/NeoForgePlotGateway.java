@@ -59,6 +59,9 @@ public final class NeoForgePlotGateway implements WorldCommitCore.WorldGateway {
         return new PlotOwnerFence.Stamp(sub.getRuntimeId(),center.getX(),center.getY(),center.getZ(),sub);
     }
     private Cell locate(SparseStateKey virtual,boolean register) {
+        return locate(virtual,register,null);
+    }
+    private Cell locate(SparseStateKey virtual,boolean register,String expectedIncarnation) {
         if(!isServerThread()||!PlotKeyCodec.isPlotStorage(virtual))return null;
         try {
             SparseStateKey real=PlotKeyCodec.real(virtual);
@@ -73,6 +76,8 @@ public final class NeoForgePlotGateway implements WorldCommitCore.WorldGateway {
                     ||!sub.getUniqueId().equals(owner.uuid())||sub.getPlot()==null)return null;
             var plot=sub.getPlot();
             UUID splitParent=sub.getSplitFromSubLevel();
+            if(expectedIncarnation!=null && (splitParent!=null
+                    || !expectedIncarnation.equals(service.incarnation(real,plot.getCenterBlock()))))return null;
             if(splitParent!=null){
                 // Child UUID is a NEW owner; only its parent loses old sparse
                 // damage. A new child may receive fresh impact after durable
@@ -103,6 +108,18 @@ public final class NeoForgePlotGateway implements WorldCommitCore.WorldGateway {
     public boolean bindOnOffer(SparseStateKey original){
         if(!"PLOT".equals(original.ownerSpace()))return false;
         return locate(PlotKeyCodec.storage(original),true)!=null;
+    }
+    /** Durable owner-local identity is checked again by the core before any mutation.
+     * No runtime ID, object reference, or old HeatMap witness is restored. */
+    @Override public WorldCommitCore.Observation readRecoveredIfLoaded(WorldCommitCore.Intent intent){
+        Cell cell=locate(intent.key(),true,intent.expectedIncarnation());
+        if(cell==null)return null;
+        return readIfLoaded(intent.key());
+    }
+    @Override public String rejectRecoveredReason(WorldCommitCore.Intent intent){
+        var owner=PlotOwnerFence.Owner.of(PlotKeyCodec.real(intent.key()));
+        return fence.orphaned(owner)||service.isSplitParent(owner.dimension(),owner.uuid())
+                ?"RECOVERY_PLOT_ORPHANED":null;
     }
     /** Report Sable's actual split lineage. Never guess old/new block correspondence. */
     public void detectLifecycle(){

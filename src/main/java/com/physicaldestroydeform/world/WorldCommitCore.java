@@ -45,6 +45,10 @@ public final class WorldCommitCore {
     public interface WorldGateway {
         boolean isServerThread();
         Observation readIfLoaded(SparseStateKey key);
+        /** Recovery uses identical live validation; Plot may additionally bind the saved UUID. */
+        default Observation readRecoveredIfLoaded(Intent intent) { return readIfLoaded(intent.key()); }
+        /** Permanent owner/target quarantine blocks recovered siblings before a world read. */
+        default String rejectRecoveredReason(Intent intent) { return null; }
         Permission canDamage(SparseStateKey key,Observation expected);
         Permission canBreak(SparseStateKey key,Observation expected);
         /** Execute at most once. Implementation calls vanilla destroy/drop exactly once; no manual drops. */
@@ -74,12 +78,25 @@ public final class WorldCommitCore {
         this.journal=Objects.requireNonNull(journal);damageSettings=Objects.requireNonNull(settings);
         if(breakCapPerTick<1||breakCapPerTick>4096)throw new IllegalArgumentException("invalid break cap");
         this.breakCapPerTick=breakCapPerTick;
+        // Load only never-executed, fully sealed payloads. A fresh source Grant is
+        // neither required nor permitted to reissue any of this Q.
+        journal.uncertain().stream().filter(r->r.status()==WorldReceiptJournal.Status.DEFERRED && r.pending()!=null)
+                .sorted(Comparator.comparingLong(r->r.pending().order())).forEach(r->{
+                    if(queue.size()>=MAX_QUEUED||!queuedIds.add(r.id()))
+                        throw new IllegalStateException("invalid recovered pending queue");
+                    queue.addLast(r.pending().intent());
+                });
     }
     /** Fail-closed: if capacity exhausted, reject and report; no silent queue drop. */
     public synchronized Decision submit(Intent intent) {
+        return submit(intent,intent.eventTick(),intent.eventTick());
+    }
+    /** Durable game clock survives a normal world restart; server tick counter does not. */
+    public synchronized Decision submit(Intent intent,long serverTick,long gameTick) {
         if(ioFault)return new Decision(Outcome.QUARANTINED,"IO_FAULT",null);
         var existing=journal.receipt(intent.applyId());
         if(existing!=null && (existing.status()!=WorldReceiptJournal.Status.DEFERRED
+                || existing.pending()!=null
                 || journal.recoveredUncertain(intent.applyId())))
             return new Decision(Outcome.DUPLICATE,"EXISTING_"+existing.status(),existing);
         if(queuedIds.contains(intent.applyId()))return new Decision(Outcome.DUPLICATE,"ALREADY_QUEUED",existing);
@@ -103,8 +120,12 @@ public final class WorldCommitCore {
             }
         }
         try {
-            if(existing==null)journal.transition(new WorldReceiptJournal.Receipt(intent.applyId(),intent.key(),
-                    WorldReceiptJournal.Status.DEFERRED,"QUEUED_IN_CURRENT_RUN",intent.eventTick()),null);
+            if(existing==null){
+                long age=Math.max(0,serverTick-intent.eventTick());
+                long remaining=Math.max(0,MAX_DEFER_TICKS-age);
+                long deadline=gameTick>Long.MAX_VALUE-remaining?Long.MAX_VALUE:gameTick+remaining;
+                journal.enqueue(intent,damageSettings,deadline);
+            }
         } catch(IOException failed){ioFault=true;return new Decision(Outcome.QUARANTINED,"DURABLE_ENQUEUE_FAILED",null);}
         queue.addLast(intent);queuedIds.add(intent.applyId());
         return new Decision(Outcome.DEFERRED,"QUEUED",journal.receipt(intent.applyId()));
@@ -113,8 +134,14 @@ public final class WorldCommitCore {
     public synchronized List<Decision> tick(WorldGateway world,long tick) {
         return tick(world,tick,Math.max(64,breakCapPerTick));
     }
+    public synchronized List<Decision> tickAtGameTime(WorldGateway world,long tick,long gameTick) {
+        return tick(world,tick,Math.max(64,breakCapPerTick),gameTick);
+    }
     /** Plot 0.5.1 caps ALL journal/mutation operations, not only final breaks. */
     public synchronized List<Decision> tick(WorldGateway world,long tick,int maxOperations) {
+        return tick(world,tick,maxOperations,tick);
+    }
+    public synchronized List<Decision> tick(WorldGateway world,long tick,int maxOperations,long gameTick) {
         if(maxOperations<1||maxOperations>MAX_QUEUED)
             throw new IllegalArgumentException("invalid operation cap");
         if(!world.isServerThread())throw new IllegalStateException("server thread required");
@@ -134,16 +161,35 @@ public final class WorldCommitCore {
                 results.add(new Decision(Outcome.DUPLICATE,"TERMINAL_RECEIPT_"+terminal.status(),terminal));
                 continue;
             }
-            if(tick>intent.eventTick() && tick-intent.eventTick()>MAX_DEFER_TICKS){
+            var pending=terminal==null?null:terminal.pending();
+            boolean restored=pending!=null && journal.recoveredUncertain(intent.applyId());
+            if(restored){
+                String veto=world.rejectRecoveredReason(intent);
+                if(veto!=null){
+                    results.add(finish(intent,WorldReceiptJournal.Status.ABORTED,Outcome.ABORTED,veto,null,tick));
+                    continue;
+                }
+            }
+            if(restored?gameTick>pending.expiresGameTick():
+                    tick>intent.eventTick() && tick-intent.eventTick()>MAX_DEFER_TICKS){
                 results.add(finish(intent,WorldReceiptJournal.Status.ABORTED,Outcome.ABORTED,
                         "DEFER_TTL_EXPIRED",null,tick));
                 continue;
             }
-            var observation=world.readIfLoaded(intent.key());
+            var observation=restored?world.readRecoveredIfLoaded(intent):world.readIfLoaded(intent.key());
             if(observation==null||!observation.loaded()) {
                 queue.addLast(intent);queuedIds.add(intent.applyId());
                 results.add(new Decision(Outcome.DEFERRED,"CHUNK_NOT_LOADED",journal.receipt(intent.applyId())));
                 continue;
+            }
+            // Never let an old intent tombstone newer damage before verifying the
+            // saved incarnation against the currently loaded block.
+            if(restored){
+                String invalid=preflight(intent,observation);
+                if(invalid!=null){
+                    results.add(finish(intent,WorldReceiptJournal.Status.ABORTED,Outcome.ABORTED,invalid,null,tick));
+                    continue;
+                }
             }
             var prior=journal.get(intent.key());
             if(prior==null && journal.hasPosition(intent.key().dimension(),intent.key().x(),
@@ -166,9 +212,10 @@ public final class WorldCommitCore {
             if(prior!=null) {before.setDamage(prior.damage());before.setRemainder(prior.remainder());}
             // Keep definition-level UNBREAKABLE intact for World and Plot.
             // Opening the registry allow-list must never override material immunity.
+            var settings=restored?pending.settings():damageSettings;
             DamageModel.Plan plan=intent.fFirstPreDamped()
-                    ?DamageModel.planPreDamped(intent.sealedQ(),intent.material(),before,damageSettings)
-                    :DamageModel.plan(intent.sealedQ(),intent.material(),before,damageSettings);
+                    ?DamageModel.planPreDamped(intent.sealedQ(),intent.material(),before,settings)
+                    :DamageModel.plan(intent.sealedQ(),intent.material(),before,settings);
             if(plan.thresholdReached() && attemptedBreaks>=breakCapPerTick) {
                 queue.addFirst(intent);queuedIds.add(intent.applyId());
                 results.add(new Decision(Outcome.DEFERRED,"BREAK_CAP",journal.receipt(intent.applyId())));
@@ -217,11 +264,12 @@ public final class WorldCommitCore {
         return closed;
     }
     public synchronized int queued(){return queue.size();}
+    public synchronized List<Intent> pendingSnapshot(){return List.copyOf(queue);}
     public synchronized boolean ioFault(){return ioFault;}
     /**
      * Reconcile durable receipts recovered from a previous process. DEFERRED is only
-     * a queued plan: no Vanilla mutation can precede the PREPARED fsync. Since the
-     * intent's Q/material snapshot is not persisted, it cannot safely be replayed.
+     * a queued plan: no Vanilla mutation can precede the PREPARED fsync. Only
+     * schema-3 payloads are restored; older payload-less receipts are aborted.
      * PREPARED may have executed Vanilla before crashing, so it stays quarantined.
      */
     public synchronized Decision reconcileRestart(WorldReceiptJournal.Receipt prior,
@@ -236,6 +284,8 @@ public final class WorldCommitCore {
         Outcome outcome;
         String reason;
         if(prior.status()==WorldReceiptJournal.Status.DEFERRED){
+            if(prior.pending()!=null)
+                return new Decision(Outcome.DEFERRED,"DURABLE_PENDING_RESTORED",current);
             next=WorldReceiptJournal.Status.ABORTED;
             outcome=Outcome.ABORTED;
             reason="RESTART_DEFERRED_NOT_EXECUTED_INTENT_NOT_PERSISTED";

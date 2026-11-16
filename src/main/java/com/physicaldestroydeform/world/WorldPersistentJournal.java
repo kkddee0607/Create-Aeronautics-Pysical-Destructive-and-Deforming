@@ -19,7 +19,7 @@ import static java.nio.file.StandardOpenOption.*;
  * No Plot mutation, forced chunk load, or Minecraft API occurs in this class.
  */
 public final class WorldPersistentJournal implements WorldJournal {
-    public static final int SCHEMA=2, MAX_STATES_PER_CHUNK=4096;
+    public static final int SCHEMA=3, MAX_STATES_PER_CHUNK=4096;
     public static final int MAX_TOTAL_STATES=2_000_000, MAX_RECEIPTS=2_000_000;
     public static final int MAX_REVISIONS_PER_CHUNK=131_072, MAX_TOTAL_REVISIONS=4_000_000;
     public static final int SAVE_DIRTY_BATCH=128;
@@ -50,6 +50,8 @@ public final class WorldPersistentJournal implements WorldJournal {
     private final Map<Cell,Long> revisions=new HashMap<>();
     private final Map<ChunkKey,Set<Cell>> revisionChunks=new HashMap<>();
     private final Set<String> recoveredUncertain=new HashSet<>();
+    private final Map<Cell,Integer> pendingPositions=new HashMap<>();
+    private int pendingCount;
     private final Set<ChunkKey> dirtyChunks=new TreeSet<>();
     private final Set<Integer> dirtyBuckets=new TreeSet<>();
     private final Map<ChunkKey,String> currentChunks=new HashMap<>();
@@ -59,7 +61,7 @@ public final class WorldPersistentJournal implements WorldJournal {
     private long generation,walBytes,repairedTailBytes;
     private String legacyHash="";
     private boolean staging, migrated;
-    // The committed manifest selects the reader schema; new writes always use SCHEMA=2.
+    // The committed manifest selects the reader schema; new writes use schema 3.
     private int loadingSchema=SCHEMA;
 
     /** Existing schema-2 WAL stays untouched as an audit and downgrade safety marker. */
@@ -71,7 +73,7 @@ public final class WorldPersistentJournal implements WorldJournal {
         if(Files.exists(manifestPath)){
             loadingSchema=readDiskSchema(manifestPath);
             restore();
-            if(loadingSchema==1)upgradeSchema1();
+            if(loadingSchema<SCHEMA)upgradeSchema();
         }else bootstrap();
         for(var receipt:receipts.values())if(receipt.status()==WorldReceiptJournal.Status.DEFERRED
                 || receipt.status()==WorldReceiptJournal.Status.PREPARED)
@@ -129,7 +131,38 @@ public final class WorldPersistentJournal implements WorldJournal {
     /** Positions with durable replacement history, including currently undamaged blocks. */
     public synchronized boolean trackedPosition(String dimension,int x,int y,int z){
         Cell cell=new Cell(dimension,x,y,z);
-        return positionKeys.containsKey(cell)||revisions.containsKey(cell);
+        return positionKeys.containsKey(cell)||revisions.containsKey(cell)||pendingPositions.containsKey(cell);
+    }
+    @Override public synchronized void enqueue(WorldCommitCore.Intent intent,
+            com.physicaldestroydeform.DamageModel.Settings settings,long expiresGameTick)throws IOException {
+        var pending=new WorldReceiptJournal.Pending(intent,settings,receipts.size(),expiresGameTick);
+        transition(new WorldReceiptJournal.Receipt(intent.applyId(),intent.key(),
+                WorldReceiptJournal.Status.DEFERRED,"QUEUED_IN_CURRENT_RUN",intent.eventTick(),pending),null);
+    }
+    /** Clean stop preserves the actual rotated FIFO order in the next atomic checkpoint.
+     * On a crash before publication, the previous WAL still holds admission order. */
+    public synchronized void stagePendingOrder(List<WorldCommitCore.Intent> queue)throws IOException{
+        var ids=new HashSet<String>();
+        for(var intent:queue){
+            var receipt=receipts.get(intent.applyId());
+            if(receipt!=null && receipt.pending()!=null){
+                if(!receipt.pending().intent().equals(intent)||!ids.add(intent.applyId()))
+                    throw new IOException("pending checkpoint identity mismatch");
+            }
+        }
+        if(ids.size()!=pendingCount)throw new IOException("incomplete pending checkpoint");
+        long order=0;
+        for(var intent:queue){
+            var receipt=receipts.get(intent.applyId());
+            if(receipt==null||receipt.pending()==null)continue;
+            var p=receipt.pending();
+            long next=order++;
+            if(p.order()==next)continue;
+            var reordered=new WorldReceiptJournal.Pending(p.intent(),p.settings(),next,p.expiresGameTick());
+            receipts.put(receipt.id(),new WorldReceiptJournal.Receipt(receipt.id(),receipt.key(),
+                    receipt.status(),receipt.reason(),receipt.tick(),reordered));
+            dirtyBuckets.add(bucket(receipt.id()));
+        }
     }
     public synchronized Set<String> retainedDimensions(){
         var result=new TreeSet<String>();for(var key:currentChunks.keySet())result.add(key.dimension());
@@ -230,6 +263,8 @@ public final class WorldPersistentJournal implements WorldJournal {
         if(next!=null&&(!r.key().equals(next.key())||r.status()!=WorldReceiptJournal.Status.APPLIED))
             throw new IllegalArgumentException("state/receipt mismatch");
         if(prior==null&&receipts.size()>=MAX_RECEIPTS)throw new IOException("RECEIPT_LEDGER_CAP_EXCEEDED");
+        if(r.pending()!=null && (prior!=null || pendingCount>=WorldCommitCore.MAX_QUEUED))
+            throw new IOException("PENDING_PAYLOAD_DUPLICATE_OR_CAP");
         if(next!=null && (next.damage()>0||next.remainder()>0) && !canStore(next.key()))
             throw new IOException("SPARSE_CHUNK_CAP_EXCEEDED");
         if(next!=null && (next.damage()>0||next.remainder()>0)
@@ -238,7 +273,12 @@ public final class WorldPersistentJournal implements WorldJournal {
             throw new IOException("STALE_POSITION_STATE_ALIAS");
     }
     private void applyTransition(WorldReceiptJournal.Receipt r,WorldReceiptJournal.State next){
-        receipts.put(r.id(),r);
+        var prior=receipts.put(r.id(),r);
+        if(prior!=null && prior.pending()!=null) {
+            pendingCount--;
+            pendingPositions.computeIfPresent(new Cell(prior.key()),(cell,n)->n==1?null:n-1);
+        }
+        if(r.pending()!=null)addPending(r);
         if(r.status()==WorldReceiptJournal.Status.APPLIED
                 ||r.status()==WorldReceiptJournal.Status.ABORTED
                 ||r.status()==WorldReceiptJournal.Status.PARTIAL_QUARANTINED)
@@ -247,6 +287,10 @@ public final class WorldPersistentJournal implements WorldJournal {
         receiptBucketIndex.computeIfAbsent(receiptBucket,k->new HashSet<>()).add(r.id());
         dirtyBuckets.add(receiptBucket);
         if(next!=null)putState(next);
+    }
+    private void addPending(WorldReceiptJournal.Receipt r){
+        pendingCount++;
+        pendingPositions.merge(new Cell(r.key()),1,Integer::sum);
     }
     private void putState(WorldReceiptJournal.State value){
         SparseStateKey key=value.key();ChunkKey chunk=chunk(key);
@@ -274,11 +318,11 @@ public final class WorldPersistentJournal implements WorldJournal {
         dirtyChunks.add(cell.chunk());
     }
 
-    /** Re-encode all schema-1 committed snapshots and replayed WAL data without
+    /** Re-encode all schema-1/2 committed snapshots and replayed WAL data without
      * modifying the old generation. A crash before the atomic manifest move
-     * replays the untouched previous WAL; after it, schema-2 is self-contained.
+     * replays the untouched previous WAL; after it, schema 3 is self-contained.
      */
-    private void upgradeSchema1() throws IOException {
+    private void upgradeSchema() throws IOException {
         long next=generation+1;
         Map<ChunkKey,String> newChunks=new HashMap<>();
         Map<Integer,String> newBuckets=new HashMap<>();
@@ -309,7 +353,7 @@ public final class WorldPersistentJournal implements WorldJournal {
         try(var in=new DataInputStream(Files.newInputStream(path))){
             if(in.readInt()!=DISK_MAGIC)throw new IOException("unknown PDD checkpoint magic");
             int version=in.readInt();
-            if(version!=1&&version!=SCHEMA)throw new IOException("unsupported PDD checkpoint schema "+version);
+            if(version<1||version>SCHEMA)throw new IOException("unsupported PDD checkpoint schema "+version);
             return version;
         }
     }
@@ -409,6 +453,10 @@ public final class WorldPersistentJournal implements WorldJournal {
                 var r=readReceipt(in);
                 if(bucket(r.id())!=expected||receipts.size()>=MAX_RECEIPTS||receipts.putIfAbsent(r.id(),r)!=null)
                     throw new IOException("duplicate/invalid receipt ledger entry");
+                if(r.pending()!=null){
+                    if(pendingCount>=WorldCommitCore.MAX_QUEUED)throw new IOException("pending capacity exceeded");
+                    addPending(r);
+                }
                 receiptBucketIndex.computeIfAbsent(expected,k->new HashSet<>()).add(r.id());
             }
             if(in.available()!=0)throw new IOException("receipt snapshot trailing bytes");
@@ -617,11 +665,37 @@ public final class WorldPersistentJournal implements WorldJournal {
     private static void writeReceipt(DataOutputStream out,WorldReceiptJournal.Receipt r)throws IOException {
         writeString(out,r.id());writeKey(out,r.key());out.writeByte(r.status().ordinal());
         writeString(out,r.reason());out.writeLong(r.tick());
+        if(r.status()==WorldReceiptJournal.Status.DEFERRED){
+            var p=r.pending();out.writeBoolean(p!=null);
+            if(p!=null){
+                var i=p.intent();var m=i.material();var s=p.settings();
+                writeString(out,i.expectedIncarnation());out.writeDouble(i.sealedQ());
+                out.writeInt(m.hardness());out.writeInt(m.threshold());out.writeInt(m.ductilityPercent());
+                out.writeInt(m.elasticityPercent());out.writeBoolean(m.unbreakable());out.writeDouble(m.yieldThreshold());
+                out.writeLong(i.materialGeneration());out.writeBoolean(i.fFirstPreDamped());
+                out.writeDouble(s.minHardnessFactor());out.writeDouble(s.hardnessExponent());
+                out.writeDouble(s.minElasticFactor());out.writeDouble(s.elasticExponent());
+                out.writeDouble(s.damageGain());out.writeDouble(s.deformationGain());
+                out.writeLong(p.order());out.writeLong(p.expiresGameTick());
+            }
+        }
     }
-    private static WorldReceiptJournal.Receipt readReceipt(DataInputStream in)throws IOException {
+    private WorldReceiptJournal.Receipt readReceipt(DataInputStream in)throws IOException {
         String id=readString(in);SparseStateKey key=readKey(in);int ordinal=in.readUnsignedByte();
         if(ordinal>=WorldReceiptJournal.Status.values().length)throw new IOException("unknown receipt status");
-        return new WorldReceiptJournal.Receipt(id,key,WorldReceiptJournal.Status.values()[ordinal],readString(in),in.readLong());
+        var status=WorldReceiptJournal.Status.values()[ordinal];
+        String reason=readString(in);long tick=in.readLong();
+        WorldReceiptJournal.Pending pending=null;
+        if(loadingSchema>=3 && status==WorldReceiptJournal.Status.DEFERRED && in.readBoolean()){
+            String incarnation=readString(in);double q=in.readDouble();
+            var material=new com.physicaldestroydeform.MaterialProperties(in.readInt(),in.readInt(),
+                    in.readInt(),in.readInt(),in.readBoolean(),in.readDouble());
+            var intent=new WorldCommitCore.Intent(id,key,incarnation,q,material,in.readLong(),tick,in.readBoolean());
+            var settings=new com.physicaldestroydeform.DamageModel.Settings(in.readDouble(),in.readDouble(),
+                    in.readDouble(),in.readDouble(),in.readDouble(),in.readDouble());
+            pending=new WorldReceiptJournal.Pending(intent,settings,in.readLong(),in.readLong());
+        }
+        return new WorldReceiptJournal.Receipt(id,key,status,reason,tick,pending);
     }
     private static long parseRevision(String incarnation){int i=incarnation.indexOf('-');
         try{return i<0?0:Math.max(0,Long.parseLong(incarnation.substring(0,i)));}

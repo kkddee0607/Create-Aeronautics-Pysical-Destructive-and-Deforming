@@ -1,4 +1,4 @@
-# Physical Destruction and Deforming (PDD) — 0.5.1-fastBreakFix
+# Physical Destruction and Deforming (PDD) — 0.5.1-persistFix
 
 **Minecraft Java 1.21.1 · NeoForge 21.1.228+ · Create 6.0.10 · Create Aeronautics 1.3.2 · Sable 2.0.6**
 
@@ -15,13 +15,15 @@ PDD is a server-authoritative Create Aeronautics addon that consumes **Sable's o
 | Sable mass / collider | Uses Sable's **existing LevelChunk change notification path**; never constructs a second physics body, calls `removeSubLevel`, forces a rebuild or rewrites native callbacks. Correct mass, collider and split runtime behavior **requires the user's in-game validation**. |
 | Split and owner lifecycle | Tracks physical object identity, runtime ID, UUID, generation and Plot center. Sable `getSplitFromSubLevel` and owner mismatches trigger **durable ORPHAN_QUARANTINE** before bounded cleanup of old-owner damage. It never copies ghost damage to another Plot. |
 | Plot removal during break | A tightly scoped thread-local witness detects completed original-block→AIR changes from `LevelChunk.setBlockState` without resolving a removed owner. Only matching owner/allocated position/original state and API=true may close an otherwise unavailable readback; split-parent state remains quarantined and no physics rebuild is fabricated. |
-| Plot storage | Independent `data/pdd-plot-0.5.1/` schema-2 snapshot/WAL with per-Plot virtual namespace, CRC and durable receipts. It cannot alias the existing `data/pdd-world-0.5.0/` or two Plot UUIDs at the same local coordinates. |
+| Plot storage | Independent `data/pdd-plot-0.5.1/` schema-3 snapshot/WAL with per-Plot virtual namespace, CRC and durable receipts. It cannot alias the existing `data/pdd-world-0.5.0/` or two Plot UUIDs at the same local coordinates. |
 | Per-tick protection | `pdd.plotMutationCapPerTick` defaults to **32** (caps all Plot commits). Each Plot may attempt **one break per server tick** by default, only after its real Sable HeatMap tick returned in that tick, initialized/complete flags and all pending collections are clear, and owner/CAS checks pass. No forced chunk loading or batching. Existing DEFERRED receipts retain their original Q and expire safely. |
 | Deformation preparation | An immutable owner-local **MovePlan candidate** contract with D/K yield, break-first precedence, signed-axis validation and reserved-Q accounting exists and is testable. **0.5.1 does not move blocks**, infer a direction from unverified normals, or claim a planned move as applied. |
 
 The later roadmap, including actual physical movement, full split lineage migration, stress-graph mutation, cracks/UI, and explosion/projectile/entity causes, **is not claimed as implemented in 0.5.1**. See [`docs/PDD-1.0.8-Integrated-Design-Specification.md`](docs/PDD-1.0.8-Integrated-Design-Specification.md) for version boundaries.
 
-**0.5.1-fastBreakFix limitation:** Sable 2.0.6 itself can still fail inside `SubLevelHeatMapManager.split()` even with single-break pacing. PDD cannot repair Sable's internal ownership registry without a verified Sable change. The HeatMap and current-tick witness gates are fail-closed prevention layers, **not proof that native split or save failures are fixed**. Test on a copy of the world. If the actual tick order differs, the missing witness defers destruction; do not bypass it.
+**Inherited fastBreakFix limitation:** Sable 2.0.6 itself can still fail inside `SubLevelHeatMapManager.split()` even with single-break pacing. PDD cannot repair Sable's internal ownership registry without a verified Sable change. The HeatMap and current-tick witness gates are fail-closed prevention layers, **not proof that native split or save failures are fixed**. Test on a copy of the world. If the actual tick order differs, the missing witness defers destruction; do not bypass it.
+
+**persistFix:** schema 3 stores the sealed intent (exact Q, material and damage settings, incarnation, source ApplyId, order, expiry) in the same DEFERRED receipt frame. The original queue resumes through existing capped server-tick execution after restart; no collision, F or Q is reissued. Clean shutdown preserves rotated FIFO order; interrupted checkpoint recovery retains the admission order from the last committed checkpoint/WAL. Legacy payload-less DEFERRED remains ABORTED; PREPARED remains quarantined. Schema 1/2 migration is atomic and preserves existing damage, revisions and receipts. No downgrade without a full matching backup.
 
 ## Numerical and persistence contracts
 
