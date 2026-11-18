@@ -25,6 +25,65 @@ class TargetDirectionsTest {
         d.observe(List.of(B),List.of(B),POS,false);
         assertNull(d.get(B));
     }
+    @Test void compatibleMultiFaceWitnessDoesNotInvalidateIndependentExactProof(){
+        // A shared contact has the right normal, but does not identify A or B alone.
+        // A later independent unique hit can resolve A; B must stay unknown.
+        for(boolean exactFirst:new boolean[]{false,true}){
+            var d=new TargetDirections();
+            if(exactFirst)d.observe(List.of(A),List.of(A),POS,false);
+            d.observe(List.of(A,B),List.of(A,B),POS,false);
+            if(!exactFirst){
+                assertNull(d.get(A));assertNull(d.get(B));
+                assertFalse(d.hasProvenSeed());
+                d.observe(List.of(A),List.of(A),POS,false);
+            }
+            assertEquals(POS,d.get(A));assertNull(d.get(B));
+            assertTrue(d.hasProvenSeed());
+        }
+    }
+    @Test void multiFaceConflictingAxesRemainVetoRegardlessOfOrder(){
+        for(boolean exactFirst:new boolean[]{false,true}){
+            var d=new TargetDirections();
+            if(exactFirst)d.observe(List.of(A),List.of(A),POS,false);
+            d.observe(List.of(A,B),List.of(A,B),NEG,false);
+            if(!exactFirst)d.observe(List.of(A),List.of(A),POS,false);
+            assertNull(d.get(A));assertNull(d.get(B));
+            d.observe(List.of(A),List.of(A),NEG,false);
+            assertNull(d.get(A));
+        }
+        var d=new TargetDirections();
+        d.observe(List.of(A,B),List.of(A,B),POS,false);
+        d.observe(List.of(A,B),List.of(A,B),NEG,false);
+        d.observe(List.of(A),List.of(A),POS,false);
+        d.observe(List.of(B),List.of(B),NEG,false);
+        assertNull(d.get(A));assertNull(d.get(B));
+    }
+    @Test void ambiguousCandidatesCannotBePromotedByPatchOrPropagatedParent(){
+        var d=new TargetDirections();
+        var c=new GameImpactCredit.Target(A.ownerKey(),"2,0,0",A.fingerprint());
+        d.observe(List.of(A,B),List.of(A,B),POS,false);
+        d.patch(B,POS);d.patch(c,POS);
+        d.trace(new ForcePropagation.Edge(c,B,0,10,5,5,1,5));
+        assertNull(d.get(A));assertNull(d.get(B));assertEquals(POS,d.get(c));
+    }
+    @Test void missingOrIncompleteEvidenceVetoesEvenCompatibleMultiFaceWitness(){
+        for(boolean invalidFirst:new boolean[]{false,true}){
+            var d=new TargetDirections();
+            if(invalidFirst)d.observe(List.of(A),List.of(),null,false);
+            d.observe(List.of(A,B),List.of(A,B),POS,false);
+            d.observe(List.of(A),List.of(A),POS,false);
+            if(!invalidFirst)d.observe(List.of(A),List.of(),null,false);
+            assertNull(d.get(A));assertNull(d.get(B));
+            d.observe(List.of(B),List.of(B),POS,true);
+            d.observe(List.of(B),List.of(B),POS,false);
+            assertNull(d.get(B));
+        }
+        // A shape miss is not just a multiply-owned face.
+        var d=new TargetDirections();
+        d.observe(List.of(A),List.of(),POS,false);
+        d.observe(List.of(A),List.of(A),POS,false);
+        assertNull(d.get(A));
+    }
     @Test void derivedFaceCannotOverrideUnknownDirectSeed(){
         var d=new TargetDirections();
         d.observe(List.of(A),List.of(),null,false);
@@ -54,6 +113,21 @@ class TargetDirectionsTest {
         var d=TargetDirections.forEvent(pair,List.of(contact),List.of(pre),10,true);
         assertEquals(new MovePlan.SignedAxes(0,-1,0,true,41),d.uniformPatchAxis(world));
         assertEquals(new MovePlan.SignedAxes(0,1,0,true,41),d.axis(plot,contact));
+        // Different shape witness/force, identical normal proof and effect frames.
+        var second=new com.physicaldestroydeform.diagnostics.NativeCollisionTelemetry.Contact(-1,7,200,0,1,0,0,-1,0,
+                2,1,0,2,0,0,dim,10,null,frame,false);
+        var shared=TargetDirections.forEvent(pair,List.of(contact,second),List.of(pre),10,true);
+        assertEquals(d.uniformPatchAxis(world),shared.uniformPatchAxis(world));
+        assertEquals(d.axis(plot,contact),shared.axis(plot,second));
+        assertTrue(shared.summary().contains("normalRecords={OPPOSING_NORMALS=2}"));
+        assertTrue(shared.summary().contains("uniqueNormalProofs=1"));
+        var changedNormal=new com.physicaldestroydeform.diagnostics.NativeCollisionTelemetry.Contact(-1,7,200,0,-1,0,0,1,0,
+                2,1,0,2,0,0,dim,10,null,frame,false);
+        var opposed=TargetDirections.forEvent(pair,List.of(contact,changedNormal),List.of(pre),10,true);
+        assertEquals(d.axis(world,contact),opposed.axis(world,contact));
+        assertNull(opposed.axis(world,changedNormal));
+        assertNull(opposed.uniformPatchAxis(world));
+        assertTrue(opposed.summary().contains("uniqueNormalProofs=2"));
         var capped=new com.physicaldestroydeform.diagnostics.NativeCollisionTelemetry.Contact(-1,7,100,0,1,0,0,-1,0,
                 0,1,0,0,0,0,dim,10,null,frame,true);
         var unknown=TargetDirections.forEvent(pair,List.of(capped),List.of(pre),10,true);

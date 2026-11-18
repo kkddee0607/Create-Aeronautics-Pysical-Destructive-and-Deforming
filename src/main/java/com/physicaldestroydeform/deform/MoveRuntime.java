@@ -13,6 +13,7 @@ import org.slf4j.Logger;
 /** One server-thread coordinator per storage domain. Never calls the physics callback. */
 public final class MoveRuntime {
     private static final boolean TRACE=Boolean.parseBoolean(System.getProperty("pdd.deform.trace","true"));
+    private static final int ROUTINE_TRACE_CAP=com.physicaldestroydeform.diagnostics.TraceBudget.cap(2,16);
     @FunctionalInterface public interface Planner {
         MoveTransactionJournal.BeforeImage build(WorldCommitCore.Intent intent,MovePlan plan,
                 WorldReceiptJournal.State state,DamageModel.Settings settings,long gameTick);
@@ -26,6 +27,7 @@ public final class MoveRuntime {
     private final Logger log;
     private Pending pending;
     private long logTick=Long.MIN_VALUE;private int logged;
+    private long suppressedBelowYield,suppressedUnknown,suppressedBreakFirst,lastTraceSummary;
     public final Fences fences=new Fences();
     public MoveRuntime(Path path,WorldPersistentJournal journal,MoveTransactionExecutor.Gateway gateway,
                        Planner planner,Logger log)throws IOException{
@@ -56,6 +58,14 @@ public final class MoveRuntime {
     public void tick(long gameTick,int budget){
         executor.tick(gateway,gameTick,budget);
         if(!executor.pending()&&!executor.faulted())advance(gameTick);
+        if(TRACE&&gameTick-lastTraceSummary>=100){
+            lastTraceSummary=gameTick;
+            if(suppressedBelowYield+suppressedUnknown+suppressedBreakFirst>0){
+                log.info("[PDD-DEFORM] phase=TRACE_SUMMARY gameTick={} suppressedBelowYield={} suppressedUnknown={} suppressedBreakFirst={}",
+                        gameTick,suppressedBelowYield,suppressedUnknown,suppressedBreakFirst);
+                suppressedBelowYield=suppressedUnknown=suppressedBreakFirst=0;
+            }
+        }
     }
     private void advance(long tick){
         if(pending==null)return;
@@ -75,8 +85,18 @@ public final class MoveRuntime {
         }
     }
     private void trace(long tick,String status,MovePlan p,double candidate,double paid){
+        if(!TRACE)return;
         if(logTick!=tick){logTick=tick;logged=0;}
-        if(TRACE&&logged++<16)log.info("[PDD-DEFORM] phase=RESULT gameTick={} status={} id={} source={} steps={} K={} F={} FSource={} reservedQ={} blockedCandidateQ={} reservedCapQ={} shortfall={} normalFixed={} priorFixed={}",
+        if(status.startsWith("NO_MOVE_")&&logged++>=ROUTINE_TRACE_CAP){
+            switch(p.status()){
+                case BELOW_YIELD -> suppressedBelowYield++;
+                case DIRECTION_UNKNOWN -> suppressedUnknown++;
+                case BREAK_FIRST -> suppressedBreakFirst++;
+                default -> { }
+            }
+            return;
+        }
+        log.info("[PDD-DEFORM] phase=RESULT gameTick={} status={} id={} source={} steps={} K={} F={} FSource={} reservedQ={} blockedCandidateQ={} reservedCapQ={} shortfall={} normalFixed={} priorFixed={}",
                 tick,status,p.creditId(),p.source(),p.steps(),p.k(),p.sourceF(),p.sourceF()>0?"TARGET_EVIDENCE":"UNAVAILABLE",p.reservedQ(),candidate,paid,Math.max(0,candidate-paid),p.eventNormalDamageFixed(),p.damageBeforeFixed());
     }
     /** Coordinate-level lock independent of a block fingerprint. External changes invalidate CAS. */

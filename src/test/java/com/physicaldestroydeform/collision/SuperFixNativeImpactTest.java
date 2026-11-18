@@ -1,10 +1,23 @@
 package com.physicaldestroydeform.collision;
 
 import org.junit.jupiter.api.Test;
+import com.physicaldestroydeform.plot.NeoForgePlotGateway;
 import java.util.List;
 import static org.junit.jupiter.api.Assertions.*;
 
 final class SuperFixNativeImpactTest {
+    @Test void noNativeFrameCrossesConfirmedLifecycleBoundary(){
+        var rebound=new NeoForgePlotGateway.LifecycleBinding(3,2,true,false,7,100);
+        assertFalse(RealFixRuntimeBridge.validLifecycleFrame(rebound,7,99));
+        assertFalse(RealFixRuntimeBridge.validLifecycleFrame(rebound,7,100));
+        assertFalse(RealFixRuntimeBridge.validLifecycleFrame(rebound,8,101));
+        assertTrue(RealFixRuntimeBridge.validLifecycleFrame(rebound,7,101));
+        var suspended=new NeoForgePlotGateway.LifecycleBinding(3,1,false,false,-1,100);
+        assertFalse(RealFixRuntimeBridge.validLifecycleFrame(suspended,7,101));
+        var quarantined=new NeoForgePlotGateway.LifecycleBinding(3,3,false,true,-1,102);
+        assertFalse(RealFixRuntimeBridge.validLifecycleFrame(quarantined,7,102));
+        assertTrue(RealFixRuntimeBridge.validLifecycleFrame(quarantined,7,103));
+    }
     @Test void largeShipSearchIsNarrowOnlyWhenAnchoredToNativeWorldPoint() {
         var big=new RealFixBoundsEvidence.Box(0,0,0,40,20,40);
         assertEquals(RealFixBoundaryCandidates.Reason.TOO_BROAD,

@@ -15,11 +15,15 @@ import com.physicaldestroydeform.mixin.SableHeatMapSafetyAccessor;
 import com.physicaldestroydeform.world.WorldCommitCore;
 import com.physicaldestroydeform.world.WorldReceiptJournal;
 import dev.ryanhcode.sable.api.sublevel.SubLevelContainer;
+import dev.ryanhcode.sable.api.sublevel.SubLevelObserver;
 import dev.ryanhcode.sable.companion.math.BoundingBox3d;
 import dev.ryanhcode.sable.physics.config.block_properties.PhysicsBlockPropertyHelper;
 import dev.ryanhcode.sable.sublevel.ServerSubLevel;
+import dev.ryanhcode.sable.sublevel.SubLevel;
+import dev.ryanhcode.sable.sublevel.storage.SubLevelRemovalReason;
 import dev.ryanhcode.sable.sublevel.plot.EmbeddedPlotLevelAccessor;
 import java.nio.charset.StandardCharsets;
+import java.lang.ref.WeakReference;
 import java.util.*;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
@@ -54,6 +58,37 @@ public final class NeoForgePlotGateway implements WorldCommitCore.WorldGateway,M
     private final MinecraftServer server;
     private final PlotCommitService service;
     private final PlotOwnerFence fence=new PlotOwnerFence();
+    private record LifecycleId(String dimension,UUID uuid) {}
+    private record Reload(WeakReference<SubLevelContainer> container,WeakReference<ServerSubLevel> sub) {
+        Reload(SubLevelContainer container,ServerSubLevel sub){this(new WeakReference<>(container),new WeakReference<>(sub));}
+    }
+    private final Set<SubLevelContainer> observedContainers=Collections.newSetFromMap(new WeakHashMap<>());
+    private final Map<PlotOwnerFence.Owner,WeakReference<SubLevelContainer>> suspendedContainers=new HashMap<>();
+    private final Map<PlotOwnerFence.Owner,Reload> reloads=new HashMap<>();
+    private final Set<LifecycleId> removedOwners=new HashSet<>();
+    private final Map<PlotOwnerFence.Owner,Long> changedTicks=new HashMap<>();
+    private boolean observing=true;
+    private boolean lifecycleDirty=true;
+    public record LifecycleBinding(long generation,long revision,boolean active,boolean orphaned,int runtimeId,long changedTick) {}
+    /** Sable has no observer removal API in 2.0.6; use weak ownership and stop guard. */
+    private static final class LifecycleObserver implements SubLevelObserver {
+        private final WeakReference<NeoForgePlotGateway> target;
+        private final SubLevelContainer container;
+        private final String dimension;
+        LifecycleObserver(NeoForgePlotGateway target,SubLevelContainer container,String dimension){
+            this.target=new WeakReference<>(target);this.container=container;this.dimension=dimension;
+        }
+        @Override public void onSubLevelAdded(SubLevel sub){
+            var current=target.get();
+            if(current!=null)try {current.observedAdd(container,dimension,sub);}
+            catch(RuntimeException|LinkageError ignored){ /* never disrupt Sable allocation */ }
+        }
+        @Override public void onSubLevelRemoved(SubLevel sub,SubLevelRemovalReason reason){
+            var current=target.get();
+            if(current!=null)try {current.observedRemove(container,dimension,sub,reason);}
+            catch(RuntimeException|LinkageError ignored){ /* never disrupt Sable removal */ }
+        }
+    }
     private boolean inMutation;
     private SparseStateKey lastBreakKey;
     private boolean lastBreakWitness;
@@ -102,6 +137,48 @@ public final class NeoForgePlotGateway implements WorldCommitCore.WorldGateway,M
     private static PlotOwnerFence.Stamp stamp(ServerSubLevel sub){
         BlockPos center=sub.getPlot().getCenterBlock();
         return new PlotOwnerFence.Stamp(sub.getRuntimeId(),center.getX(),center.getY(),center.getZ(),sub);
+    }
+    public LifecycleBinding lifecycleBinding(String dimension,UUID uuid){
+        var owner=fence.owner(dimension,uuid);
+        if(owner==null)return null;
+        var current=fence.activeStamp(owner);
+        return new LifecycleBinding(owner.generation(),fence.lifecycleRevision(owner),
+                current!=null&&!fence.orphaned(owner),fence.orphaned(owner),current==null?-1:current.runtimeId(),
+                changedTicks.getOrDefault(owner,-1L));
+    }
+    public boolean lifecycleDirty(){return lifecycleDirty;}
+    public void stopLifecycle(){
+        observing=false;observedContainers.clear();reloads.clear();suspendedContainers.clear();
+        removedOwners.clear();changedTicks.clear();
+    }
+    private void observedRemove(SubLevelContainer container,String dim,SubLevel raw,SubLevelRemovalReason reason){
+        if(!observing||!isServerThread()||!(raw instanceof ServerSubLevel sub))return;
+        // Only identity bookkeeping in Sable's callback. No reads of blocks, WAL writes or world mutation.
+        var owner=fence.owner(dim,sub.getUniqueId());
+        lifecycleDirty=true;
+        try {
+            if(reason!=SubLevelRemovalReason.UNLOADED){
+                removedOwners.add(new LifecycleId(dim,sub.getUniqueId()));
+                if(owner!=null)fence.orphan(owner);
+            }else if(owner!=null&&fence.suspend(owner,stamp(sub))){
+                suspendedContainers.put(owner,new WeakReference<>(container));
+            }
+            if(owner!=null){reloads.remove(owner);changedTicks.put(owner,(long)server.getTickCount());}
+        }catch(RuntimeException|LinkageError badProof){if(owner!=null)fence.orphan(owner);}
+    }
+    private void observedAdd(SubLevelContainer container,String dim,SubLevel raw){
+        if(!observing||!isServerThread()||!(raw instanceof ServerSubLevel sub))return;
+        lifecycleDirty=true;
+        var owner=fence.owner(dim,sub.getUniqueId());
+        if(owner==null||fence.orphaned(owner))return;
+        try {
+            if(fence.suspended(owner)){
+                var suspendedContainer=suspendedContainers.get(owner);
+                if(suspendedContainer==null||suspendedContainer.get()!=container||reloads.putIfAbsent(owner,new Reload(container,sub))!=null)
+                    fence.orphan(owner);
+            }else if(!fence.verify(owner,stamp(sub),false))fence.orphan(owner);
+        }catch(RuntimeException|LinkageError badProof){fence.orphan(owner);}
+        if(fence.orphaned(owner))changedTicks.put(owner,(long)server.getTickCount());
     }
     private Cell locate(SparseStateKey virtual,boolean register) {
         return locate(virtual,register,null);
@@ -170,36 +247,53 @@ public final class NeoForgePlotGateway implements WorldCommitCore.WorldGateway,M
     /** Report Sable's actual split lineage. Never guess old/new block correspondence. */
     public void detectLifecycle(){
         if(!isServerThread())throw new IllegalStateException("server thread required");
+        lifecycleDirty=false;
+        for(var removed:removedOwners)service.quarantineRemoved(removed.dimension(),removed.uuid());
+        removedOwners.clear();
         for(ServerLevel level:server.getAllLevels()){
             var container=SubLevelContainer.getContainer(level);
             if(container==null)continue;
             String dim=level.dimension().location().toString();
+            if(observedContainers.add(container))container.addObserver(new LifecycleObserver(this,container,dim));
             for(var raw:container.getAllSubLevels()) {
                 if(!(raw instanceof ServerSubLevel sub)||sub.isRemoved())continue;
                 UUID parent=sub.getSplitFromSubLevel();
                 if(parent!=null){
+                    var parentOwner=fence.owner(dim,parent);
+                    if(parentOwner!=null&&!fence.orphaned(parentOwner))changedTicks.put(parentOwner,(long)server.getTickCount());
                     fence.orphanAncestors(dim,parent);
                     // An unobserved parent may have saved state from a previous session.
                     service.quarantineParent(dim,parent);
                 }
-            }
-        }
-        for(var owner:fence.boundSnapshot()) {
-            ServerLevel level=dimension(owner.dimension());
-            if(level==null)continue;
-            var container=SubLevelContainer.getContainer(level);
-            if(container==null)continue;
-            var raw=container.getSubLevel(owner.uuid());
-            if(raw instanceof ServerSubLevel sub && !sub.isRemoved() && sub.getPlot()!=null) {
-                if(!fence.verify(owner,stamp(sub),sub.getSplitFromSubLevel()!=null)){
+                var owner=fence.owner(dim,sub.getUniqueId());
+                if(owner==null||fence.orphaned(owner)||sub.getPlot()==null)continue;
+                if(fence.suspended(owner)){
+                    var candidate=reloads.remove(owner);
+                    // Sable add occurs before the plot finishes loading. Rebind only at post-tick,
+                    // after live identity and lineage are rechecked. Same UUID alone is insufficient.
+                    boolean proof=candidate!=null&&candidate.container().get()==container&&candidate.sub().get()==sub
+                            &&container.getSubLevel(owner.uuid())==sub&&sub.getLevel()==level
+                            &&!service.isSplitParent(dim,owner.uuid())&&parent==null;
+                    if(proof&&fence.resume(owner,stamp(sub),false)){
+                        suspendedContainers.remove(owner);
+                        changedTicks.put(owner,(long)server.getTickCount());
+                        LOG.info("[PDD-PLOT-LIFECYCLE] phase=REBOUND dim={} owner={} generation={} runtimeBodyId={} proof=UNLOAD_ADD_SAME_CENTER",dim,owner.uuid(),owner.generation(),sub.getRuntimeId());
+                        continue;
+                    }
+                }
+                // A newly bound split CHILD is independent; only its parent is quarantined above.
+                if(!fence.verify(owner,stamp(sub),false)){
                     LOG.warn("[PDD-PLOT-LIFECYCLE] sessionId={} phase=OWNER_EPOCH_MISMATCH dim={} owner={} " +
                             "generation={} runtimeBodyId={} splitFrom={} action=ORPHAN_QUARANTINE",
                             PlotPhysicsProbe.sessionId(),owner.dimension(),owner.uuid(),owner.generation(),sub.getRuntimeId(),sub.getSplitFromSubLevel());
                     fence.orphan(owner);
+                    changedTicks.put(owner,(long)server.getTickCount());
                 }
             }
-            // Missing owners may merely be unloaded. Never infer a split from absence.
         }
+        // Release dead object references promptly; quarantined UUID tombstones remain.
+        reloads.keySet().removeIf(fence::orphaned);
+        suspendedContainers.keySet().removeIf(fence::orphaned);
     }
     /** Sable 2.0.6 HeatMap split can remain unfinished for multiple server ticks.
      * Never submit another PDD Plot break while it has pending work. Sable's

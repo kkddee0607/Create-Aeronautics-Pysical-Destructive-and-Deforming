@@ -144,6 +144,9 @@ public final class StressReservationJournal {
     public synchronized void snapshot(String id,Map<Cell,Probe> snapshot)throws IOException {
         ensureHealthy();var old=require(id);
         if(old.phase!=Phase.RESERVED)return;
+        // An unchanged frozen graph is already durable. Do not encode/CRC,
+        // atomically replace and fsync the same bytes on every blocked retry.
+        if(old.snapshot.equals(snapshot))return;
         persist(new Entry(old.reservation,old.phase,old.plans,old.ledger,old.reason,snapshot));
     }
     /** Append-only partial publication. Every new output must have passed the runtime's bounded live CAS. */
@@ -154,7 +157,13 @@ public final class StressReservationJournal {
         if(old.phase==Phase.CLOSED)throw new IllegalStateException("already closed");
         if(plans.size()<old.plans.size()||!plans.subList(0,old.plans.size()).equals(old.plans))
             throw new IllegalStateException("changed published stress prefix");
-        persist(new Entry(r,Phase.SEALED,plans,session.ledger(),session.rootsExpanded()?"PARTIAL_OR_FINAL_PLANS_DURABLE":"ROOTS_PENDING",snapshot));
+        Ledger ledger=session.ledger();
+        String reason=session.rootsExpanded()?"PARTIAL_OR_FINAL_PLANS_DURABLE":"ROOTS_PENDING";
+        // All fields serialized in this transition must match before eliding
+        // a write. A changed graph, accounting, output or phase still fsyncs.
+        if(old.phase==Phase.SEALED&&old.plans.equals(plans)&&old.ledger.equals(ledger)
+                &&old.reason.equals(reason)&&old.snapshot.equals(snapshot))return;
+        persist(new Entry(r,Phase.SEALED,plans,ledger,reason,snapshot));
     }
     /** A changed graph cannot spend its residual on replacement blocks. Retain that Q under
      * the original deadline while allowing the original direct intents to perform their own CAS. */

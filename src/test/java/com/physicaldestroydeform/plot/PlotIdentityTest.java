@@ -47,4 +47,45 @@ class PlotIdentityTest {
         assertFalse(fence.bind(child,stamp,true));
         assertTrue(fence.orphaned(child));
     }
+    @Test void observedUnloadRequiresMatchingOldIdentityAndExplicitReload(){
+        var fence=new PlotOwnerFence();
+        var owner=PlotOwnerFence.Owner.of(key(ID,3));
+        var old=new PlotOwnerFence.Stamp(1,128,64,256,new Object());
+        var next=new PlotOwnerFence.Stamp(2,128,64,256,new Object());
+        assertTrue(fence.bind(owner,old,false));
+        assertTrue(fence.suspend(owner,old));
+        assertFalse(fence.verify(owner,old,false));
+        assertFalse(fence.bind(owner,next,false));
+        assertFalse(fence.orphaned(owner));
+        assertTrue(fence.resume(owner,next,false));
+        assertTrue(fence.verify(owner,next,false));
+        assertFalse(fence.verify(owner,old,false));
+        assertEquals(3,fence.owner(DIM,owner.uuid()).generation());
+        assertEquals(2,fence.lifecycleRevision(owner));
+    }
+    @Test void staleUnloadAndChangedReloadCenterCannotAuthorizeDamage(){
+        var fence=new PlotOwnerFence();
+        var owner=PlotOwnerFence.Owner.of(key(ID,3));
+        var old=new PlotOwnerFence.Stamp(1,128,64,256,new Object());
+        assertTrue(fence.bind(owner,old,false));
+        assertFalse(fence.suspend(owner,new PlotOwnerFence.Stamp(1,128,64,256,new Object())));
+        assertTrue(fence.orphaned(owner));
+        assertFalse(fence.resume(owner,new PlotOwnerFence.Stamp(2,128,64,256,new Object()),false));
+        var other=new PlotOwnerFence.Owner(DIM,UUID.randomUUID(),1);
+        assertTrue(fence.bind(other,old,false));
+        assertTrue(fence.suspend(other,old));
+        assertFalse(fence.resume(other,new PlotOwnerFence.Stamp(2,129,64,256,new Object()),false));
+        assertTrue(fence.orphaned(other));
+    }
+    @Test void aSuspendedParentCannotBeResumedAfterSplitOrTrueRemoval(){
+        var fence=new PlotOwnerFence();
+        var owner=PlotOwnerFence.Owner.of(key(ID,3));
+        var old=new PlotOwnerFence.Stamp(1,128,64,256,new Object());
+        assertTrue(fence.bind(owner,old,false));
+        assertTrue(fence.suspend(owner,old));
+        fence.orphanAncestors(DIM,owner.uuid());
+        assertFalse(fence.resume(owner,new PlotOwnerFence.Stamp(2,128,64,256,new Object()),false));
+        assertTrue(fence.orphaned(owner));
+        assertFalse(fence.suspended(owner));
+    }
 }

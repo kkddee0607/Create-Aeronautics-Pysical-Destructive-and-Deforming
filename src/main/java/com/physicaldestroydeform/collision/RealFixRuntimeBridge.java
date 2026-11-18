@@ -6,6 +6,7 @@ import com.physicaldestroydeform.material.MaterialRegistry;
 import com.physicaldestroydeform.material.PreviewDamageLedger;
 import com.physicaldestroydeform.world.WorldCommitService;
 import com.physicaldestroydeform.plot.PlotCommitService;
+import com.physicaldestroydeform.plot.NeoForgePlotGateway;
 import com.physicaldestroydeform.state.PreviewCheckpoint;
 import com.physicaldestroydeform.DamageModel;
 import com.physicaldestroydeform.diagnostics.RawObservation;
@@ -123,6 +124,7 @@ public final class RealFixRuntimeBridge {
         long number=1;
         boolean present=true;
         long lastSeen=-1;
+        long lifecycleRevision=-1;
         Generation(int runtimeId){this.runtimeId=runtimeId;}
     }
     private record Stamp(String dimension,long tick) { }
@@ -274,6 +276,7 @@ public final class RealFixRuntimeBridge {
         Objects.requireNonNull(server);Objects.requireNonNull(callbacks);
         Objects.requireNonNull(nativeEvents);Objects.requireNonNull(pre);Objects.requireNonNull(log);
         final long now=server.getTickCount();
+        if(plotCommit!=null)plotCommit.refreshLifecycle(now);
         final boolean complete=NativeCollisionTelemetry.dropped()==lastDropped
                 && NativeCollisionTelemetry.malformed()==lastMalformed
                 && com.physicaldestroydeform.diagnostics.SableContactQueue.dropped()==lastCallbackDropped
@@ -1161,8 +1164,11 @@ public final class RealFixRuntimeBridge {
             String preHigh=owner(pre,stamp.dimension(),idHi);
             if(preLow!=null && !preLow.equals(low) || preHigh!=null && !preHigh.equals(high))return null;
         }
-        Owner a=new Owner(low,generation(stamp.dimension(),low,idLo,stamp.tick()));
-        Owner b=new Owner(high,generation(stamp.dimension(),high,idHi,stamp.tick()));
+        var lowBinding=lifecycleBinding(stamp.dimension(),low);
+        var highBinding=lifecycleBinding(stamp.dimension(),high);
+        if(!validLifecycleFrame(lowBinding,idLo,stamp.tick())||!validLifecycleFrame(highBinding,idHi,stamp.tick()))return null;
+        Owner a=new Owner(low,generation(stamp.dimension(),low,idLo,stamp.tick(),lowBinding));
+        Owner b=new Owner(high,generation(stamp.dimension(),high,idHi,stamp.tick(),highBinding));
         return new RuntimeOwners(Pair.canonical(runId,stamp.dimension(),a,b));
     }
     private static String sourceOwner(String dimension,int id,
@@ -1175,10 +1181,29 @@ public final class RealFixRuntimeBridge {
         String stable=index.bodies.get(runtimeId);
         return AMBIGUOUS_OWNER.equals(stable)?null:stable;
     }
-    private long generation(String dimension,String owner,int runtimeId,long observedTick) {
+    private NeoForgePlotGateway.LifecycleBinding lifecycleBinding(String dim,String stable){
+        if(plotCommit==null||!stable.startsWith("PLOT:"))return null;
+        return plotCommit.lifecycleBinding(dim,UUID.fromString(stable.substring(5)));
+    }
+    static boolean validLifecycleFrame(NeoForgePlotGateway.LifecycleBinding binding,int runtimeId,long observedTick){
+        if(binding==null)return true;
+        if(observedTick<=binding.changedTick())return false; // No old solver evidence may span an unload/add boundary.
+        // Quarantined Plot state stays blocked by its own gateway; independent World
+        // damage from future live source observations is not globally disabled.
+        return binding.orphaned()||(binding.active()&&binding.runtimeId()==runtimeId);
+    }
+    private long generation(String dimension,String owner,int runtimeId,long observedTick,
+                            NeoForgePlotGateway.LifecycleBinding binding) {
         if(owner.startsWith("WORLD:"))return 1;
         String key=dimension+"|"+owner;
         Generation g=generations.computeIfAbsent(key,k->new Generation(runtimeId));
+        if(binding!=null&&!binding.orphaned()){
+            if(g.number!=binding.generation()||g.runtimeId!=runtimeId||!g.present
+                    ||lifecycleChanged(g,binding))invalidateOwner(owner);
+            g.number=binding.generation();g.lifecycleRevision=binding.revision();
+            g.runtimeId=runtimeId;g.present=true;g.lastSeen=observedTick;
+            return g.number;
+        }
         if(g.runtimeId!=runtimeId || !g.present){
             g.runtimeId=runtimeId;
             // Missing owners were incremented when they disappeared; don't
@@ -1192,13 +1217,32 @@ public final class RealFixRuntimeBridge {
     }
     /** Unload/split invalidates every old target/episode, even if the native
      * runtime integer happens to be reused when the plot returns. */
+    private static boolean lifecycleChanged(Generation g,NeoForgePlotGateway.LifecycleBinding binding){
+        return g.lifecycleRevision<0?binding.revision()>0:g.lifecycleRevision!=binding.revision();
+    }
     private void invalidateUnloadedOwners(Map<String,Map<String,Box>> bounds) {
         for(var entry:generations.entrySet()) {
             String key=entry.getKey();int separator=key.indexOf('|');
             if(separator<0)continue;
             String dim=key.substring(0,separator),owner=key.substring(separator+1);
             Generation g=entry.getValue();
-            if(bounds.getOrDefault(dim,Map.of()).containsKey(owner)) {
+            boolean live=bounds.getOrDefault(dim,Map.of()).containsKey(owner);
+            var binding=lifecycleBinding(dim,owner);
+            if(binding!=null&&!binding.orphaned()){
+                boolean loaded=live&&binding.active();
+                if(lifecycleChanged(g,binding)||g.number!=binding.generation()
+                        ||(g.present&&!loaded)||(loaded&&g.runtimeId!=binding.runtimeId()))invalidateOwner(owner);
+                g.number=binding.generation();g.lifecycleRevision=binding.revision();
+                if(loaded)g.runtimeId=binding.runtimeId();
+                g.present=loaded;
+                continue;
+            }
+            if(binding!=null&&lifecycleChanged(g,binding)){
+                g.lifecycleRevision=binding.revision();g.number++;
+                invalidateOwner(owner);
+                g.present=live;continue;
+            }
+            if(live) {
                 g.present=true;
                 continue;
             }
@@ -1276,6 +1320,8 @@ public final class RealFixRuntimeBridge {
         }
     }
     private long currentGeneration(String dimension,String owner) {
+        var binding=lifecycleBinding(dimension,owner);
+        if(binding!=null&&!binding.orphaned())return binding.generation();
         Generation g=generations.get(dimension+"|"+owner);
         return g==null?1:g.number;
     }

@@ -2,16 +2,27 @@ package com.physicaldestroydeform.collision;
 
 import com.physicaldestroydeform.deform.MovePlan;
 import com.physicaldestroydeform.diagnostics.NativeCollisionTelemetry.Contact;
+import com.physicaldestroydeform.diagnostics.NativeCollisionTelemetry.OwnerFrame;
 import java.util.*;
 
 /** Direction authorization is per target and original native record, not owner-average.
  * A derived direction is retained only if every paid parent carries the same axes. */
 public final class TargetDirections {
     private final Map<GameImpactCredit.Target,MovePlan.SignedAxes> directions=new HashMap<>();
+    // Multi-face witnesses constrain an axis but never establish the target alone.
+    private final Map<GameImpactCredit.Target,MovePlan.SignedAxes> unresolvedFaces=new HashMap<>();
     private final Set<GameImpactCredit.Target> ambiguous=new HashSet<>();
     private final Set<GameImpactCredit.Target> original=new HashSet<>();
     private final Map<GameImpactCredit.Target,MovePlan.Evidence> sealed=new HashMap<>();
     private final Map<Contact,NativeEffectDirection.Result> normals=new HashMap<>();
+    // Proof depends on IDs, normals, effect frames, dimension/tick and cap status,
+    // not contact points or force. Event-local only: all native shape reads remain independent.
+    private record NormalKey(int idA,int idB,double ax,double ay,double az,double bx,double by,double bz,
+                             String dimension,long tick,OwnerFrame frameA,OwnerFrame frameB,boolean capped) {
+        static NormalKey of(Contact c){return new NormalKey(c.idA(),c.idB(),c.ax(),c.ay(),c.az(),
+                c.bx(),c.by(),c.bz(),c.dimension(),c.serverTick(),c.frameA(),c.frameB(),c.capSaturated());}
+    }
+    private final Map<NormalKey,NativeEffectDirection.Result> normalProofs=new HashMap<>();
     private GameImpactCredit.Pair pair;
     private List<CollisionFrame.Snapshot> pre=List.of();
     private List<Contact> contacts=List.of();
@@ -40,10 +51,10 @@ public final class TargetDirections {
     }
     MovePlan.SignedAxes axis(String owner,Contact contact){
         if(epoch<0||contact.serverTick()!=tick)return null;
-        var result=normals.computeIfAbsent(contact,c->{
+        var result=normals.computeIfAbsent(contact,c->normalProofs.computeIfAbsent(NormalKey.of(c),key->{
             var n=NativeEffectDirection.verify(pair,List.of(c),pre);
             return NativeApproachEvidence.approaching(pair,pre,n,tick)?n:NativeEffectDirection.unknown("APPROACH_UNVERIFIED");
-        });
+        }));
         var normal=result.forOwner(owner).inward();
         if(normal==null)return null;
         try{return MovePlan.quantizeDirection(normal.x(),normal.y(),normal.z(),true,epoch);}
@@ -54,14 +65,20 @@ public final class TargetDirections {
     MovePlan.SignedAxes uniformPatchAxis(String owner){
         if(epoch<0)return null;
         MovePlan.SignedAxes common=null;
-        var previous=new ArrayList<FrameMath.Vec>();
+        var previous=new LinkedHashSet<FrameMath.Vec>();
         for(var c:contacts){
             var axes=axis(owner,c);
-            if(axes==null||axes.steps().size()!=1||common!=null&&!common.equals(axes))return null;
+            if(axes==null||Math.abs(axes.x())+Math.abs(axes.y())+Math.abs(axes.z())!=1
+                    ||common!=null&&!common.equals(axes))return null;
             var n=normals.get(c).forOwner(owner).inward();
             if(Math.abs(n.x()*axes.x()+n.y()*axes.y()+n.z()*axes.z())<.98)return null;
-            for(var prior:previous)if(n.dot(prior)<.98)return null;
-            previous.add(n);
+            // Distinct normals still need every pairwise check. Identical ones
+            // only need their self-comparison; repeating it adds no evidence.
+            if(previous.contains(n)){if(n.dot(n)<.98)return null;}
+            else {
+                for(var prior:previous)if(n.dot(prior)<.98)return null;
+                previous.add(n);
+            }
             common=axes;
         }
         return common;
@@ -76,7 +93,11 @@ public final class TargetDirections {
         if(incomplete)incompleteWitnesses++;
         else if(axes!=null&&faces.isEmpty())faceMiss++;
         else if(faces.size()>1)faceAmbiguous++;
-        for(var target:incomplete||axes==null||faces.isEmpty()?touched:faces)merge(target,null);
+        if(!incomplete&&axes!=null&&faces.size()>1){
+            // The target is ambiguous, not the signed normal itself. A unique
+            // independent face can corroborate this same axis in either order.
+            for(var target:faces)constrain(target,axes);
+        }else for(var target:touched)merge(target,null);
     }
     void patch(GameImpactCredit.Target target,MovePlan.SignedAxes axes){
         if(axes!=null&&!original.contains(target)){merge(target,axes);acceptedPatch++;}
@@ -91,7 +112,8 @@ public final class TargetDirections {
         return "gate="+gate+" directWitnesses="+acceptedDirect+" patchTargets="+acceptedPatch+
                 " unknownWitnesses="+unknownWitnesses+" faceMiss="+faceMiss+" faceAmbiguous="+faceAmbiguous+
                 " incompleteWitnesses="+incompleteWitnesses+" normalRecords="+reasons+
-                " ambiguous="+ambiguous.size()+" authorized="+sealed.size();
+                " uniqueNormalProofs="+normalProofs.size()+" ambiguous="+ambiguous.size()+
+                " unresolvedFaceCandidates="+unresolvedFaces.size()+" authorized="+sealed.size();
     }
     public void bind(ContactCreditLedger.Grant grant){
         bind(grant,null,null);
@@ -110,11 +132,23 @@ public final class TargetDirections {
     }
     public MovePlan.Evidence evidence(GameImpactCredit.Target target){return sealed.get(target);}
     public MovePlan.SignedAxes get(GameImpactCredit.Target target){return ambiguous.contains(target)?null:directions.get(target);}
-    private void merge(GameImpactCredit.Target target,MovePlan.SignedAxes value){
-        if(value==null){ambiguous.add(target);directions.remove(target);return;}
+    private void veto(GameImpactCredit.Target target){
+        ambiguous.add(target);directions.remove(target);unresolvedFaces.remove(target);
+    }
+    private void constrain(GameImpactCredit.Target target,MovePlan.SignedAxes value){
         if(ambiguous.contains(target))return;
+        var proven=directions.get(target);
+        if(proven!=null){if(!proven.equals(value))veto(target);return;}
+        var previous=unresolvedFaces.putIfAbsent(target,value);
+        if(previous!=null&&!previous.equals(value))veto(target);
+    }
+    private void merge(GameImpactCredit.Target target,MovePlan.SignedAxes value){
+        if(value==null){veto(target);return;}
+        if(ambiguous.contains(target))return;
+        var constraint=unresolvedFaces.remove(target);
+        if(constraint!=null&&!constraint.equals(value)){veto(target);return;}
         var prior=directions.putIfAbsent(target,value);
-        if(prior!=null&&!prior.equals(value)){ambiguous.add(target);directions.remove(target);}
+        if(prior!=null&&!prior.equals(value))veto(target);
     }
     public void trace(ForcePropagation.Trace event){
         if(event instanceof ForcePropagation.Edge edge&&!original.contains(edge.child()))merge(edge.child(),get(edge.parent()));

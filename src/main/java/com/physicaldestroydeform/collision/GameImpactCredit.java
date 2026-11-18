@@ -200,6 +200,12 @@ public final class GameImpactCredit {
     }
     private final Settings config;
     private final Map<Pair,State> states=new HashMap<>();
+    // Durable CreditId outlives the bounded contact cache. Never recycle its
+    // sequence on prune, owner invalidation or clear; the run ID scopes restarts.
+    private long nextEpisodeGeneration;
+    private long newEpisodeGeneration() {
+        return nextEpisodeGeneration=Math.incrementExact(nextEpisodeGeneration);
+    }
     public GameImpactCredit(Settings config) { this.config=Objects.requireNonNull(config); }
     public Settings settings() { return config; }
     public int activePairs() { return states.size(); }
@@ -280,13 +286,13 @@ public final class GameImpactCredit {
             s.pendingApproach=firstApproach;
             s.authorizationTick=firstApproach?frame.tick():-1;
             s.burstFrames=0;
-            s.episodeGeneration++;
+            s.episodeGeneration=newEpisodeGeneration();
             if(!firstApproach)return decision(s,Reason.INITIAL_CONTACT_UNKNOWN,frame,0);
         } else if (s.phase == Phase.ARMED) {
             s.phase=Phase.ACTIVE; s.separatedSamples=0;
             s.pendingApproach=frame.verifiedApproach();
             s.authorizationTick=s.pendingApproach?frame.tick():-1;
-            s.episodeGeneration++;
+            s.episodeGeneration=newEpisodeGeneration();
             s.burstFrames=0;
         } else if (s.phase == Phase.ACTIVE && s.episode>0
                 && frame.independentlyVerifiedReimpact() && frame.verifiedApproach()
@@ -296,7 +302,7 @@ public final class GameImpactCredit {
             // The caller must prove independently new pre-solver inward motion
             // and a different shape-audited contact region. No raw-force-only bypass.
             s.pendingApproach=true;s.authorizationTick=frame.tick();s.burstFrames=0;
-            s.episodeGeneration++;
+            s.episodeGeneration=newEpisodeGeneration();
         } else if (s.phase == Phase.ACTIVE && s.episode==0 && frame.verifiedApproach()
                 && (!s.pendingApproach || s.burstFrames>=2)
                 && (s.authorizationTick<0 || frame.tick()-s.authorizationTick>=config.quietFrames())) {
@@ -304,6 +310,7 @@ public final class GameImpactCredit {
             // proved. This one-time recovery is NEVER triggered by force size.
             // Once any credit issues, ordinary separation/rearm is mandatory.
             s.pendingApproach=true;s.authorizationTick=frame.tick();s.burstFrames=0;
+            s.episodeGeneration=newEpisodeGeneration();
         } else if (s.phase != Phase.ACTIVE || !s.pendingApproach || s.burstFrames >= 2) {
             return decision(s,Reason.DUPLICATE_EPISODE,frame,0);
         }

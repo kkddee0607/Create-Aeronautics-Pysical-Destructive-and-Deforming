@@ -30,7 +30,8 @@ import org.slf4j.Logger;
  * All mutations happen in ServerTickEvent.Post, not inside a Rapier step.
  */
 public final class PlotCommitService {
-    private static final int MAX_RECOVERY_PER_TICK=8, MAX_LOGS_PER_TICK=16;
+    private static final int MAX_RECOVERY_PER_TICK=8, MAX_LOGS_PER_TICK=
+            com.physicaldestroydeform.diagnostics.TraceBudget.cap(4,16);
     private record Coordinate(String dimension,int x,int y,int z) {
         Coordinate(SparseStateKey k){this(k.dimension(),k.x(),k.y(),k.z());}
     }
@@ -50,11 +51,13 @@ public final class PlotCommitService {
     private final Set<PlotOwnerFence.Owner> quarantined=new HashSet<>();
     private final Set<String> knownSplitParents=new HashSet<>();
     private final Map<PlotOwnerFence.Owner,Set<Coordinate>> active=new HashMap<>();
+    private final Map<UUID,Set<PlotOwnerFence.Owner>> activeOwnersByUuid=new HashMap<>();
     // Startup-only owners remain watched before Sable has loaded/bound their Plot.
     private final Map<UUID,Set<PlotOwnerFence.Owner>> restoredOwners=new HashMap<>();
     private SparseStateKey ownBreak;
     private boolean fault;
-    private long accepted,rejected,damaged,broken,blocked,splitOrphans,lastSummary;
+    private long lastLifecycleTick=-1;
+    private long accepted,rejected,damaged,broken,blocked,splitOrphans,lastSummary,suppressedCommitLogs;
     public PlotCommitService(MinecraftServer server,DamageModel.Settings settings,Logger log) throws IOException {
         this.server=Objects.requireNonNull(server);this.log=Objects.requireNonNull(log);
         this.damageSettings=Objects.requireNonNull(settings);
@@ -100,7 +103,7 @@ public final class PlotCommitService {
         // re-queue cleanup without allowing stale data to become live.
         for(var owner:quarantined){
             for(Coordinate cell:active.getOrDefault(owner,Set.of()))queueOrphanCleanup(cell);
-            active.remove(owner);
+            removeActiveOwner(owner);
             log.info("[PDD-PLOT-ORPHAN] phase=RECOVERY owner={} generation={} " +
                     "cleanupQueued={} marker=RESTORED transfer=FORBIDDEN",
                     owner.uuid(),owner.generation(),orphanCleanup.size());
@@ -123,13 +126,21 @@ public final class PlotCommitService {
         var cells=active.get(owner);
         if(cells!=null){
             cells.remove(new Coordinate(virtual));
-            if(cells.isEmpty())active.remove(owner);
+            if(cells.isEmpty())removeActiveOwner(owner);
         }
+    }
+    private void removeActiveOwner(PlotOwnerFence.Owner owner){
+        active.remove(owner);
+        var owners=activeOwnersByUuid.get(owner.uuid());
+        if(owners!=null){owners.remove(owner);if(owners.isEmpty())activeOwnersByUuid.remove(owner.uuid());}
     }
     private void registerState(SparseStateKey virtual){
         if(!PlotKeyCodec.isPlotStorage(virtual))return;
         var owner=PlotOwnerFence.Owner.of(PlotKeyCodec.real(virtual));
-        active.computeIfAbsent(owner,k->new HashSet<>()).add(new Coordinate(virtual));
+        active.computeIfAbsent(owner,k->{
+            activeOwnersByUuid.computeIfAbsent(owner.uuid(),ignored->new HashSet<>()).add(owner);
+            return new HashSet<>();
+        }).add(new Coordinate(virtual));
     }
     private void queueOrphanCleanup(Coordinate position){
         if(orphanCleanupSet.add(position))orphanCleanup.addLast(position);
@@ -189,6 +200,12 @@ public final class PlotCommitService {
     }
     /** Post-physics split detection; old-owner ghost state never migrates by matching XYZ. */
     public void quarantineParent(String dimension,UUID uuid){
+        quarantineOwner(dimension,uuid,"SABLE_SPLIT_FROM_PARENT");
+    }
+    void quarantineRemoved(String dimension,UUID uuid){
+        quarantineOwner(dimension,uuid,"SABLE_REMOVED");
+    }
+    private void quarantineOwner(String dimension,UUID uuid,String reason){
         if(!server.isSameThread()||fault)return;
         String parentKey=dimension+"|"+uuid;
         if(!knownSplitParents.add(parentKey))return;
@@ -201,8 +218,20 @@ public final class PlotCommitService {
         }
         for(var owner:known){
             if(owner.dimension().equals(dimension)&&owner.uuid().equals(uuid))
-                orphan(owner,"SABLE_SPLIT_FROM_PARENT");
+                orphan(owner,reason);
         }
+    }
+    /** Must precede collision credit mapping, including same-tick unload/reload. */
+    public void refreshLifecycle(long tick){
+        if(fault||core.ioFault())return;
+        if(lastLifecycleTick!=tick||gateway.lifecycleDirty()){
+            gateway.detectLifecycle();
+            lastLifecycleTick=tick;
+        }
+        for(var owner:gateway.fence().drainNewOrphans())orphan(owner,"OWNER_ID_OR_EPOCH_CHANGED");
+    }
+    public NeoForgePlotGateway.LifecycleBinding lifecycleBinding(String dimension,UUID uuid){
+        return gateway.lifecycleBinding(dimension,uuid);
     }
     private void orphan(PlotOwnerFence.Owner owner,String reason){
         if(quarantined.contains(owner))return;
@@ -223,7 +252,7 @@ public final class PlotCommitService {
             splitOrphans++;
             if(aborted>0)log.warn("[PDD-PLOT] phase=ABORT_SPLIT owner={} closedQueued={}",owner,aborted);
             for(Coordinate position:active.getOrDefault(owner,Set.of()))queueOrphanCleanup(position);
-            active.remove(owner);
+            removeActiveOwner(owner);
             log.warn("[PDD-PLOT] phase=OWNER_ORPHAN owner={} dimension={} generation={} " +
                             "reason={} stateTransfer=FORBIDDEN oldOwnerDamage=QUARANTINED " +
                             "newOwnerReconstruction=NOT_0_5_1",owner.uuid(),owner.dimension(),
@@ -246,8 +275,9 @@ public final class PlotCommitService {
             String dimension=level.dimension().location().toString();
             // Restored sparse cells must be watched immediately, even before
             // this process sees its first fresh impact and binds a new owner.
-            Set<PlotOwnerFence.Owner> candidates=new HashSet<>(active.keySet());
-            candidates.addAll(gateway.fence().boundSnapshot());
+            Set<PlotOwnerFence.Owner> candidates=new HashSet<>(activeOwnersByUuid.getOrDefault(sub.getUniqueId(),Set.of()));
+            var boundOwner=gateway.fence().owner(dimension,sub.getUniqueId());
+            if(boundOwner!=null)candidates.add(boundOwner);
             candidates.addAll(restoredOwners.getOrDefault(sub.getUniqueId(),Set.of()));
             for(var owner:candidates){
                 if(!owner.dimension().equals(dimension)||!owner.uuid().equals(sub.getUniqueId()))continue;
@@ -306,9 +336,8 @@ public final class PlotCommitService {
             if(tick-lastSummary>=100){lastSummary=tick;log.error("[PDD-PLOT] phase=SUMMARY status=HALTED reason=IO_FAULT");}
             return;
         }
-        gateway.detectLifecycle();
+        refreshLifecycle(tick);
         gateway.pruneSafetyHistory(tick);
-        for(var owner:gateway.fence().orphanedSnapshot())orphan(owner,"OWNER_ID_OR_EPOCH_CHANGED");
         if(fault)return;
         // Bounded sparse-state deletion: owner is blocked from writes as soon as
         // the marker is durable, cleanup does not block the server tick unboundedly.
@@ -347,7 +376,8 @@ public final class PlotCommitService {
             }
             if(result.result()==WorldCommitCore.Outcome.ABORTED)rejected++;
             if(result.result()==WorldCommitCore.Outcome.QUARANTINED)blocked++;
-            if(count++<MAX_LOGS_PER_TICK && result.result()!=WorldCommitCore.Outcome.DEFERRED){
+            if(result.result()==WorldCommitCore.Outcome.DEFERRED)continue;
+            if(result.result()==WorldCommitCore.Outcome.APPLIED_BREAK || result.result()==WorldCommitCore.Outcome.QUARANTINED || count++<MAX_LOGS_PER_TICK){
                 var r=result.receipt();var state=r==null?null:journal.get(r.key());
                 log.info(r!=null&&r.id().startsWith("STRESS:")?"[PDD-STRESS-APPLY] phase=COMMIT serverTick={} result={} reason={} id={} target={} damage={} remainder={} status={} blockMutation={} sableLifecycle=SABLE_NORMAL_HOOK":"[PDD-PLOT] phase=COMMIT serverTick={} result={} reason={} id={} target={} " +
                                 "damage={} remainder={} status={} blockMutation={} " +
@@ -356,7 +386,7 @@ public final class PlotCommitService {
                         r==null?"NONE":PlotKeyCodec.real(r.key()),
                         state==null?0:state.damage(),state==null?0:state.remainder(),
                         r==null?"NONE":r.status(),result.result()==WorldCommitCore.Outcome.APPLIED_BREAK);
-            }
+            }else suppressedCommitLogs++;
         }
         if(journal.checkpointNeeded() || tick%100==0){
             try{journal.checkpointBatch(WorldPersistentJournal.SAVE_DIRTY_BATCH);}
@@ -367,9 +397,9 @@ public final class PlotCommitService {
             log.info("[PDD-PLOT] phase=SUMMARY accepted={} damaged={} broken={} rejected={} " +
                             "blocked={} splitOrphans={} pending={} orphanCleanup={} persistentStates={} receipts={} " +
                             "walBytes={} fault={} heatMapHolds={} breakSpacingHolds={} " +
-                            "breakSpacingTicks={} tickWitnessHolds={}",accepted,damaged,broken,rejected,blocked,splitOrphans,
+                            "breakSpacingTicks={} tickWitnessHolds={} suppressedCommitLogs={}",accepted,damaged,broken,rejected,blocked,splitOrphans,
                     core.queued(),orphanCleanup.size(),journal.size(),journal.receiptCount(),journal.bytes(),
-                    fault||core.ioFault(),gateway.heatMapHolds(),gateway.spacingHolds(),gateway.breakSpacingTicks(),gateway.tickWitnessHolds());
+                    fault||core.ioFault(),gateway.heatMapHolds(),gateway.spacingHolds(),gateway.breakSpacingTicks(),gateway.tickWitnessHolds(),suppressedCommitLogs);
         }
     }
     public void attachStress(StressRuntime runtime){
@@ -408,6 +438,7 @@ public final class PlotCommitService {
         return StressCommitHandoff.offer(core,entry,plan,intent,server.overworld().getGameTime());
     }
     public void stop(){
+        gateway.stopLifecycle();
         try{
             if(!fault&&!core.ioFault())journal.stagePendingOrder(core.pendingSnapshot());
             int n=0;
@@ -418,7 +449,7 @@ public final class PlotCommitService {
         }catch(IOException failed){
             log.error("[PDD-PLOT] phase=STOP status=CHECKPOINT_FAILED wal=RETAINED",failed);
         }
-        active.clear();quarantined.clear();knownSplitParents.clear();unresolved.clear();orphanCleanup.clear();orphanCleanupSet.clear();
+        active.clear();activeOwnersByUuid.clear();quarantined.clear();knownSplitParents.clear();unresolved.clear();orphanCleanup.clear();orphanCleanupSet.clear();
         restoredOwners.clear();
     }
 }

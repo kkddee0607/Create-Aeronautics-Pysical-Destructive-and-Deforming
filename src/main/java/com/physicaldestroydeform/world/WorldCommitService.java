@@ -24,7 +24,8 @@ public final class WorldCommitService {
         Cell(String dim,BlockPos pos){this(dim,pos.getX(),pos.getY(),pos.getZ());}
         Cell(SparseStateKey key){this(key.dimension(),key.x(),key.y(),key.z());}
     }
-    private static final int MAX_BOOT_RECONCILE_PER_TICK=8, MAX_COMMIT_LOGS_PER_TICK=20;
+    private static final int MAX_BOOT_RECONCILE_PER_TICK=8, MAX_COMMIT_LOGS_PER_TICK=
+            com.physicaldestroydeform.diagnostics.TraceBudget.cap(4,20);
     private static final int MAX_RECOVERY_SAMPLES=4;
     private static final boolean TRACE_RECOVERY=Boolean.getBoolean("pdd.persistence.traceRecovery");
     private static final boolean VERBOSE=Boolean.getBoolean("pdd.world.verbose")
@@ -43,7 +44,7 @@ public final class WorldCommitService {
     private final Deque<WorldReceiptJournal.Receipt> unresolved=new ArrayDeque<>();
     private Cell ownBreak;
     private boolean fault;
-    private long lastSummaryTick, rejected, accepted, appliedDamage, appliedBreak, blocked;
+    private long lastSummaryTick, rejected, accepted, appliedDamage, appliedBreak, blocked, suppressedCommitLogs;
     private long recoveredDeferredAborted, recoveredPreparedQuarantined, recoveryLoadMisses;
     private int recoverySamples;
     public WorldCommitService(MinecraftServer server,DamageModel.Settings damage,Logger log) throws IOException {
@@ -226,7 +227,9 @@ public final class WorldCommitService {
                 case ABORTED -> rejected++;
                 default -> { }
             }
-            if(shown++<MAX_COMMIT_LOGS_PER_TICK && result.result()!=WorldCommitCore.Outcome.DEFERRED){
+            if(result.result()==WorldCommitCore.Outcome.DEFERRED)continue;
+            // Always retain physical breaks and quarantines; sample routine damage rows.
+            if(result.result()==WorldCommitCore.Outcome.APPLIED_BREAK || result.result()==WorldCommitCore.Outcome.QUARANTINED || shown++<MAX_COMMIT_LOGS_PER_TICK){
                 var receipt=result.receipt();
                 var damage=receipt==null?null:journal.get(receipt.key());
                 log.info(receipt!=null&&receipt.id().startsWith("STRESS:")?"[PDD-STRESS-APPLY] phase=RESULT result={} reason={} id={} key={} damageU16={} remainderU8={} materialGeneration={} receiptStatus={} walBytes={}":"[PDD-COMMIT] phase=RESULT result={} reason={} id={} " +
@@ -236,7 +239,7 @@ public final class WorldCommitService {
                         receipt==null?"NONE":receipt.key(),damage==null?0:damage.damage(),
                         damage==null?0:damage.remainder(),damage==null?"NONE":damage.materialGeneration(),
                         receipt==null?"NONE":receipt.status(),journal.bytes());
-            }
+            }else suppressedCommitLogs++;
         }
         // Recovery WAL transitions are already fsynced. Snapshot I/O has a bounded
         // per-tick budget, and never runs inside a Sable collision callback.
@@ -261,9 +264,9 @@ public final class WorldCommitService {
             lastSummaryTick=tick;
             log.info("[PDD-SAVE] phase=SUMMARY accepted={} appliedDamage={} appliedBreak={} " +
                             "rejected={} quarantined={} queued={} restorePending={} retainedDamage={} " +
-                            "receipts={} walBytes={} fault={}",
+                            "receipts={} walBytes={} fault={} suppressedCommitLogs={}",
                     accepted,appliedDamage,appliedBreak,rejected,blocked,core.queued(),unresolved.size(),
-                    journal.size(),journal.receiptCount(),journal.bytes(),fault||core.ioFault());
+                    journal.size(),journal.receiptCount(),journal.bytes(),fault||core.ioFault(),suppressedCommitLogs);
             if(recoveredDeferredAborted>0 || recoveredPreparedQuarantined>0 || !unresolved.isEmpty())
                 log.info("[PDD-RECOVERY] phase=SUMMARY deferredAborted={} " +
                                 "preparedQuarantined={} awaitingLoaded={} loadMissAttempts={} " +

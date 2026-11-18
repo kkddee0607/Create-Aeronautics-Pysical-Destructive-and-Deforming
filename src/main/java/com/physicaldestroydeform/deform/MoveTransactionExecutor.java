@@ -214,7 +214,7 @@ public final class MoveTransactionExecutor {
         if(TRACE&&(result.equals("APPLIED")||result.equals("BLOCKED_RESERVE_SETTLED")||result.endsWith("_UNUSED"))){
             double spent=result.equals("BLOCKED_RESERVE_SETTLED")?b.blockedAppliedQ():0;
             LOG.info("[PDD-DEFORM-Q] id={} result={} reservedQ={} spentQ={} unusedQ={}",
-                    b.id(),result,b.reservedQ(),b.reservedQ()-spent);
+                    b.id(),result,b.reservedQ(),spent,b.reservedQ()-spent);
         }
     }
     private Outcome uncertain(MoveTransactionJournal.BeforeImage b,Gateway gateway,String reason) {

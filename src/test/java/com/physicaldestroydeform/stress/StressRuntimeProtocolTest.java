@@ -1,6 +1,8 @@
 package com.physicaldestroydeform.stress;
 
 import com.physicaldestroydeform.*;
+import com.physicaldestroydeform.material.CopycatMaterial;
+import com.physicaldestroydeform.material.MaterialRegistry;
 import com.physicaldestroydeform.state.SparseStateKey;
 import com.physicaldestroydeform.world.*;
 import java.nio.file.Path;
@@ -99,6 +101,86 @@ class StressRuntimeProtocolTest {
         replay.advance(cell->{var probe=restored.snapshot().get(cell);assertNotNull(probe);return probe;},101,512);
         assertEquals(session.plans(),replay.plans());assertEquals(session.ledger(),replay.ledger());
         assertEquals(applyId(r.creditId(),session.plans().getFirst().node().cell()),applyId(r.creditId(),replay.plans().getFirst().node().cell()));
+    }
+    @Test void byteEquivalentSnapshotAndSealDoNotReplaceDurableEntry()throws Exception {
+        var r=reservation("idempotent-checkpoint",Policy.defaults());
+        var directory=path.resolve("stress-idempotent");
+        var journal=new StressReservationJournal(directory);journal.reserve(r);
+        var graph=new TreeMap<Cell,Probe>();
+        graph.put(node(0).cell(),Probe.solid(node(0)));
+        graph.put(node(1).cell(),Probe.unavailable());
+        journal.snapshot(r.creditId(),graph);
+        var frozen=journal.get(r.creditId());
+        journal.snapshot(r.creditId(),new TreeMap<>(graph));
+        assertSame(frozen,journal.get(r.creditId()));
+        var session=new Session(r.seeds(),r.policy(),r.settings(),100,true);
+        Graph blocked=cell->cell.equals(node(1).cell())?Probe.unavailable():line(1).read(cell);
+        session.advance(blocked,100,1);journal.sealProgress(r.creditId(),session,graph);
+        var first=journal.get(r.creditId());
+        assertTrue(first.holdsOrigins());assertEquals(100,first.ledger().pendingQ(),1e-12);
+        session.advance(blocked,101,1);journal.sealProgress(r.creditId(),session,graph);
+        assertSame(first,journal.get(r.creditId()));
+        // A changed snapshot with identical plans and Q still MUST persist.
+        graph.put(node(1).cell(),Probe.solid(node(1)));
+        journal.sealProgress(r.creditId(),session,graph);
+        var changed=journal.get(r.creditId());
+        assertNotSame(first,changed);
+        assertEquals(first.ledger(),changed.ledger());
+        assertEquals(changed,new StressReservationJournal(directory).get(r.creditId()));
+        // A changed ledger/plan with an identical snapshot also MUST persist.
+        session.advance(line(1),102,512);journal.sealProgress(r.creditId(),session,graph);
+        var complete=journal.get(r.creditId());
+        assertNotSame(changed,complete);
+        assertFalse(complete.holdsOrigins());assertEquals(1,complete.plans().size());
+        assertEquals(60,complete.ledger().directQ(),1e-12);
+        assertEquals(15,complete.ledger().plasticUnusedQ(),1e-12);
+        assertEquals(25,complete.ledger().unusedQ(),1e-12);
+        assertEquals(0,complete.ledger().pendingQ(),1e-12);
+        assertEquals(complete,new StressReservationJournal(directory).get(r.creditId()));
+    }
+    @Test void publishedCellIndexTracksDurableNotSpeculativeOutputs()throws Exception {
+        var r=reservation("published-index",Policy.defaults());
+        var journal=new StressReservationJournal(path.resolve("stress-published-index"));
+        journal.reserve(r);
+        var index=new StressRuntime.PublishedCells();
+        assertFalse(index.contains(journal.get(r.creditId()),node(0).cell()));
+        var session=new Session(r.seeds(),r.policy(),r.settings(),100,true);
+        session.advance(cell->cell.equals(node(1).cell())?Probe.unavailable():line(1).read(cell),100,1);
+        journal.sealProgress(r.creditId(),session,Map.of());
+        assertFalse(index.contains(journal.get(r.creditId()),node(0).cell()));
+        session.advance(line(1),101,1); // root complete; neighbor only a future output
+        journal.sealProgress(r.creditId(),session,Map.of());
+        assertTrue(index.contains(journal.get(r.creditId()),node(0).cell()));
+        assertFalse(index.contains(journal.get(r.creditId()),node(1).cell()));
+        session.advance(line(1),102,512);journal.sealProgress(r.creditId(),session,Map.of());
+        var complete=journal.get(r.creditId());
+        assertTrue(index.contains(complete,node(0).cell()));
+        assertTrue(index.contains(complete,node(1).cell()));
+        assertFalse(index.contains(complete,node(2).cell()));
+    }
+    @Test void immutableMaterialLookupReusesOnlyOrdinarySameTickSameSnapshotValues(){
+        var snapshot=new MaterialRegistry.Snapshot(1,Map.of(),Map.of(),"rev");
+        var next=new MaterialRegistry.Snapshot(1,Map.of(),Map.of(),"rev");
+        var lookup=new StressRuntime.StaticMaterialLookup();
+        var ordinary=key(0).fingerprint();
+        var first=new CopycatMaterial.Resolved(MATERIAL,"",false);
+        var changed=new CopycatMaterial.Resolved(new MaterialProperties(1,1024,0,0,false),"",false);
+        int[] reads={0};
+        assertEquals(first,lookup.resolve(snapshot,ordinary,()->{reads[0]++;return first;}));
+        assertEquals(first,lookup.resolve(snapshot,ordinary,()->{reads[0]++;return first;}));
+        assertEquals(1,reads[0]);
+        assertEquals(changed,lookup.resolve(next,ordinary,()->{reads[0]++;return changed;}));
+        assertEquals(2,reads[0]); // new snapshot instance, even same generation
+        lookup.beginTick();
+        assertEquals(first,lookup.resolve(next,ordinary,()->{reads[0]++;return first;}));
+        assertEquals(3,reads[0]); // never retain cache across ticks
+        assertNull(lookup.resolve(next,"unknown:block|block",()->{reads[0]++;return null;}));
+        assertNull(lookup.resolve(next,"unknown:block|block",()->{reads[0]++;return null;}));
+        assertEquals(4,reads[0]);
+        String copycat="copycats:copycat_block|block";
+        assertEquals(first,lookup.resolve(next,copycat,()->{reads[0]++;return first;}));
+        assertEquals(changed,lookup.resolve(next,copycat,()->{reads[0]++;return changed;}));
+        assertEquals(6,reads[0]); // even within one tick a material edit must be seen
     }
     @Test void partialOutputPrefixCannotBeReplacedByANewTraversal()throws Exception {
         var r=reservation("immutable-prefix",Policy.defaults());var journal=new StressReservationJournal(path.resolve("stress"));journal.reserve(r);

@@ -215,6 +215,40 @@ final class GameImpactCreditTest {
         assertEquals(Phase.UNINITIALIZED,e.phase(P));
         assertEquals(Reason.APPROVED,e.step(frame(3,MANY,false,true,TA,TB)).reason());
     }
+    @Test void retiredPairsNeverReuseDurableCreditIdentity() {
+        var e=new GameImpactCredit(Settings.provisional());
+        var first=e.step(frame(1,MANY,false,true,TA,TB));
+        assertTrue(first.credited());
+        e.prune(602); // 601 > 600
+        assertEquals(0,e.activePairs());
+        var second=e.step(frame(603,MANY,false,true,TA,TB));
+        assertTrue(second.credited());
+        assertTrue(second.episodeGeneration()>first.episodeGeneration());
+        e.invalidateOwner(P.a().stableKey());
+        var third=e.step(frame(604,MANY,false,true,TA,TB));
+        assertTrue(third.credited());
+        assertTrue(third.episodeGeneration()>second.episodeGeneration());
+        e.clear();
+        var fourth=e.step(frame(605,MANY,false,true,TA,TB));
+        assertTrue(fourth.credited());
+        assertTrue(fourth.episodeGeneration()>third.episodeGeneration());
+        assertEquals(first.issuedQ(),fourth.issuedQ(),0);
+    }
+    @Test void distinctPairsAndAbortedAuthorizationsUseDistinctSequences() {
+        var e=new GameImpactCredit(Settings.provisional());
+        var first=e.step(frame(1,MANY,false,true,TA,TB));
+        assertTrue(e.abortUnissued(P,first));
+        var other=Pair.canonical("run","minecraft:overworld",new Owner("PLOT:2",1),B);
+        var otherTarget=new Target(other.a().stableKey(),"1,2,3","minecraft:stone");
+        var different=e.step(new Frame(other,2,MANY,false,true,otherTarget,TB));
+        assertTrue(different.credited());
+        var retry=e.step(frame(3,MANY,false,true,TA,TB));
+        assertTrue(retry.credited());
+        assertTrue(first.episodeGeneration()<different.episodeGeneration());
+        assertTrue(different.episodeGeneration()<retry.episodeGeneration());
+        assertFalse(e.abortUnissued(P,first));
+        assertEquals(1,retry.episode());
+    }
     @Test void risingEdgeNeedsQuietEvidenceAndIndependentGeometry() {
         var e=new GameImpactCredit(new GameImpactCredit.Settings(2,2,0.25,64,2,4096,600));
         assertEquals(1.8,e.settings().risingRatio());

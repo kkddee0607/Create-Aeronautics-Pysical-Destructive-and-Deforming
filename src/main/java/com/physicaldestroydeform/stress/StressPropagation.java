@@ -41,14 +41,16 @@ public final class StressPropagation {
     }
     public enum State { SOLID, EMPTY, UNAVAILABLE, DENIED }
     public record Probe(State state,Node node) {
+        private static final Probe EMPTY=new Probe(State.EMPTY,null),UNAVAILABLE=new Probe(State.UNAVAILABLE,null),
+                DENIED=new Probe(State.DENIED,null);
         public Probe {
             Objects.requireNonNull(state);
             if((state==State.SOLID)!=(node!=null))throw new IllegalArgumentException("invalid probe");
         }
         public static Probe solid(Node node){return new Probe(State.SOLID,node);}
-        public static Probe empty(){return new Probe(State.EMPTY,null);}
-        public static Probe unavailable(){return new Probe(State.UNAVAILABLE,null);}
-        public static Probe denied(){return new Probe(State.DENIED,null);}
+        public static Probe empty(){return EMPTY;}
+        public static Probe unavailable(){return UNAVAILABLE;}
+        public static Probe denied(){return DENIED;}
     }
     @FunctionalInterface public interface Graph { Probe read(Cell cell); }
     /** Caller supplies a validated owner-local normal only. Null means unbiased propagation. */
@@ -124,6 +126,9 @@ public final class StressPropagation {
             validQ(total);reserved=total;seeds=List.copyOf(sorted);
         }
         public boolean matchesOrigin(List<Seed> roots,Policy p,DamageModel.Settings d,long tick) {
+            // Runtime reservation roots are already canonical; keep the
+            // order-independent public check for all other callers.
+            if(seeds.equals(roots))return policy.equals(p)&&damage.equals(d)&&started==tick;
             var sorted=new ArrayList<>(roots);sorted.sort(Comparator.comparing(s->s.node.cell));
             return seeds.equals(sorted)&&policy.equals(p)&&damage.equals(d)&&started==tick;
         }
@@ -247,6 +252,8 @@ public final class StressPropagation {
         }
         /** Completed nodes already have complete minimum-depth arrivals; future levels cannot alter them. */
         public List<PlannedNode> partialPlans(){return List.copyOf(plans);}
+        boolean finished(){return finished;}
+        int plannedNodes(){return plans.size();}
         public List<PlannedNode> plans(){
             if(!finished)throw new IllegalStateException("stress level planning not sealed");
             return List.copyOf(plans);
