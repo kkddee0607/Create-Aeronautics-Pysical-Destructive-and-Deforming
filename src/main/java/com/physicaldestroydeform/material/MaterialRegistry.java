@@ -82,7 +82,25 @@ public final class MaterialRegistry {
     }
     public static int size(){return current.definitions().size();}
     public static long generation(){return current.generation();}
-    public static synchronized void clear(){current=new Snapshot(current.generation()+1,Map.of(),Map.of(),ALGORITHM_REVISION);}
+    public static synchronized void clear(){current=new Snapshot(0,Map.of(),Map.of(),ALGORITHM_REVISION);}
+
+    /** Persisted material generation is content-bound, not the number of reloads in this JVM.
+     * Sort every effective row; categorical domain separation prevents definition/state aliasing.
+     * Keep the existing nonnegative long wire format (63 bits of SHA-256). */
+    public static long contentGeneration(Map<ResourceLocation,MaterialProperties> definitions,
+                                         Map<String,MaterialProperties> states,String revision) {
+        try {
+            var digest=MessageDigest.getInstance("SHA-256");
+            java.util.function.Consumer<String> add=s->{digest.update(s.getBytes(StandardCharsets.UTF_8));digest.update((byte)0);};
+            add.accept(revision);add.accept("definitions");
+            definitions.entrySet().stream().sorted(Comparator.comparing(e->e.getKey().toString()))
+                    .forEach(e->{add.accept(e.getKey().toString());add.accept(e.getValue().toString());});
+            add.accept("states");
+            states.entrySet().stream().sorted(Map.Entry.comparingByKey())
+                    .forEach(e->{add.accept(e.getKey());add.accept(e.getValue().toString());});
+            return (java.nio.ByteBuffer.wrap(digest.digest()).getLong() & Long.MAX_VALUE);
+        }catch(java.security.NoSuchAlgorithmException impossible){throw new IllegalStateException(impossible);}
+    }
 
     /** Recompute only registered block definitions, never iterate placed World/Plot blocks. */
     public static synchronized void rebuild(MinecraftServer server,Logger logger) {
@@ -143,7 +161,7 @@ public final class MaterialRegistry {
         int bundledCount=applyBundled(source.bundled(),result,states);
         int overrides=applyOverrides(result,states,logger);
         int externalCount=applyExternal(source.external(),result,states,logger);
-        Snapshot next=new Snapshot(current.generation()+1,result,states,ALGORITHM_REVISION,
+        Snapshot next=new Snapshot(contentGeneration(result,states,ALGORITHM_REVISION+"|"+CopycatMaterial.POLICY),result,states,ALGORITHM_REVISION,
                 items,source.hashes());
         current=next;
         logger.info("[PDD-MATERIAL] rebuild generation={} policy={} blockTypes={} items={} recipesInferred={} " +
@@ -226,7 +244,7 @@ public final class MaterialRegistry {
         MaterialCsvCatalog.Snapshot bundled=MaterialCsvCatalog.parse(
                 new StringReader(new String(bb,StandardCharsets.UTF_8)),
                 new StringReader(new String(bi,StandardCharsets.UTF_8)),
-                id->registeredBlock(id),id->registeredItem(id),current.generation()+1,"jar");
+                id->registeredBlock(id),id->registeredItem(id),0,"jar");
         Map<String,String> hashes=new HashMap<>();
         hashes.put("jar.blocks",sha(bb));hashes.put("jar.items",sha(bi));
         MaterialCsvCatalog.Layer external=new MaterialCsvCatalog.Layer(Map.of(),Map.of(),0,0,0);

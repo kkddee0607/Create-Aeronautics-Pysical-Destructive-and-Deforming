@@ -188,6 +188,16 @@ public final class ContactCreditLedger {
                                  com.physicaldestroydeform.DamageModel.Settings damage,
                                  Map<String,ForcePropagation.Orientation> directions,
                                  java.util.function.Consumer<ForcePropagation.Trace> trace) {
+        return issuePropagatedTargets(pair,decision,source,evidence,neighbors,t->Objects.requireNonNull(materials.apply(t.fingerprint()),"missing material"),
+                forces,damage,directions,trace,materials);
+    }
+    public Grant issuePropagatedTargets(GameImpactCredit.Pair pair,GameImpactCredit.Decision decision,
+                                 Source source,List<Region> evidence,ForcePropagation.NeighborReader neighbors,
+                                 java.util.function.Function<GameImpactCredit.Target,com.physicaldestroydeform.MaterialProperties> materials,
+                                 GameImpactCredit.Settings forces,com.physicaldestroydeform.DamageModel.Settings damage,
+                                 Map<String,ForcePropagation.Orientation> directions,
+                                 java.util.function.Consumer<ForcePropagation.Trace> trace,
+                                 java.util.function.Function<String,com.physicaldestroydeform.MaterialProperties> legacyMaterials) {
         // Preserve every existing owner/region/episode validation and one-credit rule.
         lastPropagationFailure="NONE";
         Grant base=issue(pair,decision,source,evidence);
@@ -202,13 +212,13 @@ public final class ContactCreditLedger {
             List<GameImpactCredit.Target> seedsB=base.b().stream().map(Share::target).toList();
             double sideF=decision.peakForce()/2;
             var pa=directions==null
-                    ?ForcePropagation.plan(pair.a().stableKey(),seedsA,sideF,neighbors,materials,forces,damage)
-                    :ForcePropagation.plan(pair.a().stableKey(),seedsA,sideF,neighbors,materials,forces,damage,
+                    ?ForcePropagation.plan(pair.a().stableKey(),seedsA,sideF,neighbors,legacyMaterials,forces,damage)
+                    :ForcePropagation.planTargets(pair.a().stableKey(),seedsA,sideF,neighbors,materials,forces,damage,
                             directions.getOrDefault(pair.a().stableKey(),ForcePropagation.Orientation.unknown()),
                             traces==null?null:traces::add);
             var pb=directions==null
-                    ?ForcePropagation.plan(pair.b().stableKey(),seedsB,sideF,neighbors,materials,forces,damage)
-                    :ForcePropagation.plan(pair.b().stableKey(),seedsB,sideF,neighbors,materials,forces,damage,
+                    ?ForcePropagation.plan(pair.b().stableKey(),seedsB,sideF,neighbors,legacyMaterials,forces,damage)
+                    :ForcePropagation.planTargets(pair.b().stableKey(),seedsB,sideF,neighbors,materials,forces,damage,
                             directions.getOrDefault(pair.b().stableKey(),ForcePropagation.Orientation.unknown()),
                             traces==null?null:traces::add);
             var a=seal(pa,decision.allocation().sideA());

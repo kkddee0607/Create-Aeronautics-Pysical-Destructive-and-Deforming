@@ -157,6 +157,68 @@ class WorldPersistentCommitIntegrationTest {
         assertEquals(0,replaced.breakCalls);
         assertNull(next.get(k));
     }
+    @Test void sealedHandoffKeepsOriginalDeadlineBeforeAndAfterRestart()throws Exception{
+        for(boolean restart:new boolean[]{false,true}){
+            var data=area();var j=data.open();var k=key(70);
+            var core=new WorldCommitCore(j,DamageModel.Settings.defaults(),64);
+            // Planning consumed 1199 ticks; handoff must not grant another 1200.
+            core.submitSealed(intent("sealed-expiry",k,1000),DamageModel.Settings.defaults(),11199,11200);
+            if(restart)core=new WorldCommitCore(data.open(),DamageModel.Settings.defaults(),64);
+            var fake=new Fake();
+            assertEquals("DEFER_TTL_EXPIRED",core.tick(fake,1,64,11201).getFirst().reason());
+            assertEquals(0,fake.breakCalls);assertNull(data.open().get(k));
+        }
+    }
+    @Test void sealedHandoffUsesFrozenDamageSettingsWithoutRestart()throws Exception{
+        var data=area();var j=data.open();var k=key(71);var source=intent("sealed-settings",k,1);
+        var original=DamageModel.Settings.defaults();
+        var changed=new DamageModel.Settings(.08,1.5,.15,1.5,9,1);
+        var core=new WorldCommitCore(j,changed,64);
+        core.submitSealed(source,original,10000,11200);
+        core.tick(new Fake(),201,64,10001);
+        var expected=DamageModel.plan(1,STONE,new com.physicaldestroydeform.BlockDamageState(),original);
+        assertEquals(expected.plannedDamageUnits(),j.get(k).damage());
+        assertEquals(expected.plannedRemainderU8(),j.get(k).remainder());
+    }
+    @Test void expiredHandoffWritesTerminalReceiptWithoutWorldAccess()throws Exception{
+        var data=area();var j=data.open();var k=key(72);var i=intent("already-expired",k,1000);
+        var core=new WorldCommitCore(j,DamageModel.Settings.defaults(),64);
+        var result=core.submitSealed(i,DamageModel.Settings.defaults(),11201,11200);
+        assertEquals(WorldCommitCore.Outcome.ABORTED,result.result());
+        assertEquals("DEFER_TTL_EXPIRED",result.reason());assertEquals(0,core.queued());
+        var boot=new WorldCommitCore(data.open(),DamageModel.Settings.defaults(),64);
+        assertEquals(WorldCommitCore.Outcome.DUPLICATE,
+                boot.submitSealed(i,DamageModel.Settings.defaults(),11202,11200).result());
+    }
+    @Test void sealedDeadlineIsAuthoritativeEvenWithUnrelatedServerTick()throws Exception{
+        var data=area();var j=data.open();var k=key(73);
+        var core=new WorldCommitCore(j,DamageModel.Settings.defaults(),64);
+        core.submitSealed(intent("separate-clock",k,1),DamageModel.Settings.defaults(),10000,11200);
+        var fake=new Fake();fake.loaded=false;
+        assertEquals(WorldCommitCore.Outcome.DEFERRED,core.tick(fake,5000,64,11200).getFirst().result());
+        assertEquals("DEFER_TTL_EXPIRED",core.tick(fake,5001,64,11201).getFirst().reason());
+        assertNull(j.get(k));assertEquals(0,fake.breakCalls);
+    }
+    @Test void alreadyOldDirectIntentCannotReceiveAnExtraCurrentTick()throws Exception{
+        var data=area();var j=data.open();var k=key(74);
+        var core=new WorldCommitCore(j,DamageModel.Settings.defaults(),64);
+        assertEquals(WorldCommitCore.Outcome.ABORTED,
+                core.submit(intent("old-at-admission",k,1000),1401,10000).result());
+        assertEquals(0,core.queued());assertEquals(WorldReceiptJournal.Status.ABORTED,journalStatus(data,"old-at-admission"));
+    }
+    private static WorldReceiptJournal.Status journalStatus(Data data,String id)throws Exception{
+        return data.open().receipt(id).status();
+    }
+    @Test void reservationHoldDoesNotReadWorldOrRenewDeadline()throws Exception{
+        var data=area();var core=new WorldCommitCore(data.open(),DamageModel.Settings.defaults(),64);
+        core.submit(intent("held",key(75),1),200,10000);core.setExecutionHold(i->true);
+        var fake=new Fake(){@Override public WorldCommitCore.Observation readIfLoaded(SparseStateKey k){
+            throw new AssertionError("held intent read the world");
+        }};
+        assertEquals("RESERVATION_PLANNING_HOLD",core.tick(fake,201,64,10001).getFirst().reason());
+        assertEquals("DEFER_TTL_EXPIRED",core.tick(fake,1401,64,11201).getFirst().reason());
+        assertEquals(0,core.queued());
+    }
     @Test void cleanCheckpointPreservesRotatedQueueOrder()throws Exception{
         var data=area();var j=data.open();
         var core=new WorldCommitCore(j,DamageModel.Settings.defaults(),64);

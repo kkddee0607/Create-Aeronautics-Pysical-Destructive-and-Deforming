@@ -23,6 +23,15 @@ public final class WorldIntentMapper {
     public static Projection project(ContactCreditLedger.Grant grant,long materialGeneration,
                                      Function<String,MaterialProperties> materials,
                                      Function<SparseStateKey,String> incarnation) {
+        return projectTargets(grant,materialGeneration,t->{var m=materials.apply(t.fingerprint());return m==null?null:new com.physicaldestroydeform.material.CopycatMaterial.Resolved(m,"",false);},incarnation);
+    }
+    public static Projection projectTargets(ContactCreditLedger.Grant grant,long materialGeneration,
+            Function<GameImpactCredit.Target,com.physicaldestroydeform.material.CopycatMaterial.Resolved> materials,Function<SparseStateKey,String> incarnation) {
+        return projectTargets(grant,materialGeneration,materials,incarnation,t->null);
+    }
+    public static Projection projectTargets(ContactCreditLedger.Grant grant,long materialGeneration,
+            Function<GameImpactCredit.Target,com.physicaldestroydeform.material.CopycatMaterial.Resolved> materials,Function<SparseStateKey,String> incarnation,
+            Function<GameImpactCredit.Target,com.physicaldestroydeform.deform.MovePlan.Evidence> directions) {
         Objects.requireNonNull(grant);Objects.requireNonNull(materials);Objects.requireNonNull(incarnation);
         if(!grant.credited())throw new IllegalArgumentException("not an issued credit");
         List<WorldCommitCore.Intent> out=new ArrayList<>();
@@ -35,12 +44,12 @@ public final class WorldIntentMapper {
             SparseStateKey key=SparseStateKey.fromTarget(grant.id().pair().dimension(),owner,target);
             if(!"WORLD".equals(key.ownerSpace())){plot+=share.q();continue;}
             if(!visited.add(key)){rejected+=share.q();continue;}
-            MaterialProperties material=materials.apply(target.fingerprint());
+            var material=materials.apply(target);
             if(material==null){missingMat+=share.q();continue;}
             String tag=incarnation.apply(key);
             if(tag==null||tag.isBlank()){missingInc+=share.q();continue;}
-            out.add(new WorldCommitCore.Intent(id(grant,key),key,tag,share.q(),material,
-                    materialGeneration,grant.tick(),grant.propagated()));
+            out.add(new WorldCommitCore.Intent(id(grant,key),key,tag,share.q(),material.material(),
+                    materialGeneration,grant.tick(),grant.propagated(),material.revision(),directions.apply(target)));
         }
         double accounted=out.stream().mapToDouble(WorldCommitCore.Intent::sealedQ).sum()
                 +plot+missingMat+missingInc+rejected+grant.unused();

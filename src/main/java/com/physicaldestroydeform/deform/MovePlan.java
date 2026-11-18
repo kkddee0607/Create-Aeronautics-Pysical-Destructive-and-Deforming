@@ -34,10 +34,46 @@ public record MovePlan(String creditId,SparseStateKey source,long damageBeforeFi
         public List<Step> steps(){
             var list=new java.util.ArrayList<Step>(2);
             if(x!=0)list.add(new Step(x,0,0));
-            if(y!=0)list.add(new Step(0,y,0));
             if(z!=0)list.add(new Step(0,0,z));
+            if(y!=0)list.add(new Step(0,y,0));
             return List.copyOf(list);
         }
+    }
+    /** Original F-first share and target-signed evidence, persisted with the direct intent. */
+    public record Evidence(SignedAxes direction,double sourceF,int layer,double blockedCandidateQ) {
+        public Evidence(SignedAxes direction,double sourceF,int layer){this(direction,sourceF,layer,-1);}
+        public Evidence {Objects.requireNonNull(direction);if(!direction.verified()||!Double.isFinite(sourceF)||sourceF<0||layer<0||!Double.isFinite(blockedCandidateQ)||blockedCandidateQ<0&&blockedCandidateQ!=-1)throw new IllegalArgumentException("invalid deformation evidence");}
+        public static void write(java.io.DataOutputStream out,Evidence e)throws java.io.IOException{
+            out.writeBoolean(e!=null);if(e==null)return;
+            out.writeByte(e.direction.x());out.writeByte(e.direction.y());out.writeByte(e.direction.z());out.writeLong(e.direction.transformEpoch());out.writeDouble(e.sourceF);out.writeInt(e.layer);out.writeDouble(e.blockedCandidateQ);
+        }
+        public static Evidence read(java.io.DataInputStream in)throws java.io.IOException{return read(in,true);}
+        public static Evidence read(java.io.DataInputStream in,boolean sealedCandidate)throws java.io.IOException{
+            if(!in.readBoolean())return null;
+            var axes=new SignedAxes(in.readByte(),in.readByte(),in.readByte(),true,in.readLong());
+            double f=in.readDouble();int layer=in.readInt();
+            return new Evidence(axes,f,layer,sealedCandidate?in.readDouble():-1);
+        }
+    }
+    /** Quantization only: the caller must independently establish target-bound evidence. */
+    public static SignedAxes quantizeDirection(double x,double y,double z,boolean verified,long epoch) {
+        if(!Double.isFinite(x)||!Double.isFinite(y)||!Double.isFinite(z))
+            throw new IllegalArgumentException("non-finite owner-local direction");
+        // Rank original magnitudes: normalization can round distinct values into ties.
+        double max=Math.max(Math.abs(x),Math.max(Math.abs(y),Math.abs(z)));
+        if(max==0)throw new IllegalArgumentException("zero owner-local direction");
+        double[] component={x,z,y}; // Exact ties: X, Z, Y.
+        int first=0;
+        for(int i=1;i<3;i++)if(Math.abs(component[i])>Math.abs(component[first]))first=i;
+        int second=first==0?1:0;
+        for(int i=0;i<3;i++)if(i!=first&&Math.abs(component[i])>Math.abs(component[second]))second=i;
+        int[] selected=new int[3];
+        selected[first]=component[first]>0?1:-1;
+        // Multiplication by two is exact for finite binary inputs unless it overflows;
+        // overflow is safely above the finite first magnitude. No half-underflow.
+        if(2.0*Math.abs(component[second])>=Math.abs(component[first]))
+            selected[second]=component[second]>0?1:-1;
+        return new SignedAxes(selected[0],selected[2],selected[1],verified,epoch);
     }
     public MovePlan {
         Objects.requireNonNull(creditId); Objects.requireNonNull(source);
@@ -92,7 +128,7 @@ public record MovePlan(String creditId,SparseStateKey source,long damageBeforeFi
             Objects.requireNonNull(destinationFingerprint);Objects.requireNonNull(blockStateSnapshot);
             Objects.requireNonNull(policyRevision);Objects.requireNonNull(rollbackOrQuarantineProof);
             if(!verifiedDirection.verified()||creditId.isBlank()||layerOrder<0
-                    ||!"PLOT".equals(before.ownerSpace())||!"PLOT".equals(after.ownerSpace())
+                    ||!List.of("WORLD","PLOT").contains(before.ownerSpace())||!before.ownerSpace().equals(after.ownerSpace())
                     ||expectedOwnerGeneration!=before.ownerGeneration()
                     ||expectedOwnerGeneration!=after.ownerGeneration()
                     ||!before.dimension().equals(after.dimension())
@@ -125,7 +161,7 @@ public record MovePlan(String creditId,SparseStateKey source,long damageBeforeFi
         int dx=0,dy=0,dz=0;
         for(Step step:steps){dx=Math.addExact(dx,step.dx());
             dy=Math.addExact(dy,step.dy());dz=Math.addExact(dz,step.dz());}
-        SparseStateKey to=new SparseStateKey(source.dimension(),"PLOT",source.ownerId(),
+        SparseStateKey to=new SparseStateKey(source.dimension(),source.ownerSpace(),source.ownerId(),
                 source.ownerGeneration(),Math.addExact(source.x(),dx),Math.addExact(source.y(),dy),
                 Math.addExact(source.z(),dz),destinationFingerprint);
         return new AtomicMoveSpec(creditId,source,to,proven,layerOrder,ownerGeneration,
@@ -134,12 +170,15 @@ public record MovePlan(String creditId,SparseStateKey source,long damageBeforeFi
     }
     /** Additional damage after an ACTUAL blocked movement: from reserved Q only. */
     public double blockedQ(DoubleUnaryOperator gameQOfF){
+        return Math.min(blockedCandidateQ(gameQOfF),reservedQ);
+    }
+    public double blockedCandidateQ(DoubleUnaryOperator gameQOfF){
         Objects.requireNonNull(gameQOfF);
         if(status!=Status.CANDIDATE_ONLY)return 0;
         double candidate=gameQOfF.applyAsDouble(sourceF*(1-k));
         if(!Double.isFinite(candidate)||candidate<0)
             throw new IllegalArgumentException("invalid G(F) blocked candidate");
-        return Math.min(candidate,reservedQ);
+        return candidate;
     }
     /** A plan never calls World/Plot mutation or considers itself applied. */
     public boolean applied(){return false;}

@@ -1,6 +1,8 @@
 package com.physicaldestroydeform.world;
 
 import com.physicaldestroydeform.DamageModel;
+import com.physicaldestroydeform.deform.*;
+import com.physicaldestroydeform.stress.*;
 import com.physicaldestroydeform.collision.ContactCreditLedger;
 import com.physicaldestroydeform.material.MaterialRegistry;
 import com.physicaldestroydeform.state.SparseStateKey;
@@ -31,7 +33,11 @@ public final class WorldCommitService {
     private final Logger log;
     private final WorldPersistentJournal journal;
     private final WorldCommitCore core;
+    private final DamageModel.Settings damageSettings;
+    private StressRuntime stress;
+    private final Set<Cell> stressWatched=new HashSet<>();
     private final NeoForgeWorldGateway gateway;
+    private final MoveRuntime movement;
     private final Set<Cell> watched=new HashSet<>(), quarantined=new HashSet<>();
     private final Map<Cell,Integer> pendingCells=new HashMap<>();
     private final Deque<WorldReceiptJournal.Receipt> unresolved=new ArrayDeque<>();
@@ -41,18 +47,22 @@ public final class WorldCommitService {
     private long recoveredDeferredAborted, recoveredPreparedQuarantined, recoveryLoadMisses;
     private int recoverySamples;
     public WorldCommitService(MinecraftServer server,DamageModel.Settings damage,Logger log) throws IOException {
-        this.server=Objects.requireNonNull(server);this.log=Objects.requireNonNull(log);
+        this.server=Objects.requireNonNull(server);this.log=Objects.requireNonNull(log);this.damageSettings=damage;
         Path path=server.getWorldPath(LevelResource.ROOT).resolve("data").resolve("pdd-world-0.4.1.wal");
         journal=new WorldPersistentJournal(path.getParent().resolve("pdd-world-0.5.0"),path);
         int limit=Integer.getInteger("pdd.worldBreakCapPerTick",WorldCommitCore.DEFAULT_WORLD_BREAK_CAP_PER_TICK);
         core=new WorldCommitCore(journal,damage,Math.max(1,Math.min(4096,limit)));
         gateway=new NeoForgeWorldGateway(server,this);
+        movement=new MoveRuntime(path.getParent().resolve("pdd-world-moves-0.6.0"),journal,gateway.movementGateway(),gateway::planMove,log);
+        core.setDeformationHandler(movement::afterDamage);
+        core.setExecutionHold(i->movement.busy()||(stress!=null&&stress.holds(i)));
         for(var state:journal.stateSnapshot()) {
             Cell cell=new Cell(state.key());watched.add(cell);
 
         }
         int historicalQuarantined=0,historicalDeferredSafe=0,historicalTrueQuarantine=0;
         for(var receipt:journal.quarantinedSnapshot()){
+            if(movement.recorded(receipt.id()))continue;
             historicalQuarantined++;
             if(WorldPersistentJournal.isLegacyUnexecutedDeferred(receipt)){
                 // The old code recorded DEFERRED as uncertain even though it never
@@ -66,6 +76,7 @@ public final class WorldCommitService {
         }
         int startupDeferred=0,startupPrepared=0,restored=0;
         for(var receipt:journal.uncertain()) {
+            if(movement.recorded(receipt.id()))continue;
             if(receipt.pending()!=null){
                 Cell cell=new Cell(receipt.key());watched.add(cell);
                 pendingCells.merge(cell,1,Integer::sum);
@@ -86,6 +97,7 @@ public final class WorldCommitService {
                         "policy=DURABLE_DEFERRED_RESUME_LEGACY_ABORT_PREPARED_QUARANTINE " +
                         "intentPayloadPersisted=true forceChunkLoad=false traceEach={}",
                 startupDeferred,startupPrepared,restored,TRACE_RECOVERY);
+        movement.recover();
         WorldBlockMutationTracker.attach(this);
         log.info("[PDD-WORLD-POLICY] revision=0.4.1-spreadFix blockTypeVeto=OFF " +
                 "blockEntities=VETO multiBlock=VETO " +
@@ -112,21 +124,25 @@ public final class WorldCommitService {
     }
     /** Called only once for each successful pre-existing ledger Grant; source accounting is unchanged. */
     public void offer(ContactCreditLedger.Grant grant,MaterialRegistry.Snapshot materials) {
+        offer(grant,materials,new com.physicaldestroydeform.material.TargetMaterials(server,grant.id().pair().dimension(),materials));
+    }
+    public void offer(ContactCreditLedger.Grant grant,MaterialRegistry.Snapshot materials,com.physicaldestroydeform.material.TargetMaterials targetMaterials) {
         if(!server.isSameThread() || fault || core.ioFault()){
             rejected++;log.error("[PDD-COMMIT] phase=OFFER reason=SERVER_OR_SAVE_UNSAFE Q={}",grant.issuedQ());return;
         }
         try {
-            var projected=WorldIntentMapper.project(grant,materials.generation(),
-                    materials::resolveFingerprint,key->{
-                        if(quarantined.contains(new Cell(key)))return null;
+            var projected=WorldIntentMapper.projectTargets(grant,materials.generation(),
+                    targetMaterials::resolve,key->{
+                        if(isQuarantined(key))return null;
                         var observed=gateway.readIfLoaded(key);
                         return observed!=null&&observed.loaded()&&!observed.isAir()
                                 &&observed.dimension().equals(key.dimension())
                                 &&observed.fingerprint().equals(key.fingerprint())
                                 ?observed.incarnation():null;
-                    });
+                    },targetMaterials::direction);
+            if(stress!=null)stress.reserve(projected.world(),materials,damageSettings);
             int count=0;
-            for(var intent:projected.world()) {
+            for(var intent:MoveRuntime.reverseOrder(projected.world())) {
                 var status=core.submit(intent,server.getTickCount(),server.overworld().getGameTime());
                 if(status.result()==WorldCommitCore.Outcome.DEFERRED) {
                     Cell cell=new Cell(intent.key());
@@ -147,7 +163,7 @@ public final class WorldCommitService {
                         projected.world().stream().mapToDouble(WorldCommitCore.Intent::sealedQ).sum(),
                         projected.plotQ(),projected.missingMaterialQ(),projected.rejectedQ(),
                         projected.missingIncarnationQ(),grant.unused(),core.queued());
-        }catch(RuntimeException unexpected){
+        }catch(IOException|RuntimeException unexpected){
             rejected++;log.error("[PDD-COMMIT] phase=OFFER reason=INVALID_PLAN credit={} Q={} " +
                     "effect=NOT_COMMITTED",grant.id(),grant.issuedQ(),unexpected);
         }
@@ -197,6 +213,8 @@ public final class WorldCommitService {
             }
         }
         gateway.clearPermissionCache();
+        movement.tick(server.overworld().getGameTime(),1);
+        if(movement.faulted()){fault=true;log.error("[PDD-DEFORM] owner=WORLD status=JOURNAL_FAULT");return;}
         int shown=0;
         for(var result:core.tickAtGameTime(gateway,tick,server.overworld().getGameTime())){
             if(result.result()!=WorldCommitCore.Outcome.DEFERRED && result.receipt()!=null)
@@ -211,7 +229,7 @@ public final class WorldCommitService {
             if(shown++<MAX_COMMIT_LOGS_PER_TICK && result.result()!=WorldCommitCore.Outcome.DEFERRED){
                 var receipt=result.receipt();
                 var damage=receipt==null?null:journal.get(receipt.key());
-                log.info("[PDD-COMMIT] phase=RESULT result={} reason={} id={} " +
+                log.info(receipt!=null&&receipt.id().startsWith("STRESS:")?"[PDD-STRESS-APPLY] phase=RESULT result={} reason={} id={} key={} damageU16={} remainderU8={} materialGeneration={} receiptStatus={} walBytes={}":"[PDD-COMMIT] phase=RESULT result={} reason={} id={} " +
                                 "key={} damageU16={} remainderU8={} materialGeneration={} " +
                                 "receiptStatus={} walBytes={}",
                         result.result(),result.reason(),receipt==null?"NONE":receipt.id(),
@@ -255,7 +273,27 @@ public final class WorldCommitService {
             if(VERBOSE)log.info("[PDD-PERSIST] phase=STORAGE {}",journal.storageStatus());
         }
     }
-    boolean isQuarantined(SparseStateKey key){return quarantined.contains(new Cell(key));}
+    boolean isQuarantined(SparseStateKey key){return quarantined.contains(new Cell(key))||movement.fences.quarantined(key);}
+    boolean acquireMove(MoveTransactionJournal.BeforeImage b){
+        if(isQuarantined(b.source())||isQuarantined(b.destinationBefore())||!movement.fences.acquire(b.id(),b.source(),b.destinationBefore()))return false;
+        watched.add(new Cell(b.source()));watched.add(new Cell(b.destinationBefore()));return true;
+    }
+    void releaseMove(MoveTransactionJournal.BeforeImage b){
+        movement.fences.release(b.id(),b.source(),b.destinationBefore());
+        releaseIfIdle(new Cell(b.source()));releaseIfIdle(new Cell(b.destinationBefore()));
+    }
+    void quarantineMove(MoveTransactionJournal.BeforeImage b,String reason){
+        movement.fences.quarantine(b.source(),b.destinationBefore());quarantined.add(new Cell(b.source()));quarantined.add(new Cell(b.destinationBefore()));
+        watched.add(new Cell(b.source()));watched.add(new Cell(b.destinationBefore()));
+        log.warn("[PDD-DEFORM] owner=WORLD status=QUARANTINED id={} reason={}",b.id(),reason);
+    }
+    boolean moveInvalidated(MoveTransactionJournal.BeforeImage b){return movement.fences.invalidated(b.id());}
+    long moveRevision(SparseStateKey key){return journal.revision(key.dimension(),key.x(),key.y(),key.z());}
+    MoveTransactionExecutor.Settlement settleBlockedMove(MoveTransactionJournal.BeforeImage b){
+        var result=core.settleBlockedMove(gateway,b,server.getTickCount(),server.overworld().getGameTime());
+        log.info("[PDD-DEFORM-BLOCKED] owner=WORLD id={} result={} candidateQ={} appliedCapQ={} fixed={} receipt={}",b.id(),result,b.blockedCandidateQ(),b.blockedAppliedQ(),b.blockedFixedIncrement(),journal.receipt(b.blockedApplyId()));
+        return result;
+    }
     private void releasePending(Cell cell) {
         Integer pending=pendingCells.get(cell);
         if(pending!=null) {
@@ -266,7 +304,7 @@ public final class WorldCommitService {
     }
     /** Retain only damaged, pending, or quarantined cells; no lifetime-long watcher leak. */
     private void releaseIfIdle(Cell cell) {
-        if(!pendingCells.containsKey(cell) && !quarantined.contains(cell)
+        if(!stressWatched.contains(cell) && !pendingCells.containsKey(cell) && !quarantined.contains(cell)
                 && !journal.hasPosition(cell.dimension(),cell.x(),cell.y(),cell.z())) {
             watched.remove(cell);
             // Replacement generations persist independently of in-memory watchers.
@@ -279,9 +317,23 @@ public final class WorldCommitService {
         if(!(level instanceof net.minecraft.server.level.ServerLevel serverLevel))return;
         if(!server.isSameThread())return; // Minecraft must enforce this; never access off-thread.
         Cell cell=new Cell(serverLevel.dimension().location().toString(),pos);
+        var key=new SparseStateKey(cell.dimension(),"WORLD",cell.dimension(),1,cell.x(),cell.y(),cell.z(),"PDD:REPLACEMENT");
+        if(stress!=null&&stressWatched.contains(cell))stress.replaced(key);
+        if(gateway.ownsMoveMutation(key,old,next))return;
+        if(movement.fences.held(key))movement.fences.replaced(key);
         if(cell.equals(ownBreak) || (!watched.contains(cell)
                 && !journal.trackedPosition(cell.dimension(),cell.x(),cell.y(),cell.z())))return;
         try {
+            String oldFingerprint=com.physicaldestroydeform.material.CopycatMaterial.fingerprint(old);
+            if(old.getBlock()==next.getBlock()&&com.physicaldestroydeform.material.CopycatMaterial.isCopycat(oldFingerprint)){
+                String newFingerprint=com.physicaldestroydeform.material.CopycatMaterial.fingerprint(next);
+                var before=new SparseStateKey(cell.dimension(),"WORLD",cell.dimension(),1,cell.x(),cell.y(),cell.z(),oldFingerprint);
+                var after=new SparseStateKey(cell.dimension(),"WORLD",cell.dimension(),1,cell.x(),cell.y(),cell.z(),newFingerprint);
+                long revision=Math.addExact(journal.revision(cell.dimension(),cell.x(),cell.y(),cell.z()),1);
+                String token=incarnation(cell.dimension(),pos,newFingerprint);
+                journal.remapCopycatShape(before,after,revision+token.substring(token.indexOf('-')));
+                releaseIfIdle(cell);return;
+            }
             long revision=journal.replaceBlock(cell.dimension(),cell.x(),cell.y(),cell.z());
             // A proven replacement releases the old quarantine on the cell;
             // old ambiguous ApplyIds stay terminal in the receipt ledger.
@@ -292,13 +344,54 @@ public final class WorldCommitService {
                     cell.dimension(),cell.x(),cell.y(),cell.z(),revision);
             // Intents already queued will fail their preflight if this block is replaced.
             releaseIfIdle(cell);
-        }catch(IOException unexpected) {
+        }catch(IOException|RuntimeException unexpected) {
             fault=true;log.error("[PDD-SAVE] phase=BLOCK_CHANGE status=IO_FAULT dimension={} pos={} " +
                     "reason=UNABLE_TO_TOMBSTONE damageMayBeStale=true",cell.dimension(),pos,unexpected);
         }
     }
     void beginOwnBreak(SparseStateKey key){ownBreak=new Cell(key);}
     void endOwnBreak(){ownBreak=null;}
+    public void attachStress(StressRuntime runtime){
+        stress=runtime;
+    }
+    public void watchStress(SparseStateKey key,boolean watch){
+        Cell cell=new Cell(key);
+        if(watch){stressWatched.add(cell);watched.add(cell);}
+        else{stressWatched.remove(cell);releaseIfIdle(cell);}
+    }
+    /** Loaded-only graph preflight uses the same owner/BE/claims safeguards as direct commits. */
+    public WorldCommitCore.Observation readStress(SparseStateKey key){
+        if(fault||core.ioFault()||!server.isSameThread()||isQuarantined(key)||movement.fences.held(key))return null;
+        var observed=gateway.readIfLoaded(key);
+        if(observed==null||observed.isAir())return observed;
+        var permission=gateway.canDamage(key,observed);
+        if(permission==WorldCommitCore.Permission.UNKNOWN)return null;
+        if(permission!=WorldCommitCore.Permission.ALLOW)
+            return new WorldCommitCore.Observation(observed.dimension(),observed.fingerprint(),observed.ownerGeneration(),observed.incarnation(),
+                    observed.loaded(),false,observed.hasBlockEntity(),observed.unsafeMultiblock(),true,observed.unsafePhysicsPhase());
+        return observed;
+    }
+    public boolean recoverStressOrigin(WorldCommitCore.Intent intent,DamageModel.Settings settings,long created,long ttl)throws IOException {
+        if(fault||core.ioFault())return false;
+        boolean fresh=journal.receipt(intent.applyId())==null;
+        long deadline=created>Long.MAX_VALUE-ttl?Long.MAX_VALUE:created+ttl;
+        var result=core.submitSealed(intent,settings,server.overworld().getGameTime(),deadline);
+        if(core.ioFault())throw new IOException("World origin recovery journal failure");
+        if(fresh&&result.result()==WorldCommitCore.Outcome.DEFERRED){
+            Cell cell=new Cell(intent.key());watched.add(cell);pendingCells.merge(cell,1,Integer::sum);
+        }
+        return result.receipt()!=null&&(result.receipt().status()!=WorldReceiptJournal.Status.DEFERRED||result.receipt().pending()!=null);
+    }
+    public boolean offerStress(StressReservationJournal.Entry entry,StressPropagation.PlannedNode plan,WorldCommitCore.Intent intent)throws IOException {
+        if(fault||core.ioFault())return false;
+        boolean fresh=journal.receipt(intent.applyId())==null;
+        boolean accepted=StressCommitHandoff.offer(core,entry,plan,intent,server.overworld().getGameTime());
+        var receipt=journal.receipt(intent.applyId());
+        if(accepted&&fresh&&receipt!=null&&receipt.status()==WorldReceiptJournal.Status.DEFERRED){
+            Cell cell=new Cell(intent.key());watched.add(cell);pendingCells.merge(cell,1,Integer::sum);
+        }
+        return accepted;
+    }
     public void stop(){
         WorldBlockMutationTracker.attach(null);
         try {

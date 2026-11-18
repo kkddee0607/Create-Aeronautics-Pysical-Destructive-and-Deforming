@@ -1,6 +1,8 @@
 package com.physicaldestroydeform.plot;
 
 import com.physicaldestroydeform.DamageModel;
+import com.physicaldestroydeform.deform.*;
+import com.physicaldestroydeform.stress.*;
 import com.physicaldestroydeform.collision.ContactCreditLedger;
 import com.physicaldestroydeform.material.MaterialRegistry;
 import com.physicaldestroydeform.state.SparseStateKey;
@@ -36,7 +38,10 @@ public final class PlotCommitService {
     private final Logger log;
     private final WorldPersistentJournal journal;
     private final WorldCommitCore core;
+    private StressRuntime stress;
+    private final Set<Coordinate> stressWatched=new HashSet<>();
     private final NeoForgePlotGateway gateway;
+    private final MoveRuntime movement;
     private final int mutationCap;
     private final Deque<Coordinate> orphanCleanup=new ArrayDeque<>();
     private final Set<Coordinate> orphanCleanupSet=new HashSet<>();
@@ -61,6 +66,9 @@ public final class PlotCommitService {
         mutationCap=cap;
         core=new WorldCommitCore(journal,settings,cap);
         gateway=new NeoForgePlotGateway(server,this);
+        movement=new MoveRuntime(parent.resolve("pdd-plot-moves-0.6.0"),journal,gateway.movementGateway(),gateway::planMove,log);
+        core.setDeformationHandler(movement::afterDamage);
+        core.setExecutionHold(i->movement.busy()||(stress!=null&&stress.holds(i)));
         for(var state:journal.stateSnapshot())registerState(state.key());
         for(var receipt:journal.quarantinedSnapshot()){
             if(receipt.id().startsWith("ORPHAN:1:")) {
@@ -72,6 +80,7 @@ public final class PlotCommitService {
         }
         int restored=0;
         for(var receipt:journal.uncertain()){
+            if(movement.recorded(receipt.id()))continue;
             if(receipt.pending()!=null){
                 var owner=PlotOwnerFence.Owner.of(PlotKeyCodec.real(receipt.key()));
                 restoredOwners.computeIfAbsent(owner.uuid(),ignored->new HashSet<>()).add(owner);
@@ -84,6 +93,7 @@ public final class PlotCommitService {
                     gateway.fence().orphan(PlotOwnerFence.Owner.of(PlotKeyCodec.real(receipt.key())));
             }
         }
+        movement.recover();
         log.info("[PDD-PLOT-RECOVERY] phase=START restoredPending={} legacyOrPrepared={} intentPayloadPersisted=true",
                 restored,unresolved.size());
         // Power loss after the durable orphan marker but before state tombstones:
@@ -131,12 +141,15 @@ public final class PlotCommitService {
     }
     /** Called from the same immutable granted Q as WorldCommitService, once per accepted source. */
     public void offer(ContactCreditLedger.Grant grant,MaterialRegistry.Snapshot materials){
+        offer(grant,materials,new com.physicaldestroydeform.material.TargetMaterials(server,grant.id().pair().dimension(),materials));
+    }
+    public void offer(ContactCreditLedger.Grant grant,MaterialRegistry.Snapshot materials,com.physicaldestroydeform.material.TargetMaterials targetMaterials){
         if(!server.isSameThread()||fault||core.ioFault()){
             rejected++;log.error("[PDD-PLOT] phase=OFFER reason=SERVER_OR_SAVE_UNSAFE credit={}",grant.id());return;
         }
         try {
-            var projection=PlotIntentMapper.project(grant,materials.generation(),
-                    materials::resolveFingerprint,original->{
+            var projection=PlotIntentMapper.projectTargets(grant,materials.generation(),
+                    targetMaterials::resolve,original->{
                         var owner=PlotOwnerFence.Owner.of(original);
                         if(quarantined.contains(owner)||!gateway.bindOnOffer(original))return null;
                         var virtual=PlotKeyCodec.storage(original);
@@ -144,29 +157,9 @@ public final class PlotCommitService {
                         return observed!=null && observed.loaded() && !observed.isAir()
                                 && observed.fingerprint().equals(original.fingerprint())
                                 ?observed.incarnation():null;
-                    });
-            for(var intent:projection.plot()){
-                // 0.5.1 CAP-DEFORM-PLAN: no direction is promoted from a
-                // native normal to a verified two-cell move. Preview ONLY.
-                try {
-                    var prior=journal.get(intent.key());
-                    com.physicaldestroydeform.BlockDamageState before=new com.physicaldestroydeform.BlockDamageState();
-                    if(prior!=null && prior.incarnation().equals(intent.expectedIncarnation())){
-                        before.setDamage(prior.damage());before.setRemainder(prior.remainder());
-                    }
-                    var normal=DamageModel.planPreDamped(intent.sealedQ(),intent.material(),before,damageSettings);
-                    var candidate=com.physicaldestroydeform.deform.MovePlan.plan(
-                            intent.applyId(),PlotKeyCodec.real(intent.key()),intent.material(),
-                            (long)before.damage()*256+before.remainder(),normal.fixedIncrement(),
-                            0,normal.plasticQ(),null);
-                    if(candidate.status()==com.physicaldestroydeform.deform.MovePlan.Status.DIRECTION_UNKNOWN)
-                        log.info("[PDD-DEFORM-PLAN] target={} state={} k={} reservedQ={} " +
-                                "action=NO_MOVE reason=SIGNED_OWNER_LOCAL_DIRECTION_UNVERIFIED",
-                                candidate.source(),candidate.status(),candidate.k(),candidate.reservedQ());
-                }catch(RuntimeException invalidPlan){
-                    log.warn("[PDD-DEFORM-PLAN] phase=PREVIEW reason=INVALID_CANDIDATE " +
-                            "mutation=OFF id={}",intent.applyId(),invalidPlan);
-                }
+                    },targetMaterials::direction);
+            if(stress!=null)stress.reserve(projection.plot(),materials,damageSettings);
+            for(var intent:MoveRuntime.reverseOrder(projection.plot())){
                 var decision=core.submit(intent,server.getTickCount(),server.overworld().getGameTime());
                 if(decision.result()==WorldCommitCore.Outcome.DEFERRED){
                     accepted++;
@@ -185,7 +178,7 @@ public final class PlotCommitService {
                         projection.worldQ(),projection.missingMaterialQ(),projection.missingOwnerQ(),
                         projection.rejectedQ(),grant.unused(),core.queued());
             }
-        }catch(RuntimeException failed){
+        }catch(IOException|RuntimeException failed){
             rejected++;log.error("[PDD-PLOT] phase=OFFER reason=INVALID_SEALED_PLAN " +
                     "credit={} Q={} action=REJECT_NO_REISSUE",grant.id(),grant.issuedQ(),failed);
         }
@@ -242,7 +235,7 @@ public final class PlotCommitService {
     }
     /** Detect only real changed loaded Plot blocks; no global position scan or forced chunks. */
     public void onBlockReplacement(ServerLevel level,BlockPos allocated,BlockState before,BlockState after){
-        if(!server.isSameThread()||fault||gateway.inMutation())return;
+        if(!server.isSameThread()||fault)return;
         try{
             var container=SubLevelContainer.getContainer(level);
             if(container==null)return;
@@ -261,7 +254,19 @@ public final class PlotCommitService {
                 var sample=PlotKeyCodec.storage(new SparseStateKey(dimension,"PLOT",owner.uuid().toString(),
                         owner.generation(),rel.getX(),rel.getY(),rel.getZ(),"PDD:REPLACEMENT"));
                 Coordinate cell=new Coordinate(sample);
-                if(!journal.trackedPosition(cell.dimension(),cell.x(),cell.y(),cell.z()))continue;
+                if(stress!=null&&stressWatched.contains(cell))stress.replaced(sample);
+                if(gateway.ownsMoveMutation(sample,before,after))continue;
+                if(movement.fences.held(sample))movement.fences.replaced(sample);
+                if(ownBreak!=null&&new Coordinate(ownBreak).equals(cell))continue;
+                if(!movement.fences.held(sample)&&!stressWatched.contains(cell)&&!journal.trackedPosition(cell.dimension(),cell.x(),cell.y(),cell.z()))continue;
+                String oldFingerprint=com.physicaldestroydeform.material.CopycatMaterial.fingerprint(before);
+                if(before.getBlock()==after.getBlock()&&com.physicaldestroydeform.material.CopycatMaterial.isCopycat(oldFingerprint)){
+                    var oldReal=new SparseStateKey(dimension,"PLOT",owner.uuid().toString(),owner.generation(),rel.getX(),rel.getY(),rel.getZ(),oldFingerprint);
+                    var newReal=new SparseStateKey(dimension,"PLOT",owner.uuid().toString(),owner.generation(),rel.getX(),rel.getY(),rel.getZ(),com.physicaldestroydeform.material.CopycatMaterial.fingerprint(after));
+                    long revision=Math.addExact(journal.revision(cell.dimension(),cell.x(),cell.y(),cell.z()),1);
+                    journal.remapCopycatShape(PlotKeyCodec.storage(oldReal),PlotKeyCodec.storage(newReal),PlotIncarnation.token(newReal,center.getX(),center.getY(),center.getZ(),revision));
+                    continue;
+                }
                 journal.replaceBlock(cell.dimension(),cell.x(),cell.y(),cell.z());
                 unregisterState(sample);
                 log.info("[PDD-PLOT] phase=REPLACEMENT owner={} local={} " +
@@ -275,6 +280,27 @@ public final class PlotCommitService {
     }
     void beginOwnBreak(SparseStateKey virtual){ownBreak=virtual;}
     void endOwnBreak(){ownBreak=null;}
+    boolean isMoveQuarantined(SparseStateKey key){return movement.fences.quarantined(key);}
+    boolean acquireMove(MoveTransactionJournal.BeforeImage b){
+        if(!movement.fences.acquire(b.id(),b.source(),b.destinationBefore()))return false;
+        registerState(b.source());registerState(b.destinationBefore());return true;
+    }
+    void releaseMove(MoveTransactionJournal.BeforeImage b){
+        movement.fences.release(b.id(),b.source(),b.destinationBefore());
+        if(journal.get(b.source())==null&&!isMoveQuarantined(b.source()))unregisterState(b.source());
+        if(journal.get(b.destinationAfter().key())==null&&!isMoveQuarantined(b.destinationBefore()))unregisterState(b.destinationBefore());
+    }
+    void quarantineMove(MoveTransactionJournal.BeforeImage b,String reason){
+        movement.fences.quarantine(b.source(),b.destinationBefore());registerState(b.source());registerState(b.destinationBefore());
+        log.warn("[PDD-DEFORM] owner=PLOT status=QUARANTINED id={} reason={}",b.id(),reason);
+    }
+    boolean moveInvalidated(MoveTransactionJournal.BeforeImage b){return movement.fences.invalidated(b.id());}
+    long moveRevision(SparseStateKey key){return journal.revision(key.dimension(),key.x(),key.y(),key.z());}
+    MoveTransactionExecutor.Settlement settleBlockedMove(MoveTransactionJournal.BeforeImage b){
+        var result=core.settleBlockedMove(gateway,b,server.getTickCount(),server.overworld().getGameTime());
+        log.info("[PDD-DEFORM-BLOCKED] owner=PLOT id={} result={} candidateQ={} appliedCapQ={} fixed={} receipt={}",b.id(),result,b.blockedCandidateQ(),b.blockedAppliedQ(),b.blockedFixedIncrement(),journal.receipt(b.blockedApplyId()));
+        return result;
+    }
     public void tick(long tick){
         if(fault||core.ioFault()){
             if(tick-lastSummary>=100){lastSummary=tick;log.error("[PDD-PLOT] phase=SUMMARY status=HALTED reason=IO_FAULT");}
@@ -310,9 +336,11 @@ public final class PlotCommitService {
                 fault=true;log.error("[PDD-PLOT] phase=RECOVERY status=IO_FAULT id={}",previous.id());return;
             }
         }
+        movement.tick(server.overworld().getGameTime(),1);
+        if(movement.faulted()){fault=true;log.error("[PDD-DEFORM] owner=PLOT status=JOURNAL_FAULT");return;}
         int count=0;
         for(var result:core.tick(gateway,tick,mutationCap,server.overworld().getGameTime())){
-            if(result.result()==WorldCommitCore.Outcome.APPLIED_DAMAGE){damaged++;registerState(result.receipt().key());}
+            if(result.result()==WorldCommitCore.Outcome.APPLIED_DAMAGE){damaged++;if(journal.get(result.receipt().key())!=null)registerState(result.receipt().key());}
             if(result.result()==WorldCommitCore.Outcome.APPLIED_BREAK){
                 broken++;
                 if(result.receipt()!=null)unregisterState(result.receipt().key());
@@ -321,7 +349,7 @@ public final class PlotCommitService {
             if(result.result()==WorldCommitCore.Outcome.QUARANTINED)blocked++;
             if(count++<MAX_LOGS_PER_TICK && result.result()!=WorldCommitCore.Outcome.DEFERRED){
                 var r=result.receipt();var state=r==null?null:journal.get(r.key());
-                log.info("[PDD-PLOT] phase=COMMIT serverTick={} result={} reason={} id={} target={} " +
+                log.info(r!=null&&r.id().startsWith("STRESS:")?"[PDD-STRESS-APPLY] phase=COMMIT serverTick={} result={} reason={} id={} target={} damage={} remainder={} status={} blockMutation={} sableLifecycle=SABLE_NORMAL_HOOK":"[PDD-PLOT] phase=COMMIT serverTick={} result={} reason={} id={} target={} " +
                                 "damage={} remainder={} status={} blockMutation={} " +
                                 "sableLifecycle=VANILLA_CHANGE_HOOK_REQUIRES_INGAME_VERIFICATION",
                         tick,result.result(),result.reason(),r==null?"NONE":r.id(),
@@ -343,6 +371,41 @@ public final class PlotCommitService {
                     core.queued(),orphanCleanup.size(),journal.size(),journal.receiptCount(),journal.bytes(),
                     fault||core.ioFault(),gateway.heatMapHolds(),gateway.spacingHolds(),gateway.breakSpacingTicks(),gateway.tickWitnessHolds());
         }
+    }
+    public void attachStress(StressRuntime runtime){
+        stress=runtime;
+    }
+    public void watchStress(SparseStateKey key,boolean watch){
+        var owner=PlotOwnerFence.Owner.of(PlotKeyCodec.real(key));
+        Coordinate cell=new Coordinate(key);
+        if(watch){stressWatched.add(cell);restoredOwners.computeIfAbsent(owner.uuid(),k->new HashSet<>()).add(owner);}
+        else stressWatched.remove(cell);
+    }
+    public WorldCommitCore.Observation readStress(SparseStateKey key){
+        if(fault||core.ioFault()||!server.isSameThread()||isMoveQuarantined(key)||movement.fences.held(key))return null;
+        // Saved graph snapshots contain the exact incarnation used for recovery binding in the origin/output.
+        var observed=gateway.readIfLoaded(key);
+        if(observed==null||observed.isAir())return observed;
+        var permission=gateway.canDamage(key,observed);
+        if(permission==WorldCommitCore.Permission.UNKNOWN)return null;
+        if(permission!=WorldCommitCore.Permission.ALLOW)
+            return new WorldCommitCore.Observation(observed.dimension(),observed.fingerprint(),observed.ownerGeneration(),observed.incarnation(),
+                    observed.loaded(),false,observed.hasBlockEntity(),observed.unsafeMultiblock(),true,observed.unsafePhysicsPhase());
+        return observed;
+    }
+    public boolean recoverStressOrigin(WorldCommitCore.Intent intent,DamageModel.Settings settings,long created,long ttl)throws IOException {
+        if(fault||core.ioFault())return false;
+        gateway.readRecoveredIfLoaded(intent); // Bind only against saved owner UUID/epoch/incarnation.
+        long deadline=created>Long.MAX_VALUE-ttl?Long.MAX_VALUE:created+ttl;
+        var result=core.submitSealed(intent,settings,server.overworld().getGameTime(),deadline);
+        if(core.ioFault())throw new IOException("Plot origin recovery journal failure");
+        return result.receipt()!=null&&(result.receipt().status()!=WorldReceiptJournal.Status.DEFERRED||result.receipt().pending()!=null);
+    }
+    public boolean offerStress(StressReservationJournal.Entry entry,StressPropagation.PlannedNode plan,WorldCommitCore.Intent intent)throws IOException {
+        if(fault||core.ioFault())return false;
+        var owner=PlotOwnerFence.Owner.of(PlotKeyCodec.real(intent.key()));
+        restoredOwners.computeIfAbsent(owner.uuid(),k->new HashSet<>()).add(owner);
+        return StressCommitHandoff.offer(core,entry,plan,intent,server.overworld().getGameTime());
     }
     public void stop(){
         try{

@@ -33,6 +33,11 @@ public final class PreviewDamageLedger {
                          Function<String,MaterialProperties> materials,
                          DamageModel.Settings settings,
                          Function<SparseStateKey,Optional<DirectionEvidence>> directions) {
+        return recordTargets(grant,generation,tick,t->materials.apply(t.fingerprint()),settings,directions);
+    }
+    public Result recordTargets(ContactCreditLedger.Grant grant,long generation,long tick,
+                         Function<com.physicaldestroydeform.collision.GameImpactCredit.Target,MaterialProperties> materials,
+                         DamageModel.Settings settings,Function<SparseStateKey,Optional<DirectionEvidence>> directions) {
         Objects.requireNonNull(grant);
         if(tick<0)throw new IllegalArgumentException("invalid tick");
         if(handled.contains(grant.id())) {
@@ -43,7 +48,7 @@ public final class PreviewDamageLedger {
             capacityRejected++;
             return new Result(ResultStatus.CAPACITY,null,states.size(),fixedTotal(),fixedTotal(),0);
         }
-        var report=MaterialPlanner.plan(grant,generation,materials,settings,
+        var report=MaterialPlanner.planTargets(grant,generation,materials,settings,
                 key->states.containsKey(key)?states.get(key).unpack():new BlockDamageState(),directions);
         if(Math.abs(report.accountedQ()-grant.issuedQ())>1e-7)
             throw new IllegalArgumentException("preview Q accounting mismatch");

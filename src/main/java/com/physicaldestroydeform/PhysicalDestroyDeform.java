@@ -1,6 +1,7 @@
 package com.physicaldestroydeform;
 
 import com.physicaldestroydeform.collision.RealFixRuntimeBridge;
+import com.physicaldestroydeform.stress.StressRuntime;
 import com.physicaldestroydeform.collision.SableFrameCapture;
 import com.physicaldestroydeform.diagnostics.AcceptanceReport;
 import com.physicaldestroydeform.diagnostics.NativeCollisionTelemetry;
@@ -28,12 +29,13 @@ import org.slf4j.LoggerFactory;
 @Mod(PhysicalDestroyDeform.MOD_ID)
 public final class PhysicalDestroyDeform {
     public static final String MOD_ID = "physical_destroy_deform";
-    public static final String BUILD_VERSION = "0.5.1-persistFix";
+    public static final String BUILD_VERSION = "0.6.0";
     private static final Logger LOGGER = LoggerFactory.getLogger(PhysicalDestroyDeform.class);
     private final AcceptanceReport acceptanceReport = new AcceptanceReport();
     private final RealFixRuntimeBridge bridge = new RealFixRuntimeBridge();
     private WorldCommitService worldCommit;
     private PlotCommitService plotCommit;
+    private StressRuntime stress;
     private long lastNative, lastCallbacks, lastNativeDropped, lastCallbackDropped;
     private int ticks;
 
@@ -42,7 +44,7 @@ public final class PhysicalDestroyDeform {
         NeoForge.EVENT_BUS.addListener(this::onDatapackSync);
         NeoForge.EVENT_BUS.addListener(this::onServerStopped);
         NeoForge.EVENT_BUS.addListener(this::onServerTick);
-        LOGGER.info("[PDD-DIAG] INIT modId={} version={} releaseSpec=IDS-1.0.8 policyMath=IDS-1.0.7 source=SABLE_ORIGINAL_POST_EFFECT " +
+        LOGGER.info("[PDD-DIAG] INIT modId={} version={} releaseSpec=IDS-1.0.9 policyMath=IDS-1.0.7 source=SABLE_ORIGINAL_POST_EFFECT " +
                 "target=NATIVE_BODY_LOCAL_INDEPENDENT_R2_R3_UNCALIBRATED_R4_PROVISIONAL state=FOUR_PHASE_REGIONAL_LEDGER " +
                 "worldMutation=WORLD_STATIC_ONLY plotMutation=SABLE_PLOT",MOD_ID,BUILD_VERSION);
         PddDiagnostics.runModelSelfTest(LOGGER);
@@ -52,6 +54,8 @@ public final class PhysicalDestroyDeform {
         // A new integrated server may reuse the same JVM; discard prior session diagnostics.
         PlotPhysicsProbe.clear();
         MaterialRegistry.rebuild(event.getServer(), LOGGER);
+        LOGGER.info("[PDD-COPYCAT] phase=START compatibility={} policy={}",
+                com.physicaldestroydeform.material.CopycatMaterial.compatibilityStatus(),com.physicaldestroydeform.material.CopycatMaterial.POLICY);
         bridge.loadPreview(event.getServer(), LOGGER);
         try {
             worldCommit=new WorldCommitService(event.getServer(),
@@ -74,7 +78,17 @@ public final class PhysicalDestroyDeform {
             LOGGER.error("[PDD-PLOT] phase=START status=DISABLED reason=JOURNAL_INIT_FAILED " +
                     "plotMutation=OFF worldMutation=UNCHANGED",unsafePlotJournal);
         }
-        LOGGER.info("[PDD-0.5.1-persistFix] phase=START bridge=READ_ONLY nativeScalar=GAME_FORCE_PROXY " +
+        try {
+            stress=new StressRuntime(event.getServer(),worldCommit,plotCommit,LOGGER);
+        }catch(java.io.IOException|RuntimeException unsafeStressJournal){
+            // Do not execute pending origins without their reservation hold/recovery contract.
+            bridge.setWorldCommitService(null);bridge.setPlotCommitService(null);
+            if(worldCommit!=null){worldCommit.stop();worldCommit=null;}
+            if(plotCommit!=null){plotCommit.stop();plotCommit=null;}
+            WorldBlockMutationTracker.attachPlot(null);
+            LOGGER.error("[PDD-STRESS-LEDGER] phase=START status=HALTED reason=JOURNAL_INIT_FAILED mutations=OFF",unsafeStressJournal);
+        }
+        LOGGER.info("[PDD-0.6.0] phase=START bridge=READ_ONLY nativeScalar=GAME_FORCE_PROXY " +
                 "newNativeABI=NOT_REQUIRED customNullCallback=DISABLED faceRecovery=MULTI_SURFACE_PLUS_SPARSE_SHAPE_HALO worldMutation={} plotMutation={} ",
                 worldCommit==null?"DISABLED":"WORLD_STATIC_ONLY",plotCommit==null?"DISABLED":"SABLE_PLOT");
     }
@@ -83,6 +97,7 @@ public final class PhysicalDestroyDeform {
     }
     private void onServerStopped(ServerStoppedEvent event) {
         bridge.savePreview(event.getServer(), LOGGER);
+        if(stress!=null){stress.stop();stress=null;}
         if(worldCommit!=null){worldCommit.stop();worldCommit=null;}
         WorldBlockMutationTracker.attachPlot(null);
         if(plotCommit!=null){plotCommit.stop();plotCommit=null;}
@@ -93,7 +108,7 @@ public final class PhysicalDestroyDeform {
         SableContactQueue.drain();
         SableFrameCapture.clear();
         acceptanceReport.close();
-        LOGGER.info("[PDD-0.5.1-persistFix] phase=STOP state=CLEARED worldMutation=STOPPED");
+        LOGGER.info("[PDD-0.6.0] phase=STOP state=CLEARED worldMutation=STOPPED");
     }
     private void onServerTick(ServerTickEvent.Post event) {
         // Snapshot and native inputs are consumed exactly once on the server tick.
@@ -105,12 +120,13 @@ public final class PhysicalDestroyDeform {
             bridge.tick(event.getServer(),callbacks,nativeEffects,preHistory,LOGGER);
         } catch (RuntimeException invalid) {
             // Never let a diagnostic bridge disrupt the physics/game tick.
-            LOGGER.error("[PDD-0.5.1] phase=BRIDGE_EXCEPTION reason={} nativeEffects={} " +
+            LOGGER.error("[PDD-0.6.0] phase=BRIDGE_EXCEPTION reason={} nativeEffects={} " +
                     "callbacks={} Q=0 worldMutation=OFF",invalid.getClass().getName(),
                     nativeEffects.size(),callbacks.size(),invalid);
         } finally {
             RawObservationDispatcher.dispatch(callbacks);
         }
+        if(stress!=null)stress.tick();
         if(worldCommit!=null) {
             try {worldCommit.tick(event.getServer().getTickCount());}
             catch(RuntimeException commitError) {

@@ -139,6 +139,36 @@ public final class OwnerResolver {
         }
         public int cachedCells(){return cells.size();}
         public Stats stats(){return new Stats(cells.size(),reusedCells,pointTests,testedBoxes);}
+        public boolean fullCube(String owner,BlockPos pos){
+            Cell cell=cells.get(new CellKey(owner,pos));if(cell==null||!cell.identity().verified()||cell.boxes().size()!=1)return false;
+            AABB b=cell.boxes().getFirst();return b.minX==0&&b.minY==0&&b.minZ==0&&b.maxX==1&&b.maxY==1&&b.maxZ==1;
+        }
+        /** Every selected signed axis must meet an actual exterior collision-box face. */
+        public boolean targetFace(String owner,BlockPos pos,Vec point,com.physicaldestroydeform.deform.MovePlan.SignedAxes axes){
+            Cell cell=cells.get(new CellKey(owner,pos));if(cell==null||!cell.identity().verified())return false;
+            double x=point.x()-pos.getX(),y=point.y()-pos.getY(),z=point.z()-pos.getZ();
+            double e=SableConsumerTargets.EPSILON;
+            for(AABB box:cell.boxes()){
+                if(!face(x,box.minX,box.maxX,axes.x(),e)||!face(y,box.minY,box.maxY,axes.y(),e)
+                        ||!face(z,box.minZ,box.maxZ,axes.z(),e))continue;
+                // Internal seams of the union do not establish an exterior normal.
+                boolean interior=false;
+                for(AABB other:cell.boxes()){
+                    if(other==box)continue;
+                    if(axes.x()!=0&&inside(other,x-axes.x()*e*2,y,z,e/4)
+                       ||axes.y()!=0&&inside(other,x,y-axes.y()*e*2,z,e/4)
+                       ||axes.z()!=0&&inside(other,x,y,z-axes.z()*e*2,e/4)){interior=true;break;}
+                }
+                if(!interior)return true;
+            }
+            return false;
+        }
+        private static boolean face(double p,double min,double max,int sign,double e){
+            return Double.isFinite(p)&&p>=min-e&&p<=max+e&&(sign==0||Math.abs(p-(sign>0?min:max))<=e);
+        }
+        private static boolean inside(AABB b,double x,double y,double z,double e){
+            return x>b.minX-e&&x<b.maxX+e&&y>b.minY-e&&y<b.maxY+e&&z>b.minZ-e&&z<b.maxZ+e;
+        }
         public Sample inspect(String owner,BlockPos pos,Vec point) {
             var key=new CellKey(owner,pos);
             Cell evidence=cells.get(key);

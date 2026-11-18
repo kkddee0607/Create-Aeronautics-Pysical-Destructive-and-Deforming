@@ -7,6 +7,25 @@ import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
 
 class MovePlanTest {
+    @Test void directionQuantizationUsesXZYTiesAndInclusiveHalfRatio(){
+        assertEquals(new MovePlan.SignedAxes(1,0,1,true,4),
+                MovePlan.quantizeDirection(1,1,1,true,4));
+        assertEquals(new MovePlan.SignedAxes(0,-1,1,true,4),
+                MovePlan.quantizeDirection(0,-2,1,true,4));
+        assertEquals(new MovePlan.SignedAxes(0,-1,0,true,4),
+                MovePlan.quantizeDirection(0,-2,Math.nextDown(1.0),true,4));
+        assertEquals(new MovePlan.SignedAxes(-1,0,1,false,4),
+                MovePlan.quantizeDirection(-Double.MAX_VALUE,0,Double.MAX_VALUE,false,4));
+        assertEquals(new MovePlan.SignedAxes(1,0,0,true,4),
+                MovePlan.quantizeDirection(Double.MIN_VALUE,0,0,true,4));
+        assertEquals(new MovePlan.SignedAxes(0,1,1,true,4),
+                MovePlan.quantizeDirection(Math.nextUp(1.5),Math.nextUp(Math.nextUp(1.5)),3,true,4));
+        assertEquals(new MovePlan.SignedAxes(1,0,0,true,4),
+                MovePlan.quantizeDirection(5*Double.MIN_VALUE,2*Double.MIN_VALUE,0,true,4));
+        assertThrows(IllegalArgumentException.class,()->MovePlan.quantizeDirection(0,0,0,true,0));
+        assertThrows(IllegalArgumentException.class,()->MovePlan.quantizeDirection(Double.NaN,0,1,true,0));
+        assertThrows(IllegalArgumentException.class,()->MovePlan.quantizeDirection(0,Double.POSITIVE_INFINITY,1,true,0));
+    }
     private static final SparseStateKey KEY=new SparseStateKey("minecraft:overworld","PLOT",
             "123e4567-e89b-12d3-a456-426614174000",2,1,2,3,"example:block|state");
     @Test void thresholdAndElasticBreakFirstBeforeCandidate(){

@@ -9,6 +9,37 @@ import java.nio.file.*;
 
 /** Pure JUnit contract. Actual NeoForge block events/drops require in-game verification. */
 final class WorldCommitIntegrationTest {
+    @Test void blockedReserveUsesFixedIncrementOnceWithoutNewCredit() throws Exception {
+        var path=Files.createTempDirectory("pdd-blocked-core-");
+        var journal=new WorldPersistentJournal(path.resolve("new"),path.resolve("legacy"));
+        var engine=new WorldCommitCore(journal,DamageModel.Settings.defaults(),64);
+        var source=at(49);var dest=at(50);
+        var original=new WorldReceiptJournal.State(source,"0-fingerprint-sha",10,100,1,201);
+        journal.transition(new WorldReceiptJournal.Receipt("direct",source,WorldReceiptJournal.Status.APPLIED,"DIRECT",201),original);
+        var moved=new WorldReceiptJournal.State(dest,"1-fingerprint-sha",10,100,1,201,1);
+        var b=new com.physicaldestroydeform.deform.MoveTransactionJournal.BeforeImage("direct/move","direct",source,dest,original,moved,0,0,201,1200,1,5,STONE,"",(byte[])null,8,5,512);
+        var fake=new FakeWorld();
+        assertEquals(com.physicaldestroydeform.deform.MoveTransactionExecutor.Settlement.SETTLED,engine.settleBlockedMove(fake,b,202,202));
+        assertEquals(12,journal.get(source).damage());assertEquals(100,journal.get(source).remainder());
+        var reopened=new WorldPersistentJournal(path.resolve("new"),path.resolve("legacy"));
+        var recovered=new WorldCommitCore(reopened,DamageModel.Settings.defaults(),64);
+        assertEquals(com.physicaldestroydeform.deform.MoveTransactionExecutor.Settlement.SETTLED,recovered.settleBlockedMove(fake,b,203,203));
+        assertEquals(journal.get(source),reopened.get(source));assertEquals(0,fake.drops);
+    }
+    @Test void staleMaterialAbortsWithoutChangingStoredDamageOrMintingAnotherCredit() throws Exception {
+        var journal=new WorldReceiptJournal(Files.createTempDirectory("pdd-material-cas-").resolve("world.wal"));
+        var engine=new WorldCommitCore(journal,DamageModel.Settings.defaults(),64);
+        var key=at(44);
+        var world=new FakeWorld(){
+            @Override public boolean materialMatches(WorldCommitCore.Intent intent){return !intent.applyId().equals("stale");}
+        };
+        engine.submit(intent("valid",key,0.75));engine.tick(world,201);
+        var before=journal.get(key);
+        engine.submit(intent("stale",key,9000));
+        assertEquals("MATERIAL_REVISION_CHANGED",engine.tick(world,202).getFirst().reason());
+        assertEquals(before,journal.get(key));assertEquals(0,world.breaks);
+        assertEquals(WorldCommitCore.Outcome.DUPLICATE,engine.submit(intent("stale",key,9000)).result());
+    }
     private static final String DIM="minecraft:overworld";
     private static final MaterialProperties STONE=new MaterialProperties(59,91,10,9,false);
     private static SparseStateKey at(int x) {return new SparseStateKey(DIM,"WORLD",DIM,1,x,72,0,"minecraft:stone|Block{minecraft:stone}");}

@@ -19,14 +19,14 @@ import static java.nio.file.StandardOpenOption.*;
  * No Plot mutation, forced chunk load, or Minecraft API occurs in this class.
  */
 public final class WorldPersistentJournal implements WorldJournal {
-    public static final int SCHEMA=3, MAX_STATES_PER_CHUNK=4096;
+    public static final int SCHEMA=6, MAX_STATES_PER_CHUNK=4096;
     public static final int MAX_TOTAL_STATES=2_000_000, MAX_RECEIPTS=2_000_000;
     public static final int MAX_REVISIONS_PER_CHUNK=131_072, MAX_TOTAL_REVISIONS=4_000_000;
     public static final int SAVE_DIRTY_BATCH=128;
     public static final long MAX_WAL_BYTES=96L*1024*1024, CHECKPOINT_WAL_BYTES=16L*1024*1024;
     private static final int DISK_MAGIC=0x50445035, WAL_MAGIC=0x50445735;
     private static final int MANIFEST=1, CHUNK=2, RECEIPTS=3;
-    private static final byte TRANSITION=1, CLEAR=2, REPLACEMENT=3;
+    private static final byte TRANSITION=1, CLEAR=2, REPLACEMENT=3, RELOCATION=4, COPYCAT_SHAPE=5;
     private static final int MAX_FRAME_BYTES=16*1024, MAX_BLOB_BYTES=64*1024*1024;
 
     public record ChunkKey(String dimension,int x,int z) implements Comparable<ChunkKey> {
@@ -61,7 +61,7 @@ public final class WorldPersistentJournal implements WorldJournal {
     private long generation,walBytes,repairedTailBytes;
     private String legacyHash="";
     private boolean staging, migrated;
-    // The committed manifest selects the reader schema; new writes use schema 3.
+    // The committed manifest selects the reader schema; new writes use schema 5.
     private int loadingSchema=SCHEMA;
 
     /** Existing schema-2 WAL stays untouched as an audit and downgrade safety marker. */
@@ -133,6 +133,7 @@ public final class WorldPersistentJournal implements WorldJournal {
         Cell cell=new Cell(dimension,x,y,z);
         return positionKeys.containsKey(cell)||revisions.containsKey(cell)||pendingPositions.containsKey(cell);
     }
+    @Override public boolean supportsPendingPayload() { return true; }
     @Override public synchronized void enqueue(WorldCommitCore.Intent intent,
             com.physicaldestroydeform.DamageModel.Settings settings,long expiresGameTick)throws IOException {
         var pending=new WorldReceiptJournal.Pending(intent,settings,receipts.size(),expiresGameTick);
@@ -179,6 +180,10 @@ public final class WorldPersistentJournal implements WorldJournal {
     @Override public synchronized void transition(WorldReceiptJournal.Receipt r,
             WorldReceiptJournal.State next) throws IOException {
         Objects.requireNonNull(r);
+        var previous=receipts.get(r.id());
+        if(previous!=null&&previous.reason().startsWith("MOVE_PREPARED:")
+                &&r.status()==WorldReceiptJournal.Status.APPLIED)
+            throw new IOException("MOVE_REQUIRES_TWO_CELL_FINALIZATION");
         validateTransition(r,next);
         byte[] frame=frame(out->{out.writeByte(TRANSITION);writeReceipt(out,r);
             out.writeBoolean(next!=null);if(next!=null)writeState(out,next);});
@@ -190,6 +195,93 @@ public final class WorldPersistentJournal implements WorldJournal {
         if(!positionKeys.containsKey(cell))return;
         append(frame(out->{out.writeByte(CLEAR);writeCell(out,cell);}));
         clear(cell);
+    }
+    /**
+     * Finalize a proven two-cell move in one fsynced frame. This does NOT move blocks:
+     * the caller must already hold a durable before-image, both mutation guards and
+     * a verified world/owner post-state. An uncertain PREPARED must not call this.
+     */
+    public synchronized void finalizeRelocation(WorldReceiptJournal.Receipt receipt,
+            WorldReceiptJournal.State expectedSource,WorldReceiptJournal.State destination,
+            long sourceRevision,long destinationRevision) throws IOException {
+        validateRelocation(receipt,expectedSource,destination,sourceRevision,destinationRevision);
+        append(frame(out->{out.writeByte(RELOCATION);writeReceipt(out,receipt);
+            out.writeBoolean(expectedSource!=null);if(expectedSource!=null)writeState(out,expectedSource);
+            writeState(out,destination);out.writeLong(sourceRevision);out.writeLong(destinationRevision);}));
+        applyRelocation(receipt,destination,sourceRevision,destinationRevision);
+    }
+    /** Must be called before physical setters; finalization rechecks after readback. */
+    public synchronized void checkRelocationAdmission(WorldReceiptJournal.Receipt receipt,
+            WorldReceiptJournal.State expectedSource,WorldReceiptJournal.State destination,
+            long sourceRevision,long destinationRevision) throws IOException {
+        validateRelocation(receipt,expectedSource,destination,sourceRevision,destinationRevision);
+        byte[] encoded=frame(out->{out.writeByte(RELOCATION);writeReceipt(out,receipt);
+            out.writeBoolean(expectedSource!=null);if(expectedSource!=null)writeState(out,expectedSource);
+            writeState(out,destination);out.writeLong(sourceRevision);out.writeLong(destinationRevision);});
+        if(walBytes+encoded.length>MAX_WAL_BYTES)throw new IOException("MOVE_WAL_CAP");
+    }
+    /** Binds the PREPARED marker to the exact transfer. The companion move WAL
+     * must retain its complete two-cell before-image; this digest is not recovery data. */
+    public static String relocationPreparationReason(SparseStateKey source,
+            WorldReceiptJournal.State expectedSource,WorldReceiptJournal.State destination,
+            long sourceRevision,long destinationRevision) throws IOException {
+        var bytes=new ByteArrayOutputStream();
+        try(var out=new DataOutputStream(bytes)) {
+            writeKey(out,source);out.writeBoolean(expectedSource!=null);
+            if(expectedSource!=null)writeState(out,expectedSource);
+            writeState(out,destination);out.writeLong(sourceRevision);out.writeLong(destinationRevision);
+        }
+        return "MOVE_PREPARED:"+sha256(HexFormat.of().formatHex(bytes.toByteArray()));
+    }
+    private void validateRelocation(WorldReceiptJournal.Receipt r,WorldReceiptJournal.State expected,
+            WorldReceiptJournal.State next,long fromRevision,long toRevision) throws IOException {
+        Objects.requireNonNull(r);Objects.requireNonNull(next);
+        var prior=receipts.get(r.id());var from=r.key();var to=next.key();
+        long dx=Math.abs((long)from.x()-to.x()),dy=Math.abs((long)from.y()-to.y()),dz=Math.abs((long)from.z()-to.z());
+        if(prior==null||prior.status()!=WorldReceiptJournal.Status.PREPARED
+                ||!prior.reason().equals(relocationPreparationReason(from,expected,next,fromRevision,toRevision))
+                ||r.status()!=WorldReceiptJournal.Status.APPLIED||!"MOVE_POSTSTATE_CONFIRMED".equals(r.reason())
+                ||!from.dimension().equals(to.dimension())||!from.ownerSpace().equals(to.ownerSpace())
+                ||!from.ownerId().equals(to.ownerId())||from.ownerGeneration()!=to.ownerGeneration()
+                ||!from.fingerprint().equals(to.fingerprint())||dx>1||dy>1||dz>1||dx+dy+dz<1||dx+dy+dz>2)
+            throw new IOException("INVALID_MOVE_RECEIPT_OR_OWNER");
+        validateTransition(r,null);
+        if(expected!=null&&!expected.key().equals(from))throw new IOException("MOVE_SOURCE_KEY_MISMATCH");
+        if(!Objects.equals(states.get(from),expected)
+                ||positionKeys.getOrDefault(new Cell(from),Set.of()).size()!=(expected==null?0:1)
+                ||hasPosition(to.dimension(),to.x(),to.y(),to.z()))
+            throw new IOException("MOVE_SPARSE_CAS_MISMATCH");
+        if(next.damage()!=(expected==null?0:expected.damage())
+                ||next.remainder()!=(expected==null?0:expected.remainder())
+                ||next.deformation()!=Math.min(255,(expected==null?0:expected.deformation())+1)
+                ||expected!=null&&next.materialGeneration()!=expected.materialGeneration()
+                ||next.tick()!=r.tick())throw new IOException("MOVE_STATE_TRANSFER_MISMATCH");
+        Cell a=new Cell(from),b=new Cell(to);
+        if(fromRevision<0||toRevision<0||fromRevision==Long.MAX_VALUE||toRevision==Long.MAX_VALUE
+                ||revision(a.dimension,a.x,a.y,a.z)!=fromRevision||revision(b.dimension,b.x,b.y,b.z)!=toRevision)
+            throw new IOException("MOVE_REVISION_CAS_MISMATCH");
+        if(!next.incarnation().startsWith((toRevision+1)+"-")
+                ||!com.physicaldestroydeform.plot.PlotKeyCodec.isPlotStorage(to)
+                  &&!next.incarnation().equals((toRevision+1)+"-"+sha256(to.fingerprint())))
+            throw new IOException("MOVE_DESTINATION_INCARNATION_MISMATCH");
+        int newRevisions=(fromRevision==0?1:0)+(toRevision==0?1:0);
+        if((long)revisions.size()+newRevisions>MAX_TOTAL_REVISIONS)throw new IOException("MOVE_REVISION_CAP");
+        for(ChunkKey c:Set.copyOf(List.of(a.chunk(),b.chunk()))) {
+            int added=(fromRevision==0&&a.chunk().equals(c)?1:0)+(toRevision==0&&b.chunk().equals(c)?1:0);
+            if(revisionChunks.getOrDefault(c,Set.of()).size()+added>MAX_REVISIONS_PER_CHUNK)
+                throw new IOException("MOVE_REVISION_CHUNK_CAP");
+        }
+        int released=expected==null?0:1;
+        if((long)states.size()-released+1>MAX_TOTAL_STATES
+                ||chunkKeys.getOrDefault(chunk(to),Set.of()).size()
+                    -(expected!=null&&chunk(from).equals(chunk(to))?1:0)+1>MAX_STATES_PER_CHUNK)
+            throw new IOException("MOVE_SPARSE_CAP");
+    }
+    private void applyRelocation(WorldReceiptJournal.Receipt r,WorldReceiptJournal.State next,
+            long fromRevision,long toRevision) {
+        Cell a=new Cell(r.key()),b=new Cell(next.key());
+        clear(a);clear(b);setRevision(a,fromRevision+1);setRevision(b,toRevision+1);
+        applyTransition(r,null);putState(next);
     }
     @Override public synchronized void discardStale(SparseStateKey key) throws IOException {
         if(states.containsKey(key))discardAtPosition(key.dimension(),key.x(),key.y(),key.z());
@@ -206,6 +298,29 @@ public final class WorldPersistentJournal implements WorldJournal {
         append(frame(out->{out.writeByte(REPLACEMENT);writeCell(out,cell);out.writeLong(next);}));
         clear(cell);setRevision(cell,next);
         return next;
+    }
+    /** Same actual Copycats block, changed shape/state, not a replacement material block.
+     * Atomically rekey the sparse record without changing any damage/history quantity. */
+    public synchronized void remapCopycatShape(SparseStateKey before,SparseStateKey after,String incarnation)throws IOException{
+        validateCopycatShape(before,after,incarnation);
+        append(frame(out->{out.writeByte(COPYCAT_SHAPE);writeKey(out,before);writeKey(out,after);writeString(out,incarnation);}));
+        applyCopycatShape(before,after,incarnation);
+    }
+    private void validateCopycatShape(SparseStateKey before,SparseStateKey after,String incarnation)throws IOException{
+        Cell cell=new Cell(before);long prior=revision(cell.dimension,cell.x,cell.y,cell.z);
+        String id=before.fingerprint().split("\\|",2)[0];
+        if(!id.startsWith("copycats:")||!after.fingerprint().startsWith(id+"|")||!cell.equals(new Cell(after))
+                ||!before.ownerId().equals(after.ownerId())||before.ownerGeneration()!=after.ownerGeneration()
+                ||!before.ownerSpace().equals(after.ownerSpace())||before.equals(after)||prior==Long.MAX_VALUE
+                ||!incarnation.startsWith((prior+1)+"-")||positionKeys.getOrDefault(cell,Set.of()).size()>(states.containsKey(before)?1:0)
+                ||states.containsKey(before)&&!states.get(before).incarnation().startsWith(prior+"-"))
+            throw new IOException("COPYCAT_SHAPE_CAS_MISMATCH");
+        if(prior==0&&(revisions.size()>=MAX_TOTAL_REVISIONS||revisionChunks.getOrDefault(cell.chunk(),Set.of()).size()>=MAX_REVISIONS_PER_CHUNK))
+            throw new IOException("COPYCAT_SHAPE_REVISION_CAP");
+    }
+    private void applyCopycatShape(SparseStateKey before,SparseStateKey after,String incarnation){
+        Cell cell=new Cell(before);var old=states.get(before);clear(cell);setRevision(cell,revision(cell.dimension,cell.x,cell.y,cell.z)+1);
+        if(old!=null)putState(new WorldReceiptJournal.State(after,incarnation,old.damage(),old.remainder(),old.materialGeneration(),old.tick(),old.deformation()));
     }
     /** Complete a bounded amount of snapshot work on the server thread. */
     @Override public synchronized int checkpointBatch(int maxObjects) throws IOException {
@@ -265,9 +380,9 @@ public final class WorldPersistentJournal implements WorldJournal {
         if(prior==null&&receipts.size()>=MAX_RECEIPTS)throw new IOException("RECEIPT_LEDGER_CAP_EXCEEDED");
         if(r.pending()!=null && (prior!=null || pendingCount>=WorldCommitCore.MAX_QUEUED))
             throw new IOException("PENDING_PAYLOAD_DUPLICATE_OR_CAP");
-        if(next!=null && (next.damage()>0||next.remainder()>0) && !canStore(next.key()))
+        if(next!=null && (next.damage()>0||next.remainder()>0||next.deformation()>0) && !canStore(next.key()))
             throw new IOException("SPARSE_CHUNK_CAP_EXCEEDED");
-        if(next!=null && (next.damage()>0||next.remainder()>0)
+        if(next!=null && (next.damage()>0||next.remainder()>0||next.deformation()>0)
                 && hasPosition(next.key().dimension(),next.key().x(),next.key().y(),next.key().z())
                 && !states.containsKey(next.key()))
             throw new IOException("STALE_POSITION_STATE_ALIAS");
@@ -294,7 +409,7 @@ public final class WorldPersistentJournal implements WorldJournal {
     }
     private void putState(WorldReceiptJournal.State value){
         SparseStateKey key=value.key();ChunkKey chunk=chunk(key);
-        if(value.damage()==0&&value.remainder()==0){removeState(key);return;}
+        if(value.damage()==0&&value.remainder()==0&&value.deformation()==0){removeState(key);return;}
         states.put(key,value);
         positionKeys.computeIfAbsent(new Cell(key),k->new HashSet<>()).add(key);
         chunkKeys.computeIfAbsent(chunk,k->new HashSet<>()).add(key);
@@ -318,9 +433,9 @@ public final class WorldPersistentJournal implements WorldJournal {
         dirtyChunks.add(cell.chunk());
     }
 
-    /** Re-encode all schema-1/2 committed snapshots and replayed WAL data without
+    /** Re-encode all schema-1/2/3 committed snapshots and replayed WAL data without
      * modifying the old generation. A crash before the atomic manifest move
-     * replays the untouched previous WAL; after it, schema 3 is self-contained.
+     * replays the untouched previous WAL; after it, schema 4 is self-contained.
      */
     private void upgradeSchema() throws IOException {
         long next=generation+1;
@@ -570,6 +685,14 @@ public final class WorldPersistentJournal implements WorldJournal {
                         if(next<1||next!=revision(c.dimension,c.x,c.y,c.z)+1)
                             throw new IOException("nonsequential replacement generation");
                         clear(c);setRevision(c,next);
+                    }else if(type==RELOCATION&&loadingSchema>=4){
+                        var receipt=readReceipt(rec);var expected=rec.readBoolean()?readState(rec):null;
+                        var next=readState(rec);long fromRevision=rec.readLong(),toRevision=rec.readLong();
+                        validateRelocation(receipt,expected,next,fromRevision,toRevision);
+                        applyRelocation(receipt,next,fromRevision,toRevision);
+                    }else if(type==COPYCAT_SHAPE&&loadingSchema>=5){
+                        var before=readKey(rec);var after=readKey(rec);var token=readString(rec);
+                        validateCopycatShape(before,after,token);applyCopycatShape(before,after,token);
                     }else throw new IOException("unknown WAL record kind");
                     if(rec.available()!=0)throw new IOException("trailing recovery WAL record bytes");
                 }
@@ -655,12 +778,12 @@ public final class WorldPersistentJournal implements WorldJournal {
     }
     private static void writeState(DataOutputStream out,WorldReceiptJournal.State s)throws IOException {
         writeKey(out,s.key());writeString(out,s.incarnation());out.writeShort(s.damage());out.writeByte(s.remainder());
-        out.writeLong(s.materialGeneration());out.writeLong(s.tick());
+        out.writeLong(s.materialGeneration());out.writeLong(s.tick());out.writeByte(s.deformation());
     }
     private WorldReceiptJournal.State readState(DataInputStream in)throws IOException {
         return new WorldReceiptJournal.State(readKey(in),readString(in),
                 loadingSchema==1?in.readUnsignedByte():in.readUnsignedShort(),
-                in.readUnsignedByte(),in.readLong(),in.readLong());
+                in.readUnsignedByte(),in.readLong(),in.readLong(),loadingSchema>=4?in.readUnsignedByte():0);
     }
     private static void writeReceipt(DataOutputStream out,WorldReceiptJournal.Receipt r)throws IOException {
         writeString(out,r.id());writeKey(out,r.key());out.writeByte(r.status().ordinal());
@@ -672,7 +795,8 @@ public final class WorldPersistentJournal implements WorldJournal {
                 writeString(out,i.expectedIncarnation());out.writeDouble(i.sealedQ());
                 out.writeInt(m.hardness());out.writeInt(m.threshold());out.writeInt(m.ductilityPercent());
                 out.writeInt(m.elasticityPercent());out.writeBoolean(m.unbreakable());out.writeDouble(m.yieldThreshold());
-                out.writeLong(i.materialGeneration());out.writeBoolean(i.fFirstPreDamped());
+                out.writeLong(i.materialGeneration());out.writeBoolean(i.fFirstPreDamped());writeString(out,i.materialRevision());
+                com.physicaldestroydeform.deform.MovePlan.Evidence.write(out,i.deformationEvidence());
                 out.writeDouble(s.minHardnessFactor());out.writeDouble(s.hardnessExponent());
                 out.writeDouble(s.minElasticFactor());out.writeDouble(s.elasticExponent());
                 out.writeDouble(s.damageGain());out.writeDouble(s.deformationGain());
@@ -690,7 +814,9 @@ public final class WorldPersistentJournal implements WorldJournal {
             String incarnation=readString(in);double q=in.readDouble();
             var material=new com.physicaldestroydeform.MaterialProperties(in.readInt(),in.readInt(),
                     in.readInt(),in.readInt(),in.readBoolean(),in.readDouble());
-            var intent=new WorldCommitCore.Intent(id,key,incarnation,q,material,in.readLong(),tick,in.readBoolean());
+            long generation=in.readLong();boolean preDamped=in.readBoolean();
+            var intent=new WorldCommitCore.Intent(id,key,incarnation,q,material,generation,tick,preDamped,loadingSchema>=5?readString(in):"",
+                    loadingSchema>=5?com.physicaldestroydeform.deform.MovePlan.Evidence.read(in,loadingSchema>=6):null);
             var settings=new com.physicaldestroydeform.DamageModel.Settings(in.readDouble(),in.readDouble(),
                     in.readDouble(),in.readDouble(),in.readDouble(),in.readDouble());
             pending=new WorldReceiptJournal.Pending(intent,settings,in.readLong(),in.readLong());

@@ -2,6 +2,14 @@ package com.physicaldestroydeform;
 import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
 class DamageModelTest {
+    @Test void blockedReserveDoesNotSplitOrApplyLocalElasticityAgain() {
+        var cfg=DamageModel.Settings.defaults();
+        assertEquals(6656L,DamageModel.blockedFixedIncrement(10,new MaterialProperties(0,0,0),cfg));
+        assertEquals(4437L,DamageModel.blockedFixedIncrement(10,new MaterialProperties(0,0,100),cfg));
+        assertEquals(0L,DamageModel.blockedFixedIncrement(0,new MaterialProperties(0,0,100),cfg));
+        assertEquals(0L,DamageModel.blockedFixedIncrement(10,new MaterialProperties(0,1,0,0,true),cfg));
+        assertThrows(IllegalArgumentException.class,()->DamageModel.blockedFixedIncrement(Double.NaN,new MaterialProperties(0,0,0),cfg));
+    }
     @Test void hardnessReducesDamageButNeverMakesItZero() {
         assertEquals(100,DamageModel.effectiveLocalDamage(100,new MaterialProperties(0,0,0)),1e-9);
         assertEquals(8,DamageModel.effectiveLocalDamage(100,new MaterialProperties(255,100,0)),1e-9);

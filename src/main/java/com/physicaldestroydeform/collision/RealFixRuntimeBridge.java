@@ -648,6 +648,9 @@ public final class RealFixRuntimeBridge {
                         t.lastVerfFsm=fsmSignature;t.lastVerfFsmTick=now;
                     }
                     var materialSnapshot=MaterialRegistry.snapshot();
+                    var targetMaterials=new com.physicaldestroydeform.material.TargetMaterials(server,stamp.dimension,materialSnapshot);
+                    var targetDirections=result.credited()&&massSafe!=null?TargetDirections.capture(server,pair,massSafe.contacts(),pre,stamp.tick,complete&&massSafe.maskedFrames()==0):new TargetDirections();
+                    targetMaterials.setDirections(targetDirections);
                     // Sable 2.0.6 exports opposing local manifold normals per
                     // native record. Validate each pair, then average all
                     // witnesses in the SAME owner-local effect frame.
@@ -704,11 +707,11 @@ public final class RealFixRuntimeBridge {
                                 }
                             }:null;
                     long propagationStart=System.nanoTime();
-                    ContactCreditLedger.Grant grant=result.credited()?regionLedger.issuePropagated(
+                    ContactCreditLedger.Grant grant=result.credited()?regionLedger.issuePropagatedTargets(
                             pair,result,ContactCreditLedger.Source.SABLE_POST_EFFECT,regions.regions(),
                             OwnerResolver.propagationSnapshot(server,stamp.dimension),
-                            materialSnapshot::resolveFingerprint,credit.settings(),damageSettings,
-                            nativeNormal.owners(),fTrace):null;
+                            targetMaterials::material,credit.settings(),damageSettings,
+                            nativeNormal.owners(),event->{targetDirections.trace(event);if(fTrace!=null)fTrace.accept(event);},materialSnapshot::resolveFingerprint):null;
                     long propagationNanos=System.nanoTime()-propagationStart;
                     boolean granted=grant!=null && grant.credited();
                     if(result.credited() && !granted) {
@@ -723,6 +726,7 @@ public final class RealFixRuntimeBridge {
                                 grant==null?"NULL":grant.status(),regionLedger.lastPropagationFailure(),aborted);
                     }
                     if(granted) {
+                        targetDirections.bind(grant,credit.settings(),targetMaterials::material);
                         t.lastCreditedPeak=currentPeak;
                         t.quietForceFrames=0;
                         t.lastCreditedTick=now;
@@ -881,8 +885,8 @@ public final class RealFixRuntimeBridge {
                         try {
                             var materials=materialSnapshot;
                             long materialStart=System.nanoTime();
-                            var previewResult=preview.record(grant,materials.generation(),now,
-                                    materials::resolveFingerprint,damageSettings,
+                            var previewResult=preview.recordTargets(grant,materials.generation(),now,
+                                    targetMaterials::material,damageSettings,
                                     key->java.util.Optional.ofNullable(witness.owners().get(
                                             key.ownerSpace()+":"+key.ownerId())));
                             long materialNanos=System.nanoTime()-materialStart;
@@ -944,14 +948,14 @@ public final class RealFixRuntimeBridge {
                                     "credit={} Q={} applied=false mutation=OFF",grant.id(),grant.issuedQ(),invalidMaterialPlan);
                         }
                         if(worldCommit!=null) {
-                            try {worldCommit.offer(grant,materialSnapshot);}
+                            try {worldCommit.offer(grant,materialSnapshot,targetMaterials);}
                             catch(RuntimeException commitError) {
                                 log.error("[PDD-COMMIT] phase=OFFER status=ABORTED " +
                                         "credit={} reason=UNEXPECTED_ADAPTER_ERROR",grant.id(),commitError);
                             }
                         }
                         if(plotCommit!=null) {
-                            try {plotCommit.offer(grant,materialSnapshot);}
+                            try {plotCommit.offer(grant,materialSnapshot,targetMaterials);}
                             catch(RuntimeException commitError) {
                                 log.error("[PDD-PLOT] phase=OFFER status=ABORTED " +
                                         "credit={} reason=UNEXPECTED_ADAPTER_ERROR",grant.id(),commitError);

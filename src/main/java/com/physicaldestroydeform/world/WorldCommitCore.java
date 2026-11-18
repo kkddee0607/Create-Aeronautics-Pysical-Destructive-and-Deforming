@@ -4,6 +4,9 @@ import com.physicaldestroydeform.BlockDamageState;
 import com.physicaldestroydeform.DamageModel;
 import com.physicaldestroydeform.MaterialProperties;
 import com.physicaldestroydeform.state.SparseStateKey;
+import com.physicaldestroydeform.deform.MovePlan;
+import com.physicaldestroydeform.deform.MoveTransactionJournal;
+import com.physicaldestroydeform.deform.MoveTransactionExecutor;
 import java.io.IOException;
 import java.util.*;
 
@@ -32,11 +35,19 @@ public final class WorldCommitCore {
         public Observation {Objects.requireNonNull(dimension);Objects.requireNonNull(fingerprint);}
     }
     public record Intent(String applyId,SparseStateKey key,String expectedIncarnation,double sealedQ,
-                         MaterialProperties material,long materialGeneration,long eventTick,boolean fFirstPreDamped) {
+                         MaterialProperties material,long materialGeneration,long eventTick,boolean fFirstPreDamped,String materialRevision,
+                         com.physicaldestroydeform.deform.MovePlan.Evidence deformationEvidence) {
+        public Intent(String applyId,SparseStateKey key,String expectedIncarnation,double sealedQ,MaterialProperties material,long materialGeneration,long eventTick,boolean fFirstPreDamped){
+            this(applyId,key,expectedIncarnation,sealedQ,material,materialGeneration,eventTick,fFirstPreDamped,"",null);
+        }
+        public Intent(String applyId,SparseStateKey key,String expectedIncarnation,double sealedQ,MaterialProperties material,long materialGeneration,long eventTick,boolean fFirstPreDamped,String materialRevision){
+            this(applyId,key,expectedIncarnation,sealedQ,material,materialGeneration,eventTick,fFirstPreDamped,materialRevision,null);
+        }
         public Intent {
             if(applyId==null||applyId.isBlank()||applyId.length()>1024||key==null
                 ||!"WORLD".equals(key.ownerSpace())||expectedIncarnation==null||expectedIncarnation.isBlank()
-                ||!Double.isFinite(sealedQ)||sealedQ<0||material==null||materialGeneration<0||eventTick<0)
+                ||!Double.isFinite(sealedQ)||sealedQ<0||material==null||materialGeneration<0||eventTick<0
+                ||materialRevision==null||materialRevision.length()>128||deformationEvidence!=null&&!fFirstPreDamped)
                 throw new IllegalArgumentException("invalid sealed World intent");
         }
     }
@@ -49,6 +60,8 @@ public final class WorldCommitCore {
         default Observation readRecoveredIfLoaded(Intent intent) { return readIfLoaded(intent.key()); }
         /** Permanent owner/target quarantine blocks recovered siblings before a world read. */
         default String rejectRecoveredReason(Intent intent) { return null; }
+        /** Production gateways verify the sealed material snapshot separately from block identity. */
+        default boolean materialMatches(Intent intent) { return true; }
         Permission canDamage(SparseStateKey key,Observation expected);
         Permission canBreak(SparseStateKey key,Observation expected);
         /** Execute at most once. Implementation calls vanilla destroy/drop exactly once; no manual drops. */
@@ -73,7 +86,21 @@ public final class WorldCommitCore {
     private final Deque<Intent> queue=new ArrayDeque<>();
     private final HashSet<String> queuedIds=new HashSet<>();
     private final int breakCapPerTick;
+    private long breakBudgetTick=Long.MIN_VALUE;
+    private int breakAttempts;
+    private void resetBreakBudget(long tick){if(breakBudgetTick!=tick){breakBudgetTick=tick;breakAttempts=0;}}
     private boolean ioFault;
+    private java.util.function.Predicate<Intent> executionHold=intent->false;
+    @FunctionalInterface public interface DeformationHandler {
+        void afterDamage(Intent intent,MovePlan plan,WorldReceiptJournal.State state,
+                         DamageModel.Settings settings,long gameTick,long deadline);
+    }
+    private DeformationHandler deformation=(a,b,c,d,e,f)->{};
+    public synchronized void setDeformationHandler(DeformationHandler handler){deformation=Objects.requireNonNull(handler);}
+    /** Server-owned reservations may hold an intent without renewing its deadline. */
+    public synchronized void setExecutionHold(java.util.function.Predicate<Intent> hold) {
+        executionHold=Objects.requireNonNull(hold);
+    }
     public WorldCommitCore(WorldJournal journal,DamageModel.Settings settings,int breakCapPerTick) {
         this.journal=Objects.requireNonNull(journal);damageSettings=Objects.requireNonNull(settings);
         if(breakCapPerTick<1||breakCapPerTick>4096)throw new IllegalArgumentException("invalid break cap");
@@ -93,6 +120,28 @@ public final class WorldCommitCore {
     }
     /** Durable game clock survives a normal world restart; server tick counter does not. */
     public synchronized Decision submit(Intent intent,long serverTick,long gameTick) {
+        long age=Math.max(0,serverTick-intent.eventTick());
+        long remaining=Math.max(0,MAX_DEFER_TICKS-age);
+        long deadline=gameTick>Long.MAX_VALUE-remaining?Long.MAX_VALUE:gameTick+remaining;
+        return enqueue(intent,damageSettings,gameTick,deadline,false,age>MAX_DEFER_TICKS);
+    }
+    /** Accept an already reserved plan without restarting its game-clock TTL or
+     * substituting current settings for those sealed with the source reservation.
+     * The caller retains the original eventTick in the intent. No new source Q.
+     */
+    public synchronized Decision submitSealed(Intent intent,DamageModel.Settings settings,
+                                               long gameTick,long expiresGameTick) {
+        Objects.requireNonNull(intent);Objects.requireNonNull(settings);
+        // The sealed source owns its bounded TTL policy. Do not replace it with
+        // the direct-intent default or create a fresh deadline at handoff time.
+        if(gameTick<0||expiresGameTick<0)
+            throw new IllegalArgumentException("invalid sealed game-clock deadline");
+        if(!journal.supportsPendingPayload())
+            throw new IllegalStateException("sealed handoff requires durable pending payloads");
+        return enqueue(intent,settings,gameTick,expiresGameTick,true,gameTick>expiresGameTick);
+    }
+    private Decision enqueue(Intent intent,DamageModel.Settings settings,long gameTick,
+                             long deadline,boolean sealedHandoff,boolean expired) {
         if(ioFault)return new Decision(Outcome.QUARANTINED,"IO_FAULT",null);
         var existing=journal.receipt(intent.applyId());
         if(existing!=null && (existing.status()!=WorldReceiptJournal.Status.DEFERRED
@@ -100,6 +149,8 @@ public final class WorldCommitCore {
                 || journal.recoveredUncertain(intent.applyId())))
             return new Decision(Outcome.DUPLICATE,"EXISTING_"+existing.status(),existing);
         if(queuedIds.contains(intent.applyId()))return new Decision(Outcome.DUPLICATE,"ALREADY_QUEUED",existing);
+        if(sealedHandoff && existing!=null && existing.pending()==null)
+            return new Decision(Outcome.QUARANTINED,"MISSING_SEALED_PENDING_PAYLOAD",existing);
         if(existing==null && journal.admissionRejectReason()!=null){
             // No more durable Receipt IDs can be created. Halt, do not reuse or
             // evict old IDs to fake success; source Credit is never re-issued.
@@ -107,6 +158,9 @@ public final class WorldCommitCore {
             return new Decision(Outcome.QUARANTINED,
                     "SAVE_PRESSURE_"+journal.admissionRejectReason(),null);
         }
+        if(expired)
+            return finish(intent,WorldReceiptJournal.Status.ABORTED,Outcome.ABORTED,
+                    "DEFER_TTL_EXPIRED",null,intent.eventTick());
         if(queue.size()>=MAX_QUEUED){
             // An issued Q must not disappear as a fictitious deferred intent.
             // Durably close this ApplyId as rejected instead of dropping it silently.
@@ -121,10 +175,7 @@ public final class WorldCommitCore {
         }
         try {
             if(existing==null){
-                long age=Math.max(0,serverTick-intent.eventTick());
-                long remaining=Math.max(0,MAX_DEFER_TICKS-age);
-                long deadline=gameTick>Long.MAX_VALUE-remaining?Long.MAX_VALUE:gameTick+remaining;
-                journal.enqueue(intent,damageSettings,deadline);
+                journal.enqueue(intent,settings,deadline);
             }
         } catch(IOException failed){ioFault=true;return new Decision(Outcome.QUARANTINED,"DURABLE_ENQUEUE_FAILED",null);}
         queue.addLast(intent);queuedIds.add(intent.applyId());
@@ -148,7 +199,8 @@ public final class WorldCommitCore {
         if(ioFault)return List.of(new Decision(Outcome.QUARANTINED,"IO_FAULT",null));
         var results=new ArrayList<Decision>();
         // One WAL fsync per receipt: bound the entire operation batch, not only breaks.
-        int attemptedBreaks=0,operations=0,limit=Math.min(MAX_QUEUED,maxOperations);
+        resetBreakBudget(tick);
+        int operations=0,limit=Math.min(MAX_QUEUED,maxOperations);
         // One visit per entry per tick: a deferred owner must not monopolize
         // an otherwise short queue or be rechecked repeatedly in this tick.
         int candidates=queue.size();
@@ -170,26 +222,36 @@ public final class WorldCommitCore {
                     continue;
                 }
             }
-            if(restored?gameTick>pending.expiresGameTick():
+            if(pending!=null?gameTick>pending.expiresGameTick():
                     tick>intent.eventTick() && tick-intent.eventTick()>MAX_DEFER_TICKS){
                 results.add(finish(intent,WorldReceiptJournal.Status.ABORTED,Outcome.ABORTED,
                         "DEFER_TTL_EXPIRED",null,tick));
                 continue;
             }
+            if(executionHold.test(intent)) {
+                queue.addFirst(intent);queuedIds.add(intent.applyId());
+                results.add(new Decision(Outcome.DEFERRED,"RESERVATION_PLANNING_HOLD",terminal));
+                break;
+            }
             var observation=restored?world.readRecoveredIfLoaded(intent):world.readIfLoaded(intent.key());
             if(observation==null||!observation.loaded()) {
-                queue.addLast(intent);queuedIds.add(intent.applyId());
+                if(intent.deformationEvidence()!=null)queue.addFirst(intent);else queue.addLast(intent);
+                queuedIds.add(intent.applyId());
                 results.add(new Decision(Outcome.DEFERRED,"CHUNK_NOT_LOADED",journal.receipt(intent.applyId())));
+                if(intent.deformationEvidence()!=null)break;
+                continue;
+            }
+            if(!world.materialMatches(intent)) {
+                results.add(finish(intent,WorldReceiptJournal.Status.ABORTED,Outcome.ABORTED,
+                        "MATERIAL_REVISION_CHANGED",null,tick));
                 continue;
             }
             // Never let an old intent tombstone newer damage before verifying the
             // saved incarnation against the currently loaded block.
-            if(restored){
-                String invalid=preflight(intent,observation);
-                if(invalid!=null){
-                    results.add(finish(intent,WorldReceiptJournal.Status.ABORTED,Outcome.ABORTED,invalid,null,tick));
-                    continue;
-                }
+            String invalid=preflight(intent,observation);
+            if(invalid!=null){
+                results.add(finish(intent,WorldReceiptJournal.Status.ABORTED,Outcome.ABORTED,invalid,null,tick));
+                continue;
             }
             var prior=journal.get(intent.key());
             if(prior==null && journal.hasPosition(intent.key().dimension(),intent.key().x(),
@@ -212,11 +274,11 @@ public final class WorldCommitCore {
             if(prior!=null) {before.setDamage(prior.damage());before.setRemainder(prior.remainder());}
             // Keep definition-level UNBREAKABLE intact for World and Plot.
             // Opening the registry allow-list must never override material immunity.
-            var settings=restored?pending.settings():damageSettings;
+            var settings=pending!=null?pending.settings():damageSettings;
             DamageModel.Plan plan=intent.fFirstPreDamped()
                     ?DamageModel.planPreDamped(intent.sealedQ(),intent.material(),before,settings)
                     :DamageModel.plan(intent.sealedQ(),intent.material(),before,settings);
-            if(plan.thresholdReached() && attemptedBreaks>=breakCapPerTick) {
+            if(plan.thresholdReached() && breakAttempts>=breakCapPerTick) {
                 queue.addFirst(intent);queuedIds.add(intent.applyId());
                 results.add(new Decision(Outcome.DEFERRED,"BREAK_CAP",journal.receipt(intent.applyId())));
                 break;
@@ -224,20 +286,32 @@ public final class WorldCommitCore {
             if(plan.thresholdReached()) {
                 String hold=world.deferBreakReason(intent.key());
                 if(hold!=null) {
-                    queue.addLast(intent);queuedIds.add(intent.applyId());
+                    if(intent.deformationEvidence()!=null)queue.addFirst(intent);else queue.addLast(intent);
+                    queuedIds.add(intent.applyId());
                     results.add(new Decision(Outcome.DEFERRED,hold,journal.receipt(intent.applyId())));
+                    if(intent.deformationEvidence()!=null)break;
                     continue;
                 }
             }
+            MovePlan move=intent.fFirstPreDamped()?MovePlan.plan(intent.applyId(),intent.key(),intent.material(),
+                    (long)before.damage()*256+before.remainder(),plan.fixedIncrement(),
+                    intent.deformationEvidence()==null?0:intent.deformationEvidence().sourceF(),
+                    plan.plasticQ(),intent.deformationEvidence()==null?null:intent.deformationEvidence().direction()):null;
             Decision result=apply(world,intent,observation,plan,tick);
             if(result.result()==Outcome.DEFERRED && result.reason().startsWith("AFTER_EVENTS_PLOT_GATE_")) {
                 // A protection callback may itself change Sable's HeatMap.
                 // Defer with the original unprepared ApplyId instead of
                 // pretending that Vanilla was invoked or reissuing Q.
-                queue.addLast(intent);queuedIds.add(intent.applyId());
+                if(intent.deformationEvidence()!=null)queue.addFirst(intent);else queue.addLast(intent);
+                queuedIds.add(intent.applyId());
             }
             results.add(result);
-            if(plan.thresholdReached() && result.result()!=Outcome.DEFERRED)attemptedBreaks++;
+            if(result.result()==Outcome.APPLIED_DAMAGE&&move!=null){
+                long deadline=pending!=null?pending.expiresGameTick():gameTick;
+                deformation.afterDamage(intent,move,journal.get(intent.key()),settings,gameTick,deadline);
+            }
+            if(ioFault||result.result()==Outcome.DEFERRED&&intent.deformationEvidence()!=null)break;
+            if(plan.thresholdReached() && result.result()!=Outcome.DEFERRED)breakAttempts++;
         }
         return List.copyOf(results);
     }
@@ -266,6 +340,47 @@ public final class WorldCommitCore {
     public synchronized int queued(){return queue.size();}
     public synchronized List<Intent> pendingSnapshot(){return List.copyOf(queue);}
     public synchronized boolean ioFault(){return ioFault;}
+    /** Settle a proven obstruction from the original plastic reservation, without issuing new Q. */
+    public synchronized MoveTransactionExecutor.Settlement settleBlockedMove(WorldGateway world,
+            MoveTransactionJournal.BeforeImage b,long tick,long gameTick){
+        if(!world.isServerThread()||ioFault)return MoveTransactionExecutor.Settlement.UNCERTAIN;
+        resetBreakBudget(tick);
+        var old=journal.receipt(b.blockedApplyId());
+        if(old!=null)return switch(old.status()){
+            case APPLIED,ABORTED -> MoveTransactionExecutor.Settlement.SETTLED;
+            default -> MoveTransactionExecutor.Settlement.UNCERTAIN;
+        };
+        var direct=journal.receipt(b.directApplyId());
+        if(direct==null||direct.status()!=WorldReceiptJournal.Status.APPLIED||b.material()==null||b.sourceState()==null)
+            return MoveTransactionExecutor.Settlement.UNCERTAIN;
+        var intent=new Intent(b.blockedApplyId(),b.source(),b.sourceState().incarnation(),b.blockedAppliedQ(),
+                b.material(),b.sourceState().materialGeneration(),tick,false,b.materialRevision());
+        String abort=null;
+        if(gameTick>b.expiresGameTick())abort="BLOCKED_TTL_EXPIRED";
+        else if(b.blockedFixedIncrement()==0)abort="BLOCKED_ZERO_FIXED";
+        else if(!Objects.equals(journal.get(b.source()),b.sourceState()))abort="BLOCKED_SOURCE_STATE_CHANGED";
+        else if(journal instanceof WorldPersistentJournal p&&p.revision(b.source().dimension(),b.source().x(),b.source().y(),b.source().z())!=b.sourceRevision())abort="BLOCKED_SOURCE_REVISION_CHANGED";
+        if(abort!=null)return settleDecision(finish(intent,WorldReceiptJournal.Status.ABORTED,Outcome.ABORTED,abort,null,tick));
+        var observation=world.readRecoveredIfLoaded(intent);
+        if(observation==null||!observation.loaded())return MoveTransactionExecutor.Settlement.WAITING;
+        if(!world.materialMatches(intent))return settleDecision(finish(intent,WorldReceiptJournal.Status.ABORTED,Outcome.ABORTED,"BLOCKED_MATERIAL_REVISION_CHANGED",null,tick));
+        var before=new BlockDamageState();before.setDamage(b.sourceState().damage());before.setRemainder(b.sourceState().remainder());
+        before.addFixedDamage(b.blockedFixedIncrement());
+        boolean broken=before.damage()>=b.material().threshold();
+        if(broken&&(breakAttempts>=breakCapPerTick||world.deferBreakReason(intent.key())!=null))return MoveTransactionExecutor.Settlement.WAITING;
+        var plan=new DamageModel.Plan(DamageModel.Status.PLANNED_NOT_APPLIED,b.blockedAppliedQ(),0,b.blockedAppliedQ(),
+                b.blockedAppliedQ(),0,0,0,0,b.blockedFixedIncrement(),before.damage(),before.remainder(),0,broken,"BLOCKED_RESERVED_Q");
+        var result=apply(world,intent,observation,plan,tick);
+        if(broken&&result.result()!=Outcome.DEFERRED)breakAttempts++;
+        return settleDecision(result);
+    }
+    private static MoveTransactionExecutor.Settlement settleDecision(Decision decision){
+        return switch(decision.result()){
+            case APPLIED_DAMAGE,APPLIED_BREAK,ABORTED -> MoveTransactionExecutor.Settlement.SETTLED;
+            case DEFERRED -> MoveTransactionExecutor.Settlement.WAITING;
+            default -> MoveTransactionExecutor.Settlement.UNCERTAIN;
+        };
+    }
     /**
      * Reconcile durable receipts recovered from a previous process. DEFERRED is only
      * a queued plan: no Vanilla mutation can precede the PREPARED fsync. Only
@@ -332,13 +447,16 @@ public final class WorldCommitCore {
         // Never persist a damage-only receipt against a block changed during authorization.
         if(!Objects.equals(world.readIfLoaded(intent.key()),original))
             return finish(intent,WorldReceiptJournal.Status.ABORTED,Outcome.ABORTED,"CAS_AFTER_DAMAGE_EVENT",null,tick);
+        if(!world.materialMatches(intent))
+            return finish(intent,WorldReceiptJournal.Status.ABORTED,Outcome.ABORTED,"MATERIAL_REVISION_CHANGED",null,tick);
         if(!plan.thresholdReached()) {
             if((plan.plannedDamageUnits()>0 || plan.plannedRemainderU8()>0)
                     && !journal.canStore(intent.key()))
                 return finish(intent,WorldReceiptJournal.Status.ABORTED,Outcome.ABORTED,
                         "SPARSE_CHUNK_CAP_EXCEEDED",null,tick);
             var next=new WorldReceiptJournal.State(intent.key(),intent.expectedIncarnation(),plan.plannedDamageUnits(),
-                    plan.plannedRemainderU8(),intent.materialGeneration(),tick);
+                    plan.plannedRemainderU8(),intent.materialGeneration(),tick,
+                    journal.get(intent.key())==null?0:journal.get(intent.key()).deformation());
             return finish(intent,WorldReceiptJournal.Status.APPLIED,Outcome.APPLIED_DAMAGE,"FIXED_POINT_APPLIED",next,tick);
         }
         if(world.canBreak(intent.key(),original)!=Permission.ALLOW)
@@ -346,6 +464,8 @@ public final class WorldCommitCore {
         // Recheck after event/claim hook in case another mod changed the block.
         if(!Objects.equals(world.readIfLoaded(intent.key()),original))
             return finish(intent,WorldReceiptJournal.Status.ABORTED,Outcome.ABORTED,"CAS_AFTER_EVENT",null,tick);
+        if(!world.materialMatches(intent))
+            return finish(intent,WorldReceiptJournal.Status.ABORTED,Outcome.ABORTED,"MATERIAL_REVISION_CHANGED",null,tick);
         String changedLifecycle=world.deferBreakReason(intent.key());
         if(changedLifecycle!=null)
             return new Decision(Outcome.DEFERRED,"AFTER_EVENTS_PLOT_GATE_"+changedLifecycle,

@@ -256,6 +256,12 @@ public final class ForcePropagation {
                               NeighborReader neighbors,Function<String,MaterialProperties> materials,
                               GameImpactCredit.Settings forces,DamageModel.Settings damage,
                               Orientation direction,java.util.function.Consumer<Trace> trace) {
+        return planTargets(ownerKey,seeds,inputF,neighbors,t->Objects.requireNonNull(materials.apply(t.fingerprint()),"missing material"),forces,damage,direction,trace);
+    }
+    public static Result planTargets(String ownerKey,List<GameImpactCredit.Target> seeds,double inputF,
+                              NeighborReader neighbors,Function<GameImpactCredit.Target,MaterialProperties> materials,
+                              GameImpactCredit.Settings forces,DamageModel.Settings damage,
+                              Orientation direction,java.util.function.Consumer<Trace> trace) {
         Objects.requireNonNull(ownerKey);Objects.requireNonNull(seeds);
         Objects.requireNonNull(neighbors);Objects.requireNonNull(materials);
         Objects.requireNonNull(forces);Objects.requireNonNull(damage);Objects.requireNonNull(direction);
@@ -271,7 +277,7 @@ public final class ForcePropagation {
                     throw new IllegalArgumentException("conflicting seed fingerprint");
                 continue;
             }
-            var material=Objects.requireNonNull(materials.apply(t.fingerprint()),"missing seed material");
+            var material=Objects.requireNonNull(materials.apply(t),"missing seed material");
             seen.put(t.localBlock(),new Flow(t,0,material.elasticityPercent()));
         }
         if(seen.size()>MAX_NODES_PER_SIDE)throw new IllegalArgumentException("too many contact seeds");
@@ -317,7 +323,8 @@ public final class ForcePropagation {
                         if(seen.size()+nextMap.size()>=MAX_NODES_PER_SIDE){
                             capped=true;blocked.put(node,"NODE_WORK_BUDGET");continue;
                         }
-                        var material=Objects.requireNonNull(materials.apply(t.fingerprint()),"missing neighbor material");
+                        var material=materials.apply(t);
+                        if(material==null){blocked.put(node,"UNKNOWN_NEIGHBOR_MATERIAL");unknown=true;continue;}
                         child=new Flow(t,depth+1,material.elasticityPercent());
                         nextMap.put(t.localBlock(),child);
                     } else if(!child.target.fingerprint().equals(t.fingerprint()))

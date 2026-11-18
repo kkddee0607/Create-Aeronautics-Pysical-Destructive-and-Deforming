@@ -83,6 +83,18 @@ public final class DamageModel {
         return ownDamageRetentionPercent(material.elasticityPercent(),cfg)/existing;
     }
 
+    /** Already E-damped deformation reserve; no direct-share split or second E absorption.
+     * The caller must prove a blocked move and durably spend this reserve exactly once.
+     */
+    public static long blockedFixedIncrement(double reservedQ,MaterialProperties material,Settings cfg) {
+        Objects.requireNonNull(material);Objects.requireNonNull(cfg);
+        if(!Double.isFinite(reservedQ)||reservedQ<0)throw new IllegalArgumentException("invalid blocked Q");
+        if(material.unbreakable()||reservedQ==0)return 0;
+        double raw=reservedQ*cfg.damageGain()*hardnessFactor(material,cfg)*extraOwnDamageFactor(material,cfg);
+        if(!Double.isFinite(raw)||raw<0)throw new IllegalArgumentException("invalid blocked damage");
+        return (long)Math.floor(Math.min(BlockDamageState.MAX_FIXED_VALUE,raw*BlockDamageState.FIXED_SCALE));
+    }
+
     /** Immutable prediction. Plastic/stress are *reserved then unused*, not added to direct. */
     public static Plan plan(double incomingQ, MaterialProperties material, BlockDamageState previous,
                             Settings cfg) {

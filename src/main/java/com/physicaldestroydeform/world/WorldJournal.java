@@ -33,6 +33,8 @@ public interface WorldJournal {
         return revision(dim,x,y,z)+1;
     }
     default String storageStatus() { return "LEGACY_WAL"; }
+    /** Explicit deadline/settings handoff requires a replayable payload, not a legacy marker. */
+    default boolean supportsPendingPayload() { return false; }
     default int checkpointBatch(int maxShards) throws IOException { return 0; }
     default boolean checkpointPending() { return false; }
 }

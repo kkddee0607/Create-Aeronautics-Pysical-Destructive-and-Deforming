@@ -10,6 +10,29 @@ import static org.junit.jupiter.api.Assertions.*;
 /** Fixture was produced by the original PDD 0.5.0 schema-1 implementation,
  * not a hand-written reinterpretation of its old binary format. */
 final class WorldPersistentSchemaUpgradeTest {
+    @Test void schemaThreeStateAndPendingPayloadSurviveHistoryMigration() throws Exception {
+        Path source=Paths.get(getClass().getResource("/pdd-schema3-fixture/checkpoint.manifest").toURI()).getParent();
+        Path root=Files.createTempDirectory("pdd-schema3-upgrade-");
+        try(var paths=Files.walk(source)) {
+            for(var p:paths.toList()) {
+                Path target=root.resolve(source.relativize(p).toString());
+                if(Files.isDirectory(p))Files.createDirectories(target);
+                else {Files.createDirectories(target.getParent());Files.copy(p,target);}
+            }
+        }
+        var j=new WorldPersistentJournal(root,root.resolve("absent.wal"));
+        var key=new SparseStateKey("minecraft:overworld","WORLD","minecraft:overworld",1,4,64,5,"minecraft:stone");
+        assertTrue(j.migrated());assertEquals(777,j.get(key).damage());
+        assertEquals(123,j.get(key).remainder());assertEquals(0,j.get(key).deformation());
+        var p=j.receipt("schema3-pending").pending();assertNotNull(p);
+        assertEquals(1.25,p.intent().sealedQ());assertEquals(1024,p.intent().material().threshold());
+        assertEquals(20,p.intent().material().ductilityPercent());assertEquals(30,p.intent().material().elasticityPercent());
+        assertEquals(7,p.intent().materialGeneration());assertTrue(p.intent().fFirstPreDamped());
+        assertEquals(123,p.intent().eventTick());assertEquals(9,p.order());assertEquals(2345,p.expiresGameTick());
+        assertEquals(com.physicaldestroydeform.DamageModel.Settings.defaults(),p.settings());
+        var reopened=new WorldPersistentJournal(root,root.resolve("absent.wal"));
+        assertEquals(j.get(key),reopened.get(key));assertEquals(p,reopened.receipt("schema3-pending").pending());
+    }
     @Test void schemaTwoDamageRevisionAndLegacyReceiptsSurviveSchemaThreeMigration() throws Exception {
         Path source=Paths.get(getClass().getResource("/pdd-schema2-fixture/checkpoint.manifest").toURI()).getParent();
         Path root=Files.createTempDirectory("pdd-persistfix-schema2-");

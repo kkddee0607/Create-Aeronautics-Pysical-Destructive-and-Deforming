@@ -1,31 +1,50 @@
 package com.physicaldestroydeform.plot;
 
 import com.mojang.authlib.GameProfile;
+import com.physicaldestroydeform.DamageModel;
+import com.physicaldestroydeform.collision.FrameMath;
+import com.physicaldestroydeform.deform.MovePlan;
+import com.physicaldestroydeform.deform.MoveTransactionExecutor;
+import com.physicaldestroydeform.deform.MoveTransactionJournal;
+import com.physicaldestroydeform.deform.MoveSafety;
+import com.physicaldestroydeform.material.CopycatMovePayload;
+import com.physicaldestroydeform.material.MaterialRegistry;
+import com.physicaldestroydeform.material.TargetMaterials;
 import com.physicaldestroydeform.state.SparseStateKey;
 import com.physicaldestroydeform.mixin.SableHeatMapSafetyAccessor;
 import com.physicaldestroydeform.world.WorldCommitCore;
+import com.physicaldestroydeform.world.WorldReceiptJournal;
 import dev.ryanhcode.sable.api.sublevel.SubLevelContainer;
+import dev.ryanhcode.sable.companion.math.BoundingBox3d;
+import dev.ryanhcode.sable.physics.config.block_properties.PhysicsBlockPropertyHelper;
 import dev.ryanhcode.sable.sublevel.ServerSubLevel;
 import dev.ryanhcode.sable.sublevel.plot.EmbeddedPlotLevelAccessor;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.world.entity.Entity;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.block.BedBlock;
+import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.DoorBlock;
+import net.minecraft.world.level.block.FallingBlock;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.BlockStateProperties;
+import net.minecraft.world.phys.AABB;
 import net.neoforged.neoforge.common.NeoForge;
+import net.neoforged.neoforge.common.util.BlockSnapshot;
 import net.neoforged.neoforge.common.util.FakePlayerFactory;
 import net.neoforged.neoforge.event.level.BlockEvent;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /** Actual Sable 2.0.6 Plot adapter: never transform into World permission/mutation. */
-public final class NeoForgePlotGateway implements WorldCommitCore.WorldGateway {
+public final class NeoForgePlotGateway implements WorldCommitCore.WorldGateway,MoveTransactionExecutor.Gateway {
     private static final Logger LOG=LoggerFactory.getLogger(NeoForgePlotGateway.class);
     private static final GameProfile ACTOR=new GameProfile(
             UUID.nameUUIDFromBytes("PDD:PLOT_COMMIT:0.5.1".getBytes(StandardCharsets.UTF_8)),
@@ -43,10 +62,36 @@ public final class NeoForgePlotGateway implements WorldCommitCore.WorldGateway {
     private final int breakSpacingTicks=PlotBreakPacing.spacing(
             Integer.getInteger("pdd.plotBreakSpacingTicks",1));
     private long heatMapHolds,spacingHolds,tickWitnessHolds;
+    private static final int MOVE_FLAGS=Block.UPDATE_ALL|Block.UPDATE_MOVE_BY_PISTON;
+    private static final String UNOBSERVED_DEST="PDD:MOVE_DESTINATION_UNAVAILABLE";
+    private static final boolean TRACE_MOVES=Boolean.parseBoolean(System.getProperty("pdd.deform.trace","true"));
+    private record MoveWait(long tick,MoveTransactionExecutor.Readback expected,double expectedMass) {}
+    private final Map<PlotOwnerFence.Owner,String> ownerMoves=new HashMap<>();
+    private final Map<String,MoveWait> moveWaits=new HashMap<>();
+    private SparseStateKey ownMoveWrite;
+    private BlockState ownMoveBefore,ownMoveAfter;
+    private int ownMoveWitnesses;
     public NeoForgePlotGateway(MinecraftServer server,PlotCommitService service){
         this.server=Objects.requireNonNull(server);this.service=Objects.requireNonNull(service);
     }
     @Override public boolean isServerThread(){return server.isSameThread();}
+    @Override public boolean serverThread(){return isServerThread();}
+    public MoveTransactionExecutor.Gateway movementGateway(){return this;}
+    /** Only the currently executing normal setter, never a blanket owner bypass. */
+    public boolean ownsMoveMutation(SparseStateKey key,BlockState before,BlockState after){
+        if(ownMoveWrite==null||!sameCell(ownMoveWrite,key)||!ownMoveBefore.equals(before)||!ownMoveAfter.equals(after))return false;
+        ownMoveWitnesses++;return true;
+    }
+    private static boolean sameCell(SparseStateKey a,SparseStateKey b){
+        return a.dimension().equals(b.dimension())&&a.ownerId().equals(b.ownerId())
+                &&a.ownerGeneration()==b.ownerGeneration()&&a.x()==b.x()&&a.y()==b.y()&&a.z()==b.z();
+    }
+    @Override public boolean materialMatches(WorldCommitCore.Intent intent){
+        var snapshot=com.physicaldestroydeform.material.MaterialRegistry.snapshot();
+        if(snapshot.generation()!=intent.materialGeneration()||locate(intent.key(),false)==null)return false;
+        var material=com.physicaldestroydeform.material.TargetMaterials.read(server,intent.key(),snapshot);
+        return material!=null&&intent.material().equals(material.material())&&intent.materialRevision().equals(material.revision());
+    }
     public PlotOwnerFence fence(){return fence;}
     public boolean inMutation(){return inMutation;}
     private ServerLevel dimension(String dim){
@@ -117,6 +162,7 @@ public final class NeoForgePlotGateway implements WorldCommitCore.WorldGateway {
         return readIfLoaded(intent.key());
     }
     @Override public String rejectRecoveredReason(WorldCommitCore.Intent intent){
+        if(service.isMoveQuarantined(intent.key()))return "RECOVERY_MOVE_CELL_QUARANTINED";
         var owner=PlotOwnerFence.Owner.of(PlotKeyCodec.real(intent.key()));
         return fence.orphaned(owner)||service.isSplitParent(owner.dimension(),owner.uuid())
                 ?"RECOVERY_PLOT_ORPHANED":null;
@@ -163,6 +209,7 @@ public final class NeoForgePlotGateway implements WorldCommitCore.WorldGateway {
         if(!isServerThread())return "PLOT_NOT_SERVER_THREAD";
         Cell cell=locate(virtual,false);
         if(cell==null)return "PLOT_OWNER_NOT_READY";
+        if(ownerMoves.containsKey(PlotOwnerFence.Owner.of(cell.real())))return "PLOT_MOVE_POSTSTATE_PENDING";
         return deferBreakReason(cell);
     }
     private String deferBreakReason(Cell cell) {
@@ -224,6 +271,10 @@ public final class NeoForgePlotGateway implements WorldCommitCore.WorldGateway {
             String fingerprint=BuiltInRegistries.BLOCK.getKey(state.getBlock())+"|"+state;
             boolean be=!state.isAir() && (state.hasBlockEntity()
                     ||cell.accessor().getBlockEntity(cell.local())!=null);
+            if(be&&com.physicaldestroydeform.material.CopycatMaterial.isCopycat(fingerprint)){
+                var resolved=com.physicaldestroydeform.material.CopycatMaterial.capture(com.physicaldestroydeform.material.MaterialRegistry.snapshot(),cell.accessor(),cell.local(),state);
+                if(resolved!=null&&resolved.safeDecorativeBE())be=false;
+            }
             boolean linked=state.hasProperty(BlockStateProperties.DOUBLE_BLOCK_HALF)
                     ||state.getBlock() instanceof BedBlock ||state.getBlock() instanceof DoorBlock;
             boolean immune=state.getDestroySpeed(cell.accessor(),cell.local())<0;
@@ -236,7 +287,7 @@ public final class NeoForgePlotGateway implements WorldCommitCore.WorldGateway {
         }catch(RuntimeException|LinkageError unsafe){return null;}
     }
     @Override public WorldCommitCore.Permission canDamage(SparseStateKey virtual,WorldCommitCore.Observation expected){
-        if(!isServerThread())return WorldCommitCore.Permission.UNKNOWN;
+        if(!isServerThread()||service.isMoveQuarantined(virtual))return WorldCommitCore.Permission.UNKNOWN;
         Cell cell=locate(virtual,false);
         if(cell==null)return WorldCommitCore.Permission.UNKNOWN;
         var observed=readIfLoaded(virtual);
@@ -262,12 +313,293 @@ public final class NeoForgePlotGateway implements WorldCommitCore.WorldGateway {
             return veto.isCanceled()?WorldCommitCore.Permission.DENY:WorldCommitCore.Permission.ALLOW;
         }catch(RuntimeException|LinkageError error){return WorldCommitCore.Permission.UNKNOWN;}
     }
+    private static SparseStateKey at(SparseStateKey key,BlockPos pos,String fingerprint){
+        return new SparseStateKey(key.dimension(),key.ownerSpace(),key.ownerId(),key.ownerGeneration(),
+                pos.getX(),pos.getY(),pos.getZ(),fingerprint);
+    }
+    private static BlockState state(Cell cell){return cell.accessor().getBlockState(cell.local());}
+    private static String fp(BlockState state){return BuiltInRegistries.BLOCK.getKey(state.getBlock())+"|"+state;}
+    private static boolean hasBE(Cell c){return state(c).hasBlockEntity()||c.accessor().getBlockEntity(c.local())!=null;}
+    private static boolean empty(Cell c){return state(c).isAir()&&state(c).getFluidState().isEmpty()&&!hasBE(c);}
+    private static boolean clearPath(Cell c){return MoveSafety.clearPathCell(c.level(),c.allocated(),state(c));}
+    private static boolean sameOwner(Cell a,Cell b){return a!=null&&b!=null&&a.sub()==b.sub()&&a.level()==b.level();}
+    private static String payload(Cell c){return CopycatMovePayload.capture(c.accessor(),c.local(),state(c),c.level().registryAccess());}
+    private static String payload(MoveTransactionJournal.BeforeImage b){byte[] data=b.bePayload();return data==null?null:new String(data,StandardCharsets.UTF_8);}
+    private static boolean payloadMatches(Cell c,MoveTransactionJournal.BeforeImage b){
+        String expected=payload(b);
+        return expected==null?!hasBE(c):CopycatMovePayload.matches(c.accessor(),c.local(),state(c),c.level().registryAccess(),expected);
+    }
+    /** The direct-damage receipt is already durable. Do not create a destination
+     * from a World transform: use the frozen signed owner-lattice steps. */
+    public MoveTransactionJournal.BeforeImage planMove(WorldCommitCore.Intent intent,MovePlan plan,
+            WorldReceiptJournal.State current,DamageModel.Settings settings,long gameTick){
+        if(!isServerThread()||plan.status()!=MovePlan.Status.CANDIDATE_ONLY||current==null)return null;
+        try{
+            var source=intent.key();
+            if(!source.equals(plan.source())&&!PlotKeyCodec.real(source).equals(plan.source()))return null;
+            Cell a=locate(source,false);
+            if(a==null||!source.fingerprint().equals(fp(state(a)))||!current.key().equals(source)
+                    ||!current.incarnation().equals(intent.expectedIncarnation()))return null;
+            BlockPos destination=a.local();
+            for(var step:plan.steps())destination=new BlockPos(Math.addExact(destination.getX(),step.dx()),
+                    Math.addExact(destination.getY(),step.dy()),Math.addExact(destination.getZ(),step.dz()));
+            Cell b=locate(at(source,destination,"PDD:MOVE_PROBE"),false);
+            if(b!=null&&!sameOwner(a,b))return null;
+            var before=at(source,destination,b==null?UNOBSERVED_DEST:fp(state(b)));
+            var after=at(source,destination,source.fingerprint());
+            long ar=service.moveRevision(source),br=service.moveRevision(before);
+            var center=a.sub().getPlot().getCenterBlock();
+            String token=PlotIncarnation.token(PlotKeyCodec.real(after),center.getX(),center.getY(),center.getZ(),Math.addExact(br,1));
+            var moved=new WorldReceiptJournal.State(after,token,current.damage(),current.remainder(),current.materialGeneration(),server.getTickCount(),
+                    Math.min(255,current.deformation()+1));
+            String be=hasBE(a)?payload(a):null;
+            byte[] bytes=be==null?null:be.getBytes(StandardCharsets.UTF_8);
+            if(bytes!=null&&bytes.length>8192)bytes=null; // oversized unsupported BE is vetoed below
+            double candidate=Math.max(0,intent.deformationEvidence().blockedCandidateQ()),applied=Math.min(candidate,plan.reservedQ());
+            return new MoveTransactionJournal.BeforeImage(intent.applyId()+"/move",intent.applyId(),source,before,current,moved,
+                    ar,br,gameTick,gameTick>Long.MAX_VALUE-WorldCommitCore.MAX_DEFER_TICKS?Long.MAX_VALUE:gameTick+WorldCommitCore.MAX_DEFER_TICKS,plan.directionEpoch(),plan.reservedQ(),
+                    intent.material(),intent.materialRevision(),bytes,candidate,applied,DamageModel.blockedFixedIncrement(applied,intent.material(),settings));
+        }catch(RuntimeException|LinkageError invalid){return null;}
+    }
+    private static PlotOwnerFence.Owner owner(MoveTransactionJournal.BeforeImage b){return PlotOwnerFence.Owner.of(PlotKeyCodec.real(b.source()));}
+    @Override public boolean acquire(MoveTransactionJournal.BeforeImage b){
+        if(!isServerThread()||ownerMoves.containsKey(owner(b))||!service.acquireMove(b))return false;
+        ownerMoves.put(owner(b),b.id());return true;
+    }
+    private MoveTransactionExecutor.Gate gate(MoveTransactionJournal.BeforeImage b,MoveTransactionExecutor.Gate result,String reason){
+        if(TRACE_MOVES&&(result==MoveTransactionExecutor.Gate.BLOCKED||result==MoveTransactionExecutor.Gate.UNKNOWN))
+            LOG.info("[PDD-DEFORM] phase=PLOT_GATE moveId={} owner={} source={} target={} result={} reason={} reservedQ={} blockedCandidateQ={} blockedAppliedQ={}",
+                    b.id(),owner(b).uuid(),b.source(),b.destinationBefore(),result,reason,b.reservedQ(),b.blockedCandidateQ(),b.blockedAppliedQ());
+        return result;
+    }
+    private Cell local(Cell c,BlockPos p){return locate(PlotKeyCodec.storage(at(c.real(),p,"PDD:MOVE_PROBE")),false);}
+    private boolean authorized(Cell c){var actor=FakePlayerFactory.get(c.level(),ACTOR);return actor.mayBuild()&&c.level().mayInteract(actor,c.allocated());}
+    private MoveTransactionExecutor.Gate dependencies(Cell c,Cell other){
+        for(Direction face:Direction.values()){
+            Cell adjacent=local(c,c.local().relative(face));
+            if(!sameOwner(c,adjacent))return MoveTransactionExecutor.Gate.DEFERRED;
+            if(adjacent.local().equals(other.local())||empty(adjacent))continue;
+            var s=state(adjacent);
+            // Unproved attached geometry or block-entity side effects are vetoed.
+            if(hasBE(adjacent)||s.getBlock() instanceof FallingBlock||!s.getFluidState().isEmpty()
+                    ||s.isSignalSource()||!s.isCollisionShapeFullBlock(adjacent.accessor(),adjacent.local()))return MoveTransactionExecutor.Gate.BLOCKED;
+        }
+        return MoveTransactionExecutor.Gate.APPROVED;
+    }
+    private static boolean entityClear(Cell c){
+        // The EmbeddedPlotLevelAccessor translates this LOCAL AABB by its center.
+        // Glue (including simulated:honey_glue) and actual entity occupancy both veto.
+        BlockPos p=c.local();var area=new AABB(p.getX(),p.getY(),p.getZ(),p.getX()+1d,p.getY()+1d,p.getZ()+1d).inflate(0.001);
+        return c.accessor().getEntities((Entity)null,area,e->!e.isSpectator()).isEmpty();
+    }
+    private static double selfMass(Cell c){
+        var tracker=c.sub().getSelfMassTracker();
+        if(tracker==null)return Double.NaN;
+        var center=tracker.getCenterOfMass();double mass=tracker.getMass();
+        return center!=null&&Double.isFinite(center.x())&&Double.isFinite(center.y())&&Double.isFinite(center.z())
+                &&Double.isFinite(mass)&&mass>0?mass:Double.NaN;
+    }
+    private static double blockMass(Cell c,BlockState s){return PhysicsBlockPropertyHelper.getMass(c.level(),c.allocated(),s);}
+    /** The accessor handles allocation-space entities; additionally prove the
+     * swept voxel's actual physical World AABB free of static collision and
+     * other sublevel bounds. A broad-phase overlap is uncertainty, not proof
+     * of blockage, hence never consumes the reserve. No chunks are requested. */
+    private static MoveTransactionExecutor.Gate physicalClear(Cell c){
+        var live=c.sub().logicalPose();var t=live.position();var r=live.rotationPoint();var s=live.scale();var q=live.orientation();
+        var pose=new FrameMath.Pose(new FrameMath.Vec(t.x(),t.y(),t.z()),new FrameMath.Vec(r.x(),r.y(),r.z()),
+                new FrameMath.Vec(s.x(),s.y(),s.z()),q.x(),q.y(),q.z(),q.w());
+        if(!pose.valid()||Math.abs(s.x()-1)>1e-5||Math.abs(s.y()-1)>1e-5||Math.abs(s.z()-1)>1e-5)
+            return MoveTransactionExecutor.Gate.UNKNOWN;
+        double minX=Double.POSITIVE_INFINITY,minY=minX,minZ=minX,maxX=Double.NEGATIVE_INFINITY,maxY=maxX,maxZ=maxX;
+        for(int dx=0;dx<=1;dx++)for(int dy=0;dy<=1;dy++)for(int dz=0;dz<=1;dz++){
+            var p=pose.toWorldPoint(new FrameMath.Vec(c.allocated().getX()+dx,c.allocated().getY()+dy,c.allocated().getZ()+dz));
+            if(!p.finite()||Math.abs(p.x())>=Integer.MAX_VALUE-2d||Math.abs(p.y())>=Integer.MAX_VALUE-2d||Math.abs(p.z())>=Integer.MAX_VALUE-2d)
+                return MoveTransactionExecutor.Gate.UNKNOWN;
+            minX=Math.min(minX,p.x());minY=Math.min(minY,p.y());minZ=Math.min(minZ,p.z());
+            maxX=Math.max(maxX,p.x());maxY=Math.max(maxY,p.y());maxZ=Math.max(maxZ,p.z());
+        }
+        var area=new AABB(minX,minY,minZ,maxX,maxY,maxZ).deflate(1e-7);
+        var container=SubLevelContainer.getContainer(c.level());
+        if(container==null)return MoveTransactionExecutor.Gate.UNKNOWN;
+        for(var other:container.queryIntersecting(new BoundingBox3d(area)))if(other!=c.sub())return MoveTransactionExecutor.Gate.UNKNOWN;
+        for(int x=(int)Math.floor(area.minX);x<Math.ceil(area.maxX);x++)
+            for(int y=(int)Math.floor(area.minY);y<Math.ceil(area.maxY);y++)
+                for(int z=(int)Math.floor(area.minZ);z<Math.ceil(area.maxZ);z++){
+                    var pos=new BlockPos(x,y,z);var chunk=new ChunkPos(pos);
+                    if(!c.level().isInWorldBounds(pos)||container.inBounds(chunk)||container.getPlot(chunk)!=null)
+                        return MoveTransactionExecutor.Gate.UNKNOWN;
+                    if(c.level().getChunkSource().getChunkNow(chunk.x,chunk.z)==null)return MoveTransactionExecutor.Gate.DEFERRED;
+                    var state=c.level().getBlockState(pos);
+                    if(!state.isAir()||!state.getFluidState().isEmpty())return MoveTransactionExecutor.Gate.UNKNOWN;
+                }
+        return c.level().getEntitiesOfClass(Entity.class,area,e->!e.isSpectator()).isEmpty()
+                ?MoveTransactionExecutor.Gate.APPROVED:MoveTransactionExecutor.Gate.UNKNOWN;
+    }
+    private boolean registeredMaterialMatches(MoveTransactionJournal.BeforeImage b){
+        var snapshot=MaterialRegistry.snapshot();
+        var resolved=TargetMaterials.read(server,b.source(),snapshot);
+        return b.sourceState()!=null&&snapshot.generation()==b.sourceState().materialGeneration()
+                &&b.material()!=null&&resolved!=null&&b.material().equals(resolved.material())
+                &&b.materialRevision().equals(resolved.revision());
+    }
+    @Override public MoveTransactionExecutor.Gate validate(MoveTransactionJournal.BeforeImage b){
+        final var unknown=MoveTransactionExecutor.Gate.UNKNOWN;final var blocked=MoveTransactionExecutor.Gate.BLOCKED;
+        final var deferred=MoveTransactionExecutor.Gate.DEFERRED;
+        try{
+            if(!isServerThread()||service.moveInvalidated(b)||!b.id().equals(ownerMoves.get(owner(b))))return unknown;
+            Cell a=locate(b.source(),false),d=locate(b.destinationBefore(),false);
+            if(!sameOwner(a,d))return deferred;
+            // The pending coordinator rebuilds this envelope before its next
+            // attempt; an unobserved destination can never reach PREPARED.
+            if(UNOBSERVED_DEST.equals(b.destinationBefore().fingerprint()))return deferred;
+            if(!fp(state(a)).equals(b.source().fingerprint())||!fp(state(d)).equals(b.destinationBefore().fingerprint())
+                    ||service.moveRevision(b.source())!=b.sourceRevision()||service.moveRevision(b.destinationBefore())!=b.destinationRevision()
+                    ||!service.incarnation(PlotKeyCodec.real(b.source()),a.sub().getPlot().getCenterBlock()).equals(b.sourceState().incarnation())
+                    ||!registeredMaterialMatches(b))return gate(b,unknown,"STALE_BEFORE_STATE_OR_MATERIAL");
+            if(deferBreakReason(a)!=null)return deferred;
+            if(!Double.isFinite(selfMass(a)))return gate(b,unknown,"SABLE_MASS_UNAVAILABLE");
+            if(!authorized(a)||!authorized(d))return gate(b,blocked,"MOVE_CLAIM_DENIED");
+            if(!clearPath(d))return gate(b,blocked,"DESTINATION_OCCUPIED");
+            BlockState s=state(a);
+            if(s.isAir()||s.getDestroySpeed(a.accessor(),a.local())<0)return gate(b,unknown,"SOURCE_INELIGIBLE");
+            if(!s.getFluidState().isEmpty()||s.getBlock() instanceof FallingBlock||s.isSignalSource()
+                    ||s.getBlock() instanceof DoorBlock||s.getBlock() instanceof BedBlock||s.hasProperty(BlockStateProperties.DOUBLE_BLOCK_HALF)
+                    ||hasBE(a)&&payload(b)==null||s.getCollisionShape(a.accessor(),a.local()).isEmpty()
+                    ||!MoveSafety.unitShape(a.level(),a.allocated(),s))return gate(b,blocked,"VETO_SOURCE_DEPENDENCY_OR_BE");
+            if(!payloadMatches(a,b))return gate(b,unknown,"SOURCE_BE_CHANGED");
+            // Both axis corridor cells, not just the selected ordering, must be clear.
+            for(BlockPos p:MoveSafety.path(a.local(),d.local())){
+                Cell step=local(a,p);
+                if(!sameOwner(a,step))return deferred;
+                if(!clearPath(step)||!authorized(step)||!entityClear(step))return gate(b,blocked,"DIAGONAL_CORRIDOR_BLOCKED");
+                var physical=physicalClear(step);
+                if(physical!=MoveTransactionExecutor.Gate.APPROVED)return gate(b,physical,"PHYSICAL_ROUTE_UNVERIFIED");
+            }
+            if(!entityClear(a)||!s.canSurvive(d.accessor(),d.local()))
+                return gate(b,blocked,"VETO_NEIGHBOR_SUPPORT_OR_KINETIC");
+            var dependency=dependencies(a,d);
+            if(dependency!=MoveTransactionExecutor.Gate.APPROVED)return gate(b,dependency,"SOURCE_NEIGHBOR_UNSAFE");
+            dependency=dependencies(d,a);
+            if(dependency!=MoveTransactionExecutor.Gate.APPROVED)return gate(b,dependency,"DEST_NEIGHBOR_UNSAFE");
+            dependency=MoveSafety.checkConnections(a.level(),a.allocated(),s);
+            if(dependency!=MoveTransactionExecutor.Gate.APPROVED)return gate(b,dependency,"VETO_SOURCE_GLUE_OR_KINETIC");
+            dependency=MoveSafety.checkConnections(d.level(),d.allocated(),Blocks.AIR.defaultBlockState());
+            if(dependency!=MoveTransactionExecutor.Gate.APPROVED)return gate(b,dependency,"VETO_DEST_GLUE_OR_KINETIC");
+            // SableCommonEvents.handleBlockChange calls HeatMap onSolidAdded/
+            // onSolidRemoved on the actual air<->nonair transition (2.0.6).
+            var topology=PlotMoveTopology.check(a.local(),d.local(),pos->{Cell c=local(a,pos);return sameOwner(a,c)?!state(c).isAir():null;});
+            if(topology==PlotMoveTopology.Result.DISCONNECTED)return gate(b,blocked,"PLOT_CONNECTIVITY_ISOLATION");
+            if(topology==PlotMoveTopology.Result.UNKNOWN)return deferred;
+            return MoveTransactionExecutor.Gate.APPROVED;
+        }catch(RuntimeException|LinkageError unsafe){return gate(b,unknown,"MOVE_PREFLIGHT_EXCEPTION_"+unsafe.getClass().getSimpleName());}
+    }
+    private boolean write(Cell c,BlockState value){
+        ownMoveWrite=PlotKeyCodec.storage(c.real());ownMoveBefore=state(c);ownMoveAfter=value;ownMoveWitnesses=0;
+        try{boolean result=c.accessor().setBlock(c.local(),value,MOVE_FLAGS,512);return result&&ownMoveWitnesses==1;}
+        finally{ownMoveWrite=null;ownMoveBefore=null;ownMoveAfter=null;}
+    }
+    private boolean bothBefore(MoveTransactionJournal.BeforeImage b){
+        Cell a=locate(b.source(),false),d=locate(b.destinationBefore(),false);
+        return sameOwner(a,d)&&!service.moveInvalidated(b)&&fp(state(a)).equals(b.source().fingerprint())
+                &&fp(state(d)).equals(b.destinationBefore().fingerprint())&&clearPath(d)&&payloadMatches(a,b);
+    }
+    private boolean bothAfter(MoveTransactionJournal.BeforeImage b){
+        Cell a=locate(b.source(),false),d=locate(b.destinationAfter().key(),false);
+        return sameOwner(a,d)&&!service.moveInvalidated(b)&&empty(a)&&fp(state(d)).equals(b.destinationAfter().key().fingerprint())&&payloadMatches(d,b);
+    }
+    private MoveTransactionExecutor.Readback waitForHeat(MoveTransactionJournal.BeforeImage b,MoveTransactionExecutor.Readback expected,double expectedMass){
+        if(!Double.isFinite(expectedMass)||expectedMass<=0)return MoveTransactionExecutor.Readback.UNCERTAIN;
+        moveWaits.put(b.id(),new MoveWait(server.getTickCount(),expected,expectedMass));
+        if(TRACE_MOVES)LOG.info("[PDD-DEFORM] phase=PLOT_HEATMAP_WAIT moveId={} owner={} source={} dest={} mutationServerTick={} expected={} expectedSelfMass={}",
+                b.id(),owner(b).uuid(),b.source(),b.destinationAfter().key(),server.getTickCount(),expected,expectedMass);
+        return MoveTransactionExecutor.Readback.WAITING;
+    }
+    private MoveTransactionExecutor.Readback rollbackDestination(MoveTransactionJournal.BeforeImage b,BlockState oldDestination,double originalMass){
+        Cell a=locate(b.source(),false),d=locate(b.destinationAfter().key(),false);
+        if(!sameOwner(a,d)||service.moveInvalidated(b)||!fp(state(a)).equals(b.source().fingerprint())
+                ||!payloadMatches(a,b)||!fp(state(d)).equals(b.destinationAfter().key().fingerprint()))return MoveTransactionExecutor.Readback.UNCERTAIN;
+        // Move flag suppresses decorative Copycats material drops. Do not clear
+        // a destination changed by a claim handler or unrelated callback.
+        if(!payloadMatches(d,b)||!write(d,oldDestination)||!bothBefore(b))return MoveTransactionExecutor.Readback.UNCERTAIN;
+        return waitForHeat(b,MoveTransactionExecutor.Readback.RESTORED_BEFORE_IMAGE,originalMass);
+    }
+    @Override public MoveTransactionExecutor.Readback mutateOnce(MoveTransactionJournal.BeforeImage b){
+        if(validate(b)!=MoveTransactionExecutor.Gate.APPROVED)return MoveTransactionExecutor.Readback.UNCERTAIN;
+        Cell a=locate(b.source(),false),d=locate(b.destinationBefore(),false);
+        if(!sameOwner(a,d))return MoveTransactionExecutor.Readback.UNCERTAIN;
+        try{
+            var actor=FakePlayerFactory.get(a.level(),ACTOR);var original=state(a);var oldDestination=state(d);
+            var sourceVeto=new BlockEvent.BreakEvent(a.level(),a.allocated(),original,actor);
+            NeoForge.EVENT_BUS.post(sourceVeto);
+            if(sourceVeto.isCanceled())return bothBefore(b)?MoveTransactionExecutor.Readback.RESTORED_BEFORE_IMAGE:MoveTransactionExecutor.Readback.UNCERTAIN;
+            if(!bothBefore(b)||validate(b)!=MoveTransactionExecutor.Gate.APPROVED)return MoveTransactionExecutor.Readback.UNCERTAIN;
+            double originalMass=selfMass(a),fromMass=blockMass(a,original),oldDestinationMass=blockMass(d,oldDestination);
+            if(!Double.isFinite(originalMass)||!Double.isFinite(fromMass)||fromMass<0
+                    ||!Double.isFinite(oldDestinationMass)||oldDestinationMass<0)return MoveTransactionExecutor.Readback.UNCERTAIN;
+            var snapshot=BlockSnapshot.create(d.level().dimension(),d.level(),d.allocated(),MOVE_FLAGS);
+            lastBreakAttempt.put(owner(b),new PlotBreakPacing.Attempt(server.getTickCount(),false));
+            boolean placed=write(d,original);
+            if(!placed)return bothBefore(b)?waitForHeat(b,MoveTransactionExecutor.Readback.RESTORED_BEFORE_IMAGE,originalMass):MoveTransactionExecutor.Readback.UNCERTAIN;
+            d=locate(b.destinationAfter().key(),false);a=locate(b.source(),false);
+            if(!sameOwner(a,d)||service.moveInvalidated(b)||!fp(state(d)).equals(b.source().fingerprint())
+                    ||!fp(state(a)).equals(b.source().fingerprint())||!payloadMatches(a,b))return MoveTransactionExecutor.Readback.UNCERTAIN;
+            String be=payload(b);
+            if(be!=null&&!CopycatMovePayload.restore(d.accessor(),d.local(),state(d),d.level().registryAccess(),be))
+                // Roll back only if the normal setter and the whole installed
+                // payload can both be proven. Otherwise quarantine, never drop.
+                return rollbackDestination(b,oldDestination,originalMass);
+            if(!payloadMatches(d,b))return MoveTransactionExecutor.Readback.UNCERTAIN;
+            var placeVeto=new BlockEvent.EntityPlaceEvent(snapshot,original,actor);
+            NeoForge.EVENT_BUS.post(placeVeto);
+            if(placeVeto.isCanceled())return rollbackDestination(b,oldDestination,originalMass);
+            if(service.moveInvalidated(b)||!authorized(d)||!authorized(a)||!fp(state(a)).equals(b.source().fingerprint())
+                    ||!payloadMatches(a,b)||!fp(state(d)).equals(b.destinationAfter().key().fingerprint())||!payloadMatches(d,b))return MoveTransactionExecutor.Readback.UNCERTAIN;
+            double installedMass=blockMass(d,state(d));
+            if(!Double.isFinite(installedMass)||installedMass<0)return rollbackDestination(b,oldDestination,originalMass);
+            if(!write(a,Blocks.AIR.defaultBlockState()))return rollbackDestination(b,oldDestination,originalMass);
+            if(!bothAfter(b))return MoveTransactionExecutor.Readback.UNCERTAIN;
+            return waitForHeat(b,MoveTransactionExecutor.Readback.CONFIRMED,originalMass+installedMass-oldDestinationMass-fromMass);
+        }catch(RuntimeException|LinkageError unsafe){
+            LOG.warn("[PDD-DEFORM] phase=PLOT_MOVE_EXCEPTION moveId={} result=UNCERTAIN",b.id(),unsafe);
+            return MoveTransactionExecutor.Readback.UNCERTAIN;
+        }
+    }
+    @Override public MoveTransactionExecutor.Readback readback(MoveTransactionJournal.BeforeImage b){
+        try{
+            var wait=moveWaits.get(b.id());
+            if(wait==null||service.moveInvalidated(b))return MoveTransactionExecutor.Readback.UNCERTAIN;
+            if(fence.orphaned(owner(b))||service.isSplitParent(owner(b).dimension(),owner(b).uuid()))return MoveTransactionExecutor.Readback.UNCERTAIN;
+            Cell a=locate(b.source(),false),d=locate(b.destinationAfter().key(),false);
+            if(!sameOwner(a,d))return MoveTransactionExecutor.Readback.WAITING;
+            if(wait.expected()==MoveTransactionExecutor.Readback.CONFIRMED?!bothAfter(b):!bothBefore(b))return MoveTransactionExecutor.Readback.UNCERTAIN;
+            long complete=(Object)a.sub() instanceof PlotHeatMapTickWitness witness?witness.pdd$completedHeatMapServerTick():-1;
+            if(complete<=wait.tick()||deferBreakReason(a)!=null)return MoveTransactionExecutor.Readback.WAITING;
+            double actualMass=selfMass(a),tolerance=Math.max(1e-6,Math.abs(wait.expectedMass())*1e-9);
+            if(!Double.isFinite(actualMass)||Math.abs(actualMass-wait.expectedMass())>tolerance){
+                LOG.warn("[PDD-DEFORM] phase=PLOT_MASS_MISMATCH moveId={} expectedMass={} actualMass={} tolerance={} action=QUARANTINE",b.id(),wait.expectedMass(),actualMass,tolerance);
+                return MoveTransactionExecutor.Readback.UNCERTAIN;
+            }
+            if(TRACE_MOVES)LOG.info("[PDD-DEFORM] phase=PLOT_POSTSTATE moveId={} owner={} source={} dest={} mutationTick={} completedHeatMapTick={} result={} reservedQ={} expectedSelfMass={} actualSelfMass={} nativeUpdate=NORMAL_SETTER_COLLIDER_NOT_INDEPENDENTLY_MEASURED",
+                    b.id(),owner(b).uuid(),b.source(),b.destinationAfter().key(),wait.tick(),complete,wait.expected(),b.reservedQ(),wait.expectedMass(),actualMass);
+            lastBreakAttempt.put(owner(b),new PlotBreakPacing.Attempt(server.getTickCount(),true));
+            return wait.expected();
+        }catch(RuntimeException|LinkageError unsafe){return MoveTransactionExecutor.Readback.UNCERTAIN;}
+    }
+    @Override public void release(MoveTransactionJournal.BeforeImage b){
+        moveWaits.remove(b.id());ownerMoves.remove(owner(b),b.id());service.releaseMove(b);
+    }
+    @Override public void quarantine(MoveTransactionJournal.BeforeImage b,String reason){
+        moveWaits.remove(b.id());ownerMoves.remove(owner(b),b.id());service.quarantineMove(b,reason);
+        LOG.warn("[PDD-DEFORM] phase=PLOT_QUARANTINE moveId={} owner={} source={} dest={} reason={} action=NO_REPLAY",
+                b.id(),owner(b).uuid(),b.source(),b.destinationAfter().key(),reason);
+    }
+    @Override public MoveTransactionExecutor.Settlement settleBlocked(MoveTransactionJournal.BeforeImage b){return service.settleBlockedMove(b);}
     @Override public boolean breakVanillaOnce(SparseStateKey virtual){
         lastBreakKey=null;
         lastBreakWitness=false;
         if(!isServerThread())return false;
         Cell cell=locate(virtual,false);
-        if(cell==null||inMutation)return false;
+        if(cell==null||inMutation||ownerMoves.containsKey(PlotOwnerFence.Owner.of(cell.real())))return false;
         var observation=readIfLoaded(virtual);
         if(observation==null||observation.isAir()||observation.hasBlockEntity()
                 ||observation.unsafeMultiblock()||observation.unbreakable())return false;

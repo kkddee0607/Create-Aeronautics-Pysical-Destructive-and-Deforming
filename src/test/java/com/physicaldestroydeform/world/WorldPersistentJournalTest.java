@@ -34,6 +34,16 @@ class WorldPersistentJournalTest {
         while(journal.checkpointPending()&&++passes<2048);
         assertFalse(journal.checkpointPending());
     }
+    @Test void copycatShapeRevisionRetainsDamageRemainderAndHistoryAcrossRestart()throws Exception{
+        var a=area();var j=a.open();
+        var before=new SparseStateKey(OVERWORLD,"WORLD",OVERWORLD,1,0,64,0,"copycats:copycat_slab|single");
+        var after=new SparseStateKey(OVERWORLD,"WORLD",OVERWORLD,1,0,64,0,"copycats:copycat_slab|double");
+        j.transition(receipt("cc",before,WorldReceiptJournal.Status.APPLIED),new WorldReceiptJournal.State(before,"0-before",40,123,9,100,3));
+        j.remapCopycatShape(before,after,"1-after");
+        var recovered=a.open();assertNull(recovered.get(before));assertEquals(40,recovered.get(after).damage());
+        assertEquals(123,recovered.get(after).remainder());assertEquals(3,recovered.get(after).deformation());
+        assertEquals(1,recovered.revision(OVERWORLD,0,64,0));
+    }
     @Test void severalDimensionsNegativeChunksAndSparseValuesRoundTrip()throws Exception{
         var a=area();var j=a.open();
         var keys=List.of(key(OVERWORLD,0,64,0),key(OVERWORLD,32,90,-17),

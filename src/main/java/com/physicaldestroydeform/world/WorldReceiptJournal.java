@@ -21,11 +21,15 @@ public final class WorldReceiptJournal implements WorldJournal {
     private static final byte TRANSITION=1,CLEAR_POSITION=2;
     public enum Status { PREPARED, DEFERRED, APPLIED, ABORTED, PARTIAL_QUARANTINED }
     public record State(SparseStateKey key,String incarnation,int damage,int remainder,
-                        long materialGeneration,long tick) {
+                        long materialGeneration,long tick,int deformation) {
+        public State(SparseStateKey key,String incarnation,int damage,int remainder,
+                     long materialGeneration,long tick) {
+            this(key,incarnation,damage,remainder,materialGeneration,tick,0);
+        }
         public State {
             if(key==null||!"WORLD".equals(key.ownerSpace())||incarnation==null
                 ||incarnation.isBlank()||incarnation.length()>512||damage<0||damage>1024
-                ||remainder<0||remainder>255||materialGeneration<0||tick<0)
+                ||remainder<0||remainder>255||materialGeneration<0||tick<0||deformation<0||deformation>255)
                 throw new IllegalArgumentException("invalid World damage state");
         }
     }
@@ -99,6 +103,7 @@ public final class WorldReceiptJournal implements WorldJournal {
 
     /** Atomic receipt+state WAL frame: never expose an APPLIED receipt without its state. */
     public synchronized void transition(Receipt r,State next) throws IOException {
+        if(next!=null&&next.deformation()!=0)throw new IOException("legacy WAL cannot store deformation history");
         if(r.pending()!=null)throw new IOException("legacy WAL does not support pending intent payload");
         Receipt prior=receipts.get(r.id());
         if(prior!=null&&!prior.key().equals(r.key()))throw new IllegalArgumentException("ApplyId alias");

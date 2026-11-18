@@ -39,6 +39,12 @@ public final class MaterialPlanner {
                               DamageModel.Settings settings,
                               Function<SparseStateKey,BlockDamageState> priorState,
                               Function<SparseStateKey,Optional<DirectionEvidence>> directions) {
+        return planTargets(grant,materialGeneration,t->materialLookup.apply(t.fingerprint()),settings,priorState,directions);
+    }
+    public static Report planTargets(ContactCreditLedger.Grant grant,long materialGeneration,
+                              Function<GameImpactCredit.Target,MaterialProperties> materialLookup,DamageModel.Settings settings,
+                              Function<SparseStateKey,BlockDamageState> priorState,
+                              Function<SparseStateKey,Optional<DirectionEvidence>> directions) {
         Objects.requireNonNull(grant);Objects.requireNonNull(materialLookup);Objects.requireNonNull(settings);
         Objects.requireNonNull(priorState);Objects.requireNonNull(directions);
         if(!grant.credited())throw new IllegalArgumentException("not an issued credit");
@@ -47,7 +53,7 @@ public final class MaterialPlanner {
         long increments=0;
         for(ContactCreditLedger.Share share:concat(grant.a(),grant.b())) {
             GameImpactCredit.Target target=share.target();
-            MaterialProperties material=materialLookup.apply(target.fingerprint());
+            MaterialProperties material=materialLookup.apply(target);
             if(material==null) {missingQ+=share.q();continue;}
             GameImpactCredit.Owner owner=grant.id().pair().a().stableKey().equals(target.ownerKey())
                     ?grant.id().pair().a():grant.id().pair().b();
