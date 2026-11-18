@@ -15,12 +15,16 @@ import static com.physicaldestroydeform.stress.StressPropagation.*;
 /** Durable reservation/handoff boundary. No source F calculation and no game mutation.
  * RESERVED may be replanned from the exact saved roots, policy, settings and original
  * game-clock origin and frozen observations. SEALED outputs are append-only and use idempotent ApplyIds.
- * CLOSED records remain tombstones; never evict them to admit a duplicate Credit.
+ * CLOSED records can be compacted only after durable commit receipt reconciliation.
  */
 public final class StressReservationJournal {
     public static final int MAX_RECORDS=8192,MAX_RECORD_BYTES=4*1024*1024;
     public static final long MAX_STORE_BYTES=64L*1024*1024;
     private static final int MAGIC=0x50535452,VERSION=4;
+    private static final int CLOSURE_HEADROOM=2048;
+    public static final class CapacityException extends IOException {
+        CapacityException(String reason){super(reason);}
+    }
     public enum Phase { RESERVED, SEALED, CLOSED }
     public record Reservation(String creditId,long materialGeneration,long createdGameTick,
                               Policy policy,DamageModel.Settings settings,List<Seed> seeds,List<WorldCommitCore.Intent> origins) {
@@ -91,6 +95,7 @@ public final class StressReservationJournal {
         }
     }
     private final Path directory;
+    private final StressClosedArchive archive;
     private final Map<String,Entry> entries=new LinkedHashMap<>();
     private final Map<String,Long> sizes=new HashMap<>();
     private final Map<String,String> sourceOwners=new HashMap<>();
@@ -98,6 +103,7 @@ public final class StressReservationJournal {
     private boolean faulted;
     public StressReservationJournal(Path directory)throws IOException {
         this.directory=directory.toAbsolutePath();Files.createDirectories(this.directory);
+        archive=new StressClosedArchive(this.directory,sourceOwners);
         try(var paths=Files.list(this.directory)){
             // Bound collection BEFORE sorting; an oversized directory must not
             // allocate an unbounded list before the record cap can reject it.
@@ -106,16 +112,22 @@ public final class StressReservationJournal {
             if(records.size()>MAX_RECORDS)throw new IOException("stress record count cap exceeded");
             for(Path p:records.stream().sorted().toList()){
                 long size=Files.size(p);
-                if(size>MAX_RECORD_BYTES||size<16||entries.size()>=MAX_RECORDS||bytes+size>MAX_STORE_BYTES)
+                if(size>MAX_RECORD_BYTES||size<16||entries.size()>=MAX_RECORDS||bytes+size>MAX_STORE_BYTES+(long)MAX_RECORDS*CLOSURE_HEADROOM)
                     throw new IOException("stress storage bound exceeded");
                 Entry entry=decode(Files.readAllBytes(p));String id=entry.reservation.creditId;
-                if(!p.getFileName().toString().equals(filename(id))||entries.putIfAbsent(id,entry)!=null)
+                if(!p.getFileName().toString().equals(filename(id)))throw new IOException("stress filename/id conflict");
+                if(archive.contains(id)){
+                    if(!archive.matchesEntry(entry))throw new IOException("stress archive/active conflict");
+                    archive.confirmDurable(id);Files.delete(p);forceDirectory(this.directory);continue;
+                }
+                if(entries.putIfAbsent(id,entry)!=null)
                     throw new IOException("stress filename/id conflict");
                 for(var origin:entry.reservation.origins)
                     if(sourceOwners.putIfAbsent(origin.applyId(),id)!=null)throw new IOException("source origin reserved twice");
                 sizes.put(id,size);bytes+=size;
             }
         }
+        if(bytes>MAX_STORE_BYTES+(long)entries.size()*CLOSURE_HEADROOM)throw new IOException("stress closure headroom exceeded");
     }
     public synchronized boolean reserve(Reservation reservation)throws IOException {
         ensureHealthy();Entry old=entries.get(reservation.creditId);
@@ -123,9 +135,13 @@ public final class StressReservationJournal {
             if(!old.reservation.equals(reservation))throw new IllegalArgumentException("Credit reused with different reservation");
             return false;
         }
+        if(archive.contains(reservation.creditId)){
+            if(!archive.matchesReservation(reservation,false))throw new IllegalArgumentException("Credit reused with different reservation");
+            return false;
+        }
         for(var origin:reservation.origins)
             if(sourceOwners.containsKey(origin.applyId()))throw new IllegalArgumentException("source origin already reserved");
-        if(entries.size()>=MAX_RECORDS)throw new IOException("stress receipt capacity; no tombstone eviction");
+        if(entries.size()>=MAX_RECORDS)throw new CapacityException("stress active record capacity");
         persist(new Entry(reservation,Phase.RESERVED,List.of(),null,"RESERVED"));return true;
     }
     public synchronized void seal(String creditId,Session session)throws IOException {
@@ -174,7 +190,7 @@ public final class StressReservationJournal {
         if(ledger==null){double q=old.reservation.reservedQ();ledger=new Ledger(q,0,0,0,0,q,0,true,Map.of());}
         else ledger=new Ledger(ledger.reservedQ(),ledger.absorbedQ(),ledger.directQ(),ledger.plasticUnusedQ(),
                 ledger.unusedQ(),ledger.pendingQ(),ledger.uniqueNodes(),true,ledger.reasons());
-        persist(new Entry(old.reservation,Phase.SEALED,old.plans,ledger,reason,old.snapshot));
+        persistClosing(new Entry(old.reservation,Phase.SEALED,old.plans,ledger,reason,old.snapshot));
     }
     /** Close only unconsumed continuation; already handed-off Q remains in its original partitions. */
     public synchronized void closeResidual(String id,String reason)throws IOException {
@@ -184,7 +200,7 @@ public final class StressReservationJournal {
         var l=old.ledger;var reasons=new EnumMap<Unused,Double>(Unused.class);reasons.putAll(l.reasons());
         if(l.pendingQ()>0)reasons.merge(Unused.STOPPED,l.pendingQ(),Double::sum);
         var closed=new Ledger(l.reservedQ(),l.absorbedQ(),l.directQ(),l.plasticUnusedQ(),l.unusedQ()+l.pendingQ(),0,l.uniqueNodes(),true,reasons);
-        persist(new Entry(old.reservation,Phase.SEALED,old.plans,closed,reason,old.snapshot));
+        persistClosing(new Entry(old.reservation,Phase.SEALED,old.plans,closed,reason,old.snapshot));
     }
     public synchronized List<Entry> entries(){return List.copyOf(entries.values());}
     /** Call only after EVERY output ApplyId is durably queued or terminal in the commit journal. */
@@ -192,26 +208,62 @@ public final class StressReservationJournal {
         ensureHealthy();Entry old=require(creditId);
         if(old.phase==Phase.CLOSED)return;
         if(old.phase!=Phase.SEALED||!old.ledger.finished()||old.ledger.pendingQ()!=0)throw new IllegalStateException("cannot close an unfinished handoff");
-        persist(new Entry(old.reservation,Phase.CLOSED,old.plans,old.ledger,"HANDED_TO_DURABLE_COMMIT_JOURNAL",old.snapshot));
+        persistClosing(new Entry(old.reservation,Phase.CLOSED,old.plans,old.ledger,"HANDED_TO_DURABLE_COMMIT_JOURNAL",old.snapshot));
     }
     public synchronized void cancelUnplanned(String creditId,String reason)throws IOException {
         ensureHealthy();Entry old=require(creditId);
         if(old.phase==Phase.CLOSED)return;
         if(old.phase!=Phase.RESERVED)throw new IllegalStateException("sealed outputs require receipt reconciliation");
         double q=old.reservation.reservedQ();
-        persist(new Entry(old.reservation,Phase.CLOSED,List.of(),
+        persistClosing(new Entry(old.reservation,Phase.CLOSED,List.of(),
                 new Ledger(q,0,0,0,q,0,0,true,q==0?Map.of():Map.of(Unused.STOPPED,q)),reason));
     }
+    /** Caller must have verified every source and derived durable receipt. The compact
+     * file is authoritative before the old full file is removed. No Q is reissued. */
+    public synchronized void compactHandoff(String id)throws IOException {
+        ensureHealthy();if(archive.contains(id))return;
+        Entry old=require(id);
+        if(old.phase==Phase.RESERVED||!old.ledger.finished()||old.ledger.pendingQ()!=0)
+            throw new IllegalStateException("cannot compact unfinished stress");
+        try{
+            archive.store(old);
+            Files.delete(directory.resolve(filename(id)));forceDirectory(directory);
+            entries.remove(id);bytes-=sizes.remove(id);
+        }catch(IOException failure){faulted=true;throw failure;}
+    }
+    public synchronized boolean isArchived(String id){return archive.contains(id);}
+    public synchronized boolean matchesArchivedRetry(Reservation r)throws IOException{return archive.matchesReservation(r,true);}
+    public synchronized Ledger archivedLedger(String id){return archive.ledger(id);}
+    public synchronized String sourceOwner(String originId){return sourceOwners.get(originId);}
+    public synchronized int activeCount(){return entries.size();}
+    public synchronized int archivedCount(){return archive.size();}
+    public synchronized long activeBytes(){return bytes;}
     public synchronized Entry get(String creditId){return entries.get(creditId);}
     public synchronized List<Entry> unfinished(){return entries.values().stream().filter(e->e.phase!=Phase.CLOSED).toList();}
-    public synchronized int size(){return entries.size();}
+    public synchronized int size(){return entries.size()+archive.size();}
     public synchronized boolean faulted(){return faulted;}
     private Entry require(String id){Entry e=entries.get(id);if(e==null)throw new IllegalArgumentException("unreserved Credit");return e;}
     private void ensureHealthy()throws IOException{if(faulted)throw new IOException("stress journal faulted; reopen and reconcile");}
     private void persist(Entry entry)throws IOException {
+        persist(entry,false);
+    }
+    private void persistClosing(Entry entry)throws IOException {
+        try{persist(entry,true);}catch(CapacityException pressure){
+            // No new plan can be published after a final residual closure. The
+            // frozen graph is no longer needed for replay; retain all paid outputs.
+            persist(new Entry(entry.reservation,entry.phase,entry.plans,entry.ledger,entry.reason,Map.of()),true);
+        }
+    }
+    private void persist(Entry entry,boolean closing)throws IOException {
         byte[] payload=encode(entry);String id=entry.reservation.creditId;
         long nextBytes=bytes-sizes.getOrDefault(id,0L)+payload.length;
-        if(nextBytes>MAX_STORE_BYTES)throw new IOException("stress storage byte cap");
+        long count=entries.size()+(entries.containsKey(id)?0:1);
+        if(!closing&&(payload.length>MAX_RECORD_BYTES-CLOSURE_HEADROOM||nextBytes+count*CLOSURE_HEADROOM>MAX_STORE_BYTES))
+            throw new CapacityException("stress active storage pressure");
+        // Old v4 files were admitted without metadata headroom. Permit only
+        // bounded closing metadata growth for them; never admit new work here.
+        if(closing&&nextBytes>MAX_STORE_BYTES&&(nextBytes>MAX_STORE_BYTES+count*CLOSURE_HEADROOM||nextBytes-bytes>CLOSURE_HEADROOM))
+            throw new CapacityException("stress closure storage pressure");
         Path temp=null;
         try {
             temp=Files.createTempFile(directory,"pending-",".tmp");
@@ -219,11 +271,14 @@ public final class StressReservationJournal {
                 ByteBuffer buffer=ByteBuffer.wrap(payload);while(buffer.hasRemaining())channel.write(buffer);channel.force(true);
             }
             Files.move(temp,directory.resolve(filename(id)),StandardCopyOption.ATOMIC_MOVE,StandardCopyOption.REPLACE_EXISTING);
-            try(FileChannel parent=FileChannel.open(directory,StandardOpenOption.READ)){parent.force(true);}
+            forceDirectory(directory);
             entries.put(id,entry);sizes.put(id,(long)payload.length);bytes=nextBytes;
             for(var origin:entry.reservation.origins)sourceOwners.put(origin.applyId(),id);
         }catch(IOException failure){faulted=true;throw failure;}
         finally{if(temp!=null)Files.deleteIfExists(temp);}
+    }
+    static void forceDirectory(Path directory)throws IOException {
+        try(FileChannel parent=FileChannel.open(directory,StandardOpenOption.READ)){parent.force(true);}
     }
     /** Stable namespace is independent of input list order or process-local object hashes. */
     public static String applyId(String creditId,Cell cell){
@@ -235,7 +290,7 @@ public final class StressReservationJournal {
         }catch(IOException impossible){throw new UncheckedIOException(impossible);}
     }
     private static String filename(String id){return hash(id.getBytes(java.nio.charset.StandardCharsets.UTF_8))+".psr";}
-    private static String hash(byte[] bytes){
+    static String hash(byte[] bytes){
         try{return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));}
         catch(NoSuchAlgorithmException impossible){throw new IllegalStateException(impossible);}
     }
@@ -263,7 +318,7 @@ public final class StressReservationJournal {
         }
         byte[] data=buffer.toByteArray();CRC32C crc=new CRC32C();crc.update(data);var framed=new ByteArrayOutputStream();
         try(var out=new DataOutputStream(framed)){out.writeInt(data.length);out.write(data);out.writeInt((int)crc.getValue());}
-        if(framed.size()>MAX_RECORD_BYTES)throw new IOException("stress record too large");return framed.toByteArray();
+        if(framed.size()>MAX_RECORD_BYTES)throw new CapacityException("stress record too large");return framed.toByteArray();
     }
     static Entry decode(byte[] bytes)throws IOException {
         if(bytes.length>MAX_RECORD_BYTES||bytes.length<16)throw new IOException("invalid stress record size");

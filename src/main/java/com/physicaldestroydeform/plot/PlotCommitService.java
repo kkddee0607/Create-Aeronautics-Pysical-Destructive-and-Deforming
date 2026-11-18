@@ -169,7 +169,11 @@ public final class PlotCommitService {
                                 && observed.fingerprint().equals(original.fingerprint())
                                 ?observed.incarnation():null;
                     },targetMaterials::direction);
-            if(stress!=null)stress.reserve(projection.plot(),materials,damageSettings);
+            try{
+                if(stress!=null&&!stress.reserve(projection.plot(),materials,damageSettings))return;
+            }catch(StressReservationJournal.CapacityException pressure){
+                rejected++;log.warn("[PDD-STRESS-LEDGER] phase=ADMISSION_REJECT owner=PLOT reason=ACTIVE_CAPACITY credit={} QUnused={} QReissue=false",grant.id(),projection.plot().stream().mapToDouble(WorldCommitCore.Intent::sealedQ).sum());return;
+            }
             for(var intent:MoveRuntime.reverseOrder(projection.plot())){
                 var decision=core.submit(intent,server.getTickCount(),server.overworld().getGameTime());
                 if(decision.result()==WorldCommitCore.Outcome.DEFERRED){
@@ -423,19 +427,34 @@ public final class PlotCommitService {
                     observed.loaded(),false,observed.hasBlockEntity(),observed.unsafeMultiblock(),true,observed.unsafePhysicsPhase());
         return observed;
     }
+    public boolean hasStressReceipt(WorldCommitCore.Intent intent){
+        return !fault&&!core.ioFault()&&StressCommitHandoff.receiptMatches(intent,journal.receipt(intent.applyId()));
+    }
+    public boolean hasStressReceipt(WorldCommitCore.Intent intent,DamageModel.Settings settings){
+        return !fault&&!core.ioFault()&&StressCommitHandoff.receiptMatches(intent,settings,journal.receipt(intent.applyId()));
+    }
+    public boolean hasStressReceipt(WorldCommitCore.Intent intent,DamageModel.Settings settings,long deadline){
+        return !fault&&!core.ioFault()&&StressCommitHandoff.receiptMatches(intent,settings,deadline,journal.receipt(intent.applyId()));
+    }
     public boolean recoverStressOrigin(WorldCommitCore.Intent intent,DamageModel.Settings settings,long created,long ttl)throws IOException {
         if(fault||core.ioFault())return false;
+        var prior=journal.receipt(intent.applyId());
+        if(prior!=null)return StressCommitHandoff.verifyReceipt(intent,settings,prior);
         gateway.readRecoveredIfLoaded(intent); // Bind only against saved owner UUID/epoch/incarnation.
         long deadline=created>Long.MAX_VALUE-ttl?Long.MAX_VALUE:created+ttl;
         var result=core.submitSealed(intent,settings,server.overworld().getGameTime(),deadline);
         if(core.ioFault())throw new IOException("Plot origin recovery journal failure");
-        return result.receipt()!=null&&(result.receipt().status()!=WorldReceiptJournal.Status.DEFERRED||result.receipt().pending()!=null);
+        return StressCommitHandoff.verifyReceipt(intent,settings,result.receipt());
     }
     public boolean offerStress(StressReservationJournal.Entry entry,StressPropagation.PlannedNode plan,WorldCommitCore.Intent intent)throws IOException {
         if(fault||core.ioFault())return false;
+        return offerStress(entry,plan,intent,entry.plans().indexOf(plan));
+    }
+    public boolean offerStress(StressReservationJournal.Entry entry,StressPropagation.PlannedNode plan,WorldCommitCore.Intent intent,int index)throws IOException {
+        if(fault||core.ioFault())return false;
         var owner=PlotOwnerFence.Owner.of(PlotKeyCodec.real(intent.key()));
         restoredOwners.computeIfAbsent(owner.uuid(),k->new HashSet<>()).add(owner);
-        return StressCommitHandoff.offer(core,entry,plan,intent,server.overworld().getGameTime());
+        return StressCommitHandoff.offer(core,entry,plan,intent,server.overworld().getGameTime(),index);
     }
     public void stop(){
         gateway.stopLifecycle();

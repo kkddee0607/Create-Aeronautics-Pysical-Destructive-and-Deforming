@@ -43,15 +43,52 @@ public final class StressCommitHandoff {
         }catch(IOException|IllegalArgumentException invalid){throw new IllegalArgumentException("invalid stress owner",invalid);}
     }
 
+    /** Durable ownership proof only: no world read, rebinding, enqueue or replay.
+     * DEFERRED must have its original payload; PREPARED is non-reissuable and is
+     * independently quarantined by the commit journal's recovery protocol.
+     * Terminal receipts retain the stable ID and target, not their old payload. */
+    public static boolean receiptMatches(WorldCommitCore.Intent expected,WorldReceiptJournal.Receipt receipt){
+        return receipt!=null&&receipt.id().equals(expected.applyId())&&receipt.key().equals(expected.key())
+                &&(receipt.status()!=WorldReceiptJournal.Status.DEFERRED
+                ||receipt.pending()!=null&&receipt.pending().intent().equals(expected));
+    }
+    public static boolean receiptMatches(WorldCommitCore.Intent expected,DamageModel.Settings settings,
+                                         WorldReceiptJournal.Receipt receipt){
+        return receiptMatches(expected,receipt)&&(receipt.pending()==null||receipt.pending().settings().equals(settings));
+    }
+    public static boolean receiptMatches(WorldCommitCore.Intent expected,DamageModel.Settings settings,long deadline,
+                                         WorldReceiptJournal.Receipt receipt){
+        return receiptMatches(expected,settings,receipt)&&(receipt.pending()==null||receipt.pending().expiresGameTick()==deadline);
+    }
+    /** Missing or legacy payload-less records are not proof. Conflicting identities
+     * must fail closed rather than being silently considered an accepted duplicate. */
+    public static boolean verifyReceipt(WorldCommitCore.Intent expected,DamageModel.Settings settings,
+                                        WorldReceiptJournal.Receipt receipt)throws IOException{
+        if(receipt==null)return false;
+        if(!receipt.id().equals(expected.applyId())||!receipt.key().equals(expected.key()))
+            throw new IOException("stress ApplyId aliases another target");
+        if(receipt.pending()!=null&&(!receipt.pending().intent().equals(expected)||!receipt.pending().settings().equals(settings)))
+            throw new IOException("stress ApplyId aliases another payload or settings");
+        return receiptMatches(expected,settings,receipt);
+    }
+
     /** True means queued durably or already terminal, NEVER successful damage.
      * original.eventTick remains the source server tick, including after reboot;
      * the authoritative saved deadline uses the persistent game clock separately.
      */
     public static boolean offer(WorldCommitCore core,StressReservationJournal.Entry sealed,
                                 PlannedNode plan,WorldCommitCore.Intent original,long gameTick)throws IOException {
+        Objects.requireNonNull(sealed);Objects.requireNonNull(plan);
+        return offer(core,sealed,plan,original,gameTick,sealed.plans().indexOf(plan));
+    }
+    /** Runtime already holds the durable delivery cursor. Verify the exact
+     * immutable list element in O(1), not a full contains() for every plan. */
+    public static boolean offer(WorldCommitCore core,StressReservationJournal.Entry sealed,
+                                PlannedNode plan,WorldCommitCore.Intent original,long gameTick,int index)throws IOException {
         Objects.requireNonNull(core);Objects.requireNonNull(sealed);
         Objects.requireNonNull(plan);Objects.requireNonNull(original);
-        if(sealed.phase()==StressReservationJournal.Phase.RESERVED || !sealed.plans().contains(plan))
+        if(sealed.phase()==StressReservationJournal.Phase.RESERVED || index<0||index>=sealed.plans().size()
+                ||!sealed.plans().get(index).equals(plan))
             throw new IllegalArgumentException("stress output is not in the sealed reservation");
         var reservation=sealed.reservation();
         Node n=plan.node();
@@ -72,9 +109,9 @@ public final class StressCommitHandoff {
         var result=core.submitSealed(original,reservation.settings(),gameTick,expires);
         if(core.ioFault())throw new IOException("stress commit journal fault: "+result.reason());
         var receipt=result.receipt();
-        if(receipt==null)return false;
-        if(!receipt.key().equals(original.key()))throw new IOException("stress ApplyId aliases another target");
-        if(receipt.pending()!=null&&!receipt.pending().intent().equals(original))throw new IOException("stress ApplyId aliases another payload");
-        return receipt.status()!=WorldReceiptJournal.Status.DEFERRED || receipt.pending()!=null;
+        if(!verifyReceipt(original,reservation.settings(),receipt))return false;
+        if(receipt.pending()!=null&&receipt.pending().expiresGameTick()!=expires)
+            throw new IOException("stress ApplyId aliases another deadline");
+        return true;
     }
 }

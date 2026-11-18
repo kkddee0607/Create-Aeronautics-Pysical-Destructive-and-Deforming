@@ -29,6 +29,7 @@ import static com.physicaldestroydeform.stress.StressReservationJournal.*;
 public final class StressRuntime {
     private static final int MAX_WORK=512,QUANTUM=16,MAX_LOGS=Math.max(0,Math.min(128,
             Integer.getInteger("pdd.stress.trace.maxPerTick",8)));
+    private static final int MAX_ARCHIVES_PER_TICK=4;
     private static final boolean TRACE=Boolean.parseBoolean(System.getProperty("pdd.stress.trace","true"));
     private static final class BudgetEnd extends RuntimeException {
         @Override public synchronized Throwable fillInStackTrace(){return this;}
@@ -77,11 +78,12 @@ public final class StressRuntime {
         final PublishedCells published=new PublishedCells();
         List<Map.Entry<Cell,Probe>> validation;
         int validationIndex,deliveryIndex,originIndex;
+        long pressureBytes=-1,pressureRetryAt;
         boolean invalidated,finished,originsRecovered;
         Job(Entry entry){
             id=entry.reservation().creditId();reservation=entry.reservation();
             orderedOrigins=com.physicaldestroydeform.deform.MoveRuntime.reverseOrder(reservation.origins());
-            snapshot.putAll(entry.snapshot());
+            if(entry.phase()!=Phase.CLOSED)snapshot.putAll(entry.snapshot());
             // A final capped plan only waits for residual expiry/handoff, never replans.
             finished=entry.phase()!=Phase.RESERVED&&entry.ledger().finished();
         }
@@ -101,7 +103,9 @@ public final class StressRuntime {
     private boolean faulted;
     private long lastTick=-1;
     private int used,shown,activeSessions;
-    private long snapshotWritesAvoided,sealWritesAvoided,seals,handoffs,traceSuppressed;
+    private int archivesThisTick;
+    private long archiveStartedNanos;
+    private long snapshotWritesAvoided,sealWritesAvoided,seals,handoffs,traceSuppressed,capacityRetries,archiveConflicts;
 
     public StressRuntime(MinecraftServer server,WorldCommitService world,PlotCommitService plot,Logger log)throws IOException {
         this.server=Objects.requireNonNull(server);this.world=world;this.plot=plot;this.log=Objects.requireNonNull(log);
@@ -114,12 +118,12 @@ public final class StressRuntime {
                 if(prior!=null&&!prior.equals(entry.reservation().creditId()))throw new IOException("stress source origin reserved twice");
             }
             // CLOSED still has source origins. Repair a crash after reservation/handoff but before direct submit.
-            if(entry.phase()!=Phase.CLOSED||!entry.reservation().origins().isEmpty())add(entry);
+            add(entry);
         }
         if(world!=null)world.attachStress(this);
         if(plot!=null)plot.attachStress(this);
-        log.info("[PDD-STRESS-LEDGER] phase=START records={} depth={} nodes={} globalWork={} minQ={} ttl={} recovery=FROZEN_GRAPH_SAME_Q_STABLE_APPLY_ID",
-                journal.size(),policy.maxDepth(),policy.maxNodes(),workCap,policy.minQ(),policy.ttlTicks());
+        log.info("[PDD-STRESS-LEDGER] phase=START records={} depth={} nodes={} globalWork={} minQ={} ttl={} activeRecords={} archivedRecords={} activeBytes={} recovery=FROZEN_GRAPH_SAME_Q_STABLE_APPLY_ID",
+                journal.size(),policy.maxDepth(),policy.maxNodes(),workCap,policy.minQ(),policy.ttlTicks(),journal.activeCount(),journal.archivedCount(),journal.activeBytes());
     }
     private static Policy configuredPolicy(){
         Policy d=Policy.defaults();
@@ -131,13 +135,15 @@ public final class StressRuntime {
     }
     private void add(Entry entry){
         Job job=new Job(entry);jobs.put(job.id,job);order.addLast(job.id);
-        for(var cell:job.snapshot.keySet())watch(job,cell);
-        for(var origin:job.reservation.origins())watch(job,StressCommitHandoff.cellFor(origin.key()));
+        if(entry.phase()!=Phase.CLOSED){
+            for(var cell:job.snapshot.keySet())watch(job,cell);
+            for(var origin:job.reservation.origins())watch(job,StressCommitHandoff.cellFor(origin.key()));
+        }
     }
     /** Called once per projected owner-side Grant, BEFORE any original direct intent is queued. */
-    public void reserve(List<WorldCommitCore.Intent> origins,MaterialRegistry.Snapshot materials,DamageModel.Settings settings)throws IOException {
-        requireThread();if(faulted)throw new IOException("stress runtime faulted");
-        if(origins.isEmpty())return;
+    public boolean reserve(List<WorldCommitCore.Intent> origins,MaterialRegistry.Snapshot materials,DamageModel.Settings settings)throws IOException {
+        requireThread();if(origins.isEmpty())return true;
+        if(faulted)throw new IOException("stress runtime faulted");
         var ordered=new ArrayList<>(origins);ordered.sort(Comparator.comparing(WorldCommitCore.Intent::applyId));
         String id=originId(ordered);
         Entry prior=journal.get(id);
@@ -146,11 +152,11 @@ public final class StressRuntime {
                     ||prior.reservation().materialGeneration()!=materials.generation()
                     ||!prior.reservation().settings().equals(settings))
                 throw new IOException("stress source ID reused with changed payload");
-            return;
+            return true;
         }
         // A changed projection of the same Grant cannot reserve one of its origins again.
-        for(var origin:ordered)if(originJobs.containsKey(origin.applyId()))
-            throw new IOException("stress source origin already belongs to another reservation");
+        for(var origin:ordered){String owner=journal.sourceOwner(origin.applyId());
+            if(owner!=null&&!owner.equals(id))throw new IOException("stress source origin already belongs to another reservation");}
         List<Seed> seeds=new ArrayList<>();
         for(var origin:ordered){
             var plan=DamageModel.plan(origin.sealedQ(),origin.material(),new BlockDamageState(),settings);
@@ -161,9 +167,14 @@ public final class StressRuntime {
         }
         // Original full Q and its immutable settings persist beside stress; plastic stays separate.
         var reservation=new Reservation(id,materials.generation(),server.overworld().getGameTime(),policy,settings,seeds,ordered);
+        if(journal.isArchived(id)){
+            if(!journal.matchesArchivedRetry(reservation))throw new IOException("archived stress source reused with changed payload");
+            return false; // never resubmit a completed direct intent
+        }
         journal.reserve(reservation);
         for(var origin:ordered)originJobs.put(origin.applyId(),id);
         add(journal.get(id));
+        return true;
     }
     private static String originId(List<WorldCommitCore.Intent> ordered){
         try{
@@ -175,9 +186,8 @@ public final class StressRuntime {
     /** Legacy 0.5 pending IDs have no source reservation and are never retroactively stressed. */
     public boolean holds(WorldCommitCore.Intent intent){
         String id=originJobs.get(intent.applyId());if(id==null)return false;
-        if(faulted)return true;
         Entry entry=journal.get(id);
-        return entry.holdsOrigins();
+        return entry!=null&&entry.phase()!=Phase.CLOSED&&(faulted||entry.holdsOrigins());
     }
     public boolean faulted(){return faulted;}
     private void charge(){if(used>=workCap)throw BUDGET_END;used++;}
@@ -230,16 +240,27 @@ public final class StressRuntime {
         requireThread();long tick=server.overworld().getGameTime();
         if(faulted||tick==lastTick)return;
         if(tick<lastTick){faulted=true;log.error("[PDD-STRESS-LEDGER] phase=HALT reason=GAME_CLOCK_ROLLBACK");return;}
-        lastTick=tick;used=0;shown=0;materialLookup.beginTick();
+        lastTick=tick;used=0;shown=0;archivesThisTick=0;materialLookup.beginTick();
         try{
             int turns=order.size();
             while(turns-->0&&!order.isEmpty()&&used<workCap){
                 String id=order.removeFirst();Job job=jobs.get(id);if(job==null)continue;
+                if(job.pressureBytes==journal.activeBytes()&&tick<job.pressureRetryAt){order.addLast(id);continue;}
+                job.pressureBytes=-1;
                 try{step(job,tick);}catch(BudgetEnd exhausted){/* exact shared allowance; preserve cursors */}
+                catch(CapacityException pressure){
+                    // Quota pressure is not a corrupt save. Retry the exact job,
+                    // keep its immutable prefix, and allow other jobs to drain.
+                    long created=job.reservation.createdGameTick(),ttl=job.reservation.policy().ttlTicks();
+                    long deadline=created>Long.MAX_VALUE-ttl?Long.MAX_VALUE:created+ttl;
+                    job.pressureBytes=journal.activeBytes();job.pressureRetryAt=Math.min(deadline,tick>Long.MAX_VALUE-20?Long.MAX_VALUE:tick+20);
+                    if(++capacityRetries==1||capacityRetries%256==0)
+                        log.warn("[PDD-STRESS-LEDGER] phase=PRESSURE id={} activeBytes={} activeRecords={} retries={} QReissue=false",id,journal.activeBytes(),journal.activeCount(),capacityRetries);
+                }
                 if(jobs.containsKey(id))order.addLast(id);
             }
-            if(server.getTickCount()%100==0)log.info("[PDD-STRESS-LEDGER] phase=SUMMARY jobs={} work={} cap={} records={} fault=false seals={} handoffs={} unchangedSnapshotWritesAvoided={} unchangedSealWritesAvoided={} traceSuppressed={}",
-                    jobs.size(),used,workCap,journal.size(),seals,handoffs,snapshotWritesAvoided,sealWritesAvoided,traceSuppressed);
+            if(server.getTickCount()%100==0)log.info("[PDD-STRESS-LEDGER] phase=SUMMARY jobs={} work={} cap={} records={} fault=false seals={} handoffs={} unchangedSnapshotWritesAvoided={} unchangedSealWritesAvoided={} traceSuppressed={} activeRecords={} archivedRecords={} activeBytes={} pressureRetries={} archiveConflicts={}",
+                    jobs.size(),used,workCap,journal.size(),seals,handoffs,snapshotWritesAvoided,sealWritesAvoided,traceSuppressed,journal.activeCount(),journal.archivedCount(),journal.activeBytes(),capacityRetries,archiveConflicts);
         }catch(IOException|RuntimeException failure){
             faulted=true;log.error("[PDD-STRESS-LEDGER] phase=HALT reason=SAVE_OR_PLAN_FAILURE QReissue=false",failure);
         }
@@ -260,7 +281,20 @@ public final class StressRuntime {
             }
             job.originsRecovered=true;
         }
-        if(entry.phase()==Phase.CLOSED){remove(job);return;}
+        if(entry.phase()==Phase.CLOSED){
+            // A v4 CLOSED record claims handoff, not successful damage. Verify
+            // every output without reissuing any missing receipt after a restore.
+            while(job.deliveryIndex<entry.plans().size()){
+                charge();var intent=derivedIntent(job,entry.plans().get(job.deliveryIndex));
+                long ttl=r.policy().ttlTicks(),deadline=r.createdGameTick()>Long.MAX_VALUE-ttl?Long.MAX_VALUE:r.createdGameTick()+ttl;
+                boolean durable=PlotKeyCodec.isPlotStorage(intent.key())?plot!=null&&plot.hasStressReceipt(intent,r.settings(),deadline)
+                        :world!=null&&world.hasStressReceipt(intent,r.settings(),deadline);
+                if(!durable){if(++archiveConflicts==1||archiveConflicts%256==0)
+                    log.error("[PDD-STRESS-LEDGER] phase=ARCHIVE_WAIT id={} applyId={} reason=MISSING_OR_MISMATCHED_RECEIPT QReissue=false",job.id,intent.applyId());return;}
+                job.deliveryIndex++;
+            }
+            archive(job);return;
+        }
         boolean expired=tick<r.createdGameTick()||tick-r.createdGameTick()>=r.policy().ttlTicks();
         // Expiry is a durable transition, not a recurring per-tick charge. Repeating
         // it would consume a cap=1 allowance forever and starve delivery/acknowledgment.
@@ -285,11 +319,14 @@ public final class StressRuntime {
                     if(job.session.finished())break;
                 }
                 // Persist observations before they may influence a later durable output.
+                // Retain the validation cursor even when quota pressure prevents
+                // this snapshot write. No output is published until sealProgress
+                // durably writes the same frozen graph and exact plan together.
+                job.validation=new ArrayList<>(job.snapshot.entrySet());job.validationIndex=0;
                 if(entry.phase()==Phase.RESERVED){
                     journal.snapshot(job.id,job.snapshot);
                     if(journal.get(job.id)==entry)snapshotWritesAvoided++;
                 }
-                job.validation=new ArrayList<>(job.snapshot.entrySet());job.validationIndex=0;
             }
             while(job.validationIndex<job.validation.size()&&used<workCap){
                 var probe=job.validation.get(job.validationIndex);
@@ -337,23 +374,34 @@ public final class StressRuntime {
         int handoffs=0;
         while(job.deliveryIndex<entry.plans().size()&&handoffs++<QUANTUM&&used<workCap){
             charge();var plan=entry.plans().get(job.deliveryIndex);
-            var key=StressCommitHandoff.keyFor(plan.node().cell(),plan.node().fingerprint());
-            long event=r.origins().isEmpty()?r.createdGameTick():r.origins().getFirst().eventTick();
-            var intent=new WorldCommitCore.Intent(applyId(job.id,plan.node().cell()),key,plan.node().incarnation(),
-                    plan.incomingQ(),plan.node().material(),r.materialGeneration(),event,false,plan.node().materialRevision());
-            boolean accepted=PlotKeyCodec.isPlotStorage(key)?plot!=null&&plot.offerStress(entry,plan,intent)
-                    :world!=null&&world.offerStress(entry,plan,intent);
+            var intent=derivedIntent(job,plan);var key=intent.key();
+            boolean accepted=PlotKeyCodec.isPlotStorage(key)?plot!=null&&plot.offerStress(entry,plan,intent,job.deliveryIndex)
+                    :world!=null&&world.offerStress(entry,plan,intent,job.deliveryIndex);
             if(!accepted)break;
             job.deliveryIndex++;this.handoffs++;
             if(showTrace())log.info("[PDD-STRESS-APPLY] phase=DURABLE_HANDOFF id={} origin={} owner={} position={},{},{} depth={} incomingQ={} fixedDamage={} status=QUEUED_OR_TERMINAL_NOT_ASSUMED_APPLIED",
                     intent.applyId(),job.id,key.dimension(),key.x(),key.y(),key.z(),plan.depth(),plan.incomingQ(),plan.plan().fixedIncrement());
         }
         if(entry.phase()==Phase.SEALED&&entry.ledger().finished()&&entry.ledger().pendingQ()==0&&job.deliveryIndex>=entry.plans().size()){
-            charge();journal.acknowledgeHandoff(job.id);remove(job);
+            archive(job);
         }
+    }
+    private void archive(Job job)throws IOException {
+        // Retirement is not a damage/mutation operation; delaying it does not
+        // change any Q or original TTL. Bound migration fsync bursts per tick.
+        if(archivesThisTick>=MAX_ARCHIVES_PER_TICK||archivesThisTick>0&&System.nanoTime()-archiveStartedNanos>=2_000_000L)return;
+        charge();if(archivesThisTick++==0)archiveStartedNanos=System.nanoTime();
+        journal.compactHandoff(job.id);remove(job);
+    }
+    private static WorldCommitCore.Intent derivedIntent(Job job,PlannedNode plan){
+        var r=job.reservation;var key=StressCommitHandoff.keyFor(plan.node().cell(),plan.node().fingerprint());
+        long event=r.origins().isEmpty()?r.createdGameTick():r.origins().getFirst().eventTick();
+        return new WorldCommitCore.Intent(applyId(job.id,plan.node().cell()),key,plan.node().incarnation(),
+                plan.incomingQ(),plan.node().material(),r.materialGeneration(),event,false,plan.node().materialRevision());
     }
     private void remove(Job job){
         jobs.remove(job.id);if(job.session!=null)activeSessions--;
+        for(var origin:job.reservation.origins())originJobs.remove(origin.applyId(),job.id);
         for(var cell:job.watched){
             Set<String> owners=watches.get(cell);if(owners==null)continue;owners.remove(job.id);
             if(owners.isEmpty()){

@@ -9,6 +9,7 @@
     "SableStepSnapshotMixin",
     "WorldBlockReplacementMixin",
     "SableHeatMapSafetyAccessor",
+    "SableHeatMapReadCacheMixin",
     "SablePlotTickWitnessMixin"
   ],
   "client": [

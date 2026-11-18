@@ -141,7 +141,11 @@ public final class WorldCommitService {
                                 &&observed.fingerprint().equals(key.fingerprint())
                                 ?observed.incarnation():null;
                     },targetMaterials::direction);
-            if(stress!=null)stress.reserve(projected.world(),materials,damageSettings);
+            try{
+                if(stress!=null&&!stress.reserve(projected.world(),materials,damageSettings))return;
+            }catch(StressReservationJournal.CapacityException pressure){
+                rejected++;log.warn("[PDD-STRESS-LEDGER] phase=ADMISSION_REJECT owner=WORLD reason=ACTIVE_CAPACITY credit={} QUnused={} QReissue=false",grant.id(),projected.world().stream().mapToDouble(WorldCommitCore.Intent::sealedQ).sum());return;
+            }
             int count=0;
             for(var intent:MoveRuntime.reverseOrder(projected.world())) {
                 var status=core.submit(intent,server.getTickCount(),server.overworld().getGameTime());
@@ -374,21 +378,36 @@ public final class WorldCommitService {
                     observed.loaded(),false,observed.hasBlockEntity(),observed.unsafeMultiblock(),true,observed.unsafePhysicsPhase());
         return observed;
     }
+    public boolean hasStressReceipt(WorldCommitCore.Intent intent){
+        return !fault&&!core.ioFault()&&StressCommitHandoff.receiptMatches(intent,journal.receipt(intent.applyId()));
+    }
+    public boolean hasStressReceipt(WorldCommitCore.Intent intent,DamageModel.Settings settings){
+        return !fault&&!core.ioFault()&&StressCommitHandoff.receiptMatches(intent,settings,journal.receipt(intent.applyId()));
+    }
+    public boolean hasStressReceipt(WorldCommitCore.Intent intent,DamageModel.Settings settings,long deadline){
+        return !fault&&!core.ioFault()&&StressCommitHandoff.receiptMatches(intent,settings,deadline,journal.receipt(intent.applyId()));
+    }
     public boolean recoverStressOrigin(WorldCommitCore.Intent intent,DamageModel.Settings settings,long created,long ttl)throws IOException {
         if(fault||core.ioFault())return false;
-        boolean fresh=journal.receipt(intent.applyId())==null;
+        var prior=journal.receipt(intent.applyId());
+        if(prior!=null)return StressCommitHandoff.verifyReceipt(intent,settings,prior);
         long deadline=created>Long.MAX_VALUE-ttl?Long.MAX_VALUE:created+ttl;
         var result=core.submitSealed(intent,settings,server.overworld().getGameTime(),deadline);
         if(core.ioFault())throw new IOException("World origin recovery journal failure");
-        if(fresh&&result.result()==WorldCommitCore.Outcome.DEFERRED){
+        boolean accepted=StressCommitHandoff.verifyReceipt(intent,settings,result.receipt());
+        if(accepted&&result.result()==WorldCommitCore.Outcome.DEFERRED){
             Cell cell=new Cell(intent.key());watched.add(cell);pendingCells.merge(cell,1,Integer::sum);
         }
-        return result.receipt()!=null&&(result.receipt().status()!=WorldReceiptJournal.Status.DEFERRED||result.receipt().pending()!=null);
+        return accepted;
     }
     public boolean offerStress(StressReservationJournal.Entry entry,StressPropagation.PlannedNode plan,WorldCommitCore.Intent intent)throws IOException {
         if(fault||core.ioFault())return false;
+        return offerStress(entry,plan,intent,entry.plans().indexOf(plan));
+    }
+    public boolean offerStress(StressReservationJournal.Entry entry,StressPropagation.PlannedNode plan,WorldCommitCore.Intent intent,int index)throws IOException {
+        if(fault||core.ioFault())return false;
         boolean fresh=journal.receipt(intent.applyId())==null;
-        boolean accepted=StressCommitHandoff.offer(core,entry,plan,intent,server.overworld().getGameTime());
+        boolean accepted=StressCommitHandoff.offer(core,entry,plan,intent,server.overworld().getGameTime(),index);
         var receipt=journal.receipt(intent.applyId());
         if(accepted&&fresh&&receipt!=null&&receipt.status()==WorldReceiptJournal.Status.DEFERRED){
             Cell cell=new Cell(intent.key());watched.add(cell);pendingCells.merge(cell,1,Integer::sum);

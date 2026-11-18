@@ -70,4 +70,49 @@ class StressCommitHandoffTest {
         assertThrows(IllegalArgumentException.class,()->StressCommitHandoff.offer(core,sealed(),unlisted,i,10001));
         assertEquals(0,core.queued());
     }
+    @Test void durableReceiptProofRequiresExactIdTargetAndPendingIntent(){
+        var i=intent(planned());
+        var p=new WorldReceiptJournal.Pending(i,D,0,11200);
+        var queued=new WorldReceiptJournal.Receipt(i.applyId(),i.key(),WorldReceiptJournal.Status.DEFERRED,"QUEUED",i.eventTick(),p);
+        assertTrue(StressCommitHandoff.receiptMatches(i,queued));
+        var changed=new WorldCommitCore.Intent(i.applyId(),i.key(),i.expectedIncarnation(),101,M,1,200,false);
+        assertFalse(StressCommitHandoff.receiptMatches(changed,queued));
+        assertFalse(StressCommitHandoff.receiptMatches(i,null));
+        assertFalse(StressCommitHandoff.receiptMatches(i,new WorldReceiptJournal.Receipt(i.applyId(),i.key(),WorldReceiptJournal.Status.DEFERRED,"LEGACY",200)));
+        assertFalse(StressCommitHandoff.receiptMatches(i,new WorldReceiptJournal.Receipt("other",i.key(),WorldReceiptJournal.Status.APPLIED,"DONE",300)));
+        assertFalse(StressCommitHandoff.receiptMatches(i,new WorldReceiptJournal.Receipt(i.applyId(),key("minecraft:overworld",2),WorldReceiptJournal.Status.ABORTED,"DONE",300)));
+    }
+    @Test void preparedOrTerminalIsNonReissuableWithoutPendingPayload(){
+        var i=intent(planned());
+        for(var status:List.of(WorldReceiptJournal.Status.PREPARED,WorldReceiptJournal.Status.APPLIED,
+                WorldReceiptJournal.Status.ABORTED,WorldReceiptJournal.Status.PARTIAL_QUARANTINED))
+            assertTrue(StressCommitHandoff.receiptMatches(i,new WorldReceiptJournal.Receipt(i.applyId(),i.key(),status,"DONE",999)));
+    }
+    @Test void sameApplyIdWithDifferentPendingSettingsIsRejected()throws Exception{
+        var j=journal();var core=new WorldCommitCore(j,D,64);var p=planned();var i=intent(p);
+        var other=new DamageModel.Settings(D.minHardnessFactor(),D.hardnessExponent(),D.minElasticFactor(),
+                D.elasticExponent(),D.damageGain()+1,D.deformationGain());
+        core.submitSealed(i,other,10001,11200);
+        assertThrows(java.io.IOException.class,()->StressCommitHandoff.offer(core,sealed(),p,i,10001));
+        assertEquals(1,core.queued());assertEquals(1,j.receiptCount());
+    }
+    @Test void derivedReceiptProofRequiresOriginalDeadlineWhileOriginProofAllowsItsOwnDeadline()throws Exception{
+        var j=journal();var core=new WorldCommitCore(j,D,64);var p=planned();var i=intent(p);
+        core.submitSealed(i,D,10001,11201);
+        assertTrue(StressCommitHandoff.receiptMatches(i,D,j.receipt(i.applyId())));
+        assertFalse(StressCommitHandoff.receiptMatches(i,D,11200,j.receipt(i.applyId())));
+        assertTrue(StressCommitHandoff.receiptMatches(i,D,11201,j.receipt(i.applyId())));
+        assertThrows(java.io.IOException.class,()->StressCommitHandoff.offer(core,sealed(),p,i,10001));
+        assertEquals(1,core.queued());assertEquals(1,j.receiptCount());
+    }
+    @Test void indexedHandoffProvesTheExactPublishedSlotWithoutScanning()throws Exception{
+        var j=journal();var core=new WorldCommitCore(j,D,64);var p=planned();var i=intent(p);var e=sealed();
+        assertThrows(IllegalArgumentException.class,()->StressCommitHandoff.offer(core,e,p,i,10001,-1));
+        assertThrows(IllegalArgumentException.class,()->StressCommitHandoff.offer(core,e,p,i,10001,1));
+        var unlisted=new PlannedNode(p.node(),2,p.incomingQ(),p.plan());
+        assertThrows(IllegalArgumentException.class,()->StressCommitHandoff.offer(core,e,unlisted,i,10001,0));
+        assertEquals(0,core.queued());
+        assertTrue(StressCommitHandoff.offer(core,e,p,i,10001,0));
+        assertEquals(1,core.queued());assertEquals(1,j.receiptCount());
+    }
 }

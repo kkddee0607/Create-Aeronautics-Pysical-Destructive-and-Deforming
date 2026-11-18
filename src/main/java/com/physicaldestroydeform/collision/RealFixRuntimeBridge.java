@@ -93,7 +93,22 @@ public final class RealFixRuntimeBridge {
     private long r2Audits,r2SkippedDuplicate,r2ShapeChecks;
     private long clearanceCalls,clearanceCellReads,clearanceElapsedNanos,clearanceProved;
     private long lastDropped,lastMalformed,lastCallbackDropped,lastPreHistoryDropped;
+    private long repeatedDiagnosticGroupsSuppressed;
+    /** One bounded sampling state per existing owner pair; never read by the credit gate. */
+    static final class RejectionTrace {
+        private Reason lastReason;
+        private SableContactRegions.Status lastStatus;
+        private long lastTick=-1;
+        boolean sample(boolean fullTrace,boolean evidence,long now,Reason reason,
+                       SableContactRegions.Status status,long interval) {
+            if(!fullTrace && !evidence && lastReason==reason && lastStatus==status
+                    && now>=lastTick && now-lastTick<interval)return false;
+            lastReason=reason;lastStatus=status;lastTick=now;
+            return true;
+        }
+    }
     private static final class Tracked {
+        final RejectionTrace rejectionTrace=new RejectionTrace();
         Target a,b;
         Box previousA,previousB;
         long lastSeen=-1;
@@ -171,6 +186,7 @@ public final class RealFixRuntimeBridge {
         credit.clear();regionLedger.clear();worldClearance.clear();tracked.clear();generations.clear();
         runId=UUID.randomUUID().toString();
         lastDropped=lastMalformed=lastCallbackDropped=lastPreHistoryDropped=0;
+        repeatedDiagnosticGroupsSuppressed=0;
         r2Audits=r2SkippedDuplicate=r2ShapeChecks=0;
         clearanceCalls=clearanceCellReads=clearanceElapsedNanos=clearanceProved=0;
         forceCalibration.clear();
@@ -268,6 +284,19 @@ public final class RealFixRuntimeBridge {
                 previewPolicyId);
     }
 
+    private static void logObservation(Logger log,NativeEffectGroups.Group group,NativeEffectGroups.Batch batch) {
+        log.info("[PDD-OBS] source=POST_EFFECT dimension={} tick={} bodyIds={}/{} rawRecords={} peakForce={} discarded={} invalid={} mutation=OFF",
+                group.dimension(),group.tick(),group.runtimePair().lowId(),group.runtimePair().highId(),
+                group.originalRecordCount(),group.forcePeak(),batch.discardedRecords(),batch.invalidRecords());
+    }
+    private static void logNativeTarget(Logger log,Stamp stamp,Pair pair,String methodA,String methodB,
+                                        SableContactRegions.Result regions,boolean callbackA,boolean callbackB,boolean saturatedPoll) {
+        log.info("[PDD-NATIVE-TARGET] dim={} tick={} ownerA={} ownerB={} methodA={} reasonA={} checkedA={} methodB={} reasonB={} checkedB={} regionCount={} rejectedPoints={} callbackHintA={} callbackHintB={} sourceCapSaturated={} worldMutation=OFF",
+                stamp.dimension,stamp.tick,pair.a().stableKey(),pair.b().stableKey(),
+                methodA,regions.status(),regions.checksA(),methodB,regions.status(),regions.checksB(),
+                regions.regions().size(),regions.rejected(),callbackA,callbackB,saturatedPoll);
+    }
+
     /** Called only from ServerTickEvent.Post. Never mutate any world or native buffer. */
     public void tick(MinecraftServer server,List<RawObservation> callbacks,
                      List<NativeCollisionTelemetry.Contact> nativeEvents,
@@ -276,6 +305,7 @@ public final class RealFixRuntimeBridge {
         Objects.requireNonNull(server);Objects.requireNonNull(callbacks);
         Objects.requireNonNull(nativeEvents);Objects.requireNonNull(pre);Objects.requireNonNull(log);
         final long now=server.getTickCount();
+        final boolean fullTrace=Boolean.getBoolean("pdd.diagnostics.fullTrace");
         if(plotCommit!=null)plotCommit.refreshLifecycle(now);
         final boolean complete=NativeCollisionTelemetry.dropped()==lastDropped
                 && NativeCollisionTelemetry.malformed()==lastMalformed
@@ -330,13 +360,12 @@ public final class RealFixRuntimeBridge {
             }
             for(var group:batch.groups()) {
                 observed++;
-                if(lines++<MAX_LOG_PER_TICK)log.info("[PDD-OBS] source=POST_EFFECT dimension={} tick={} bodyIds={}/{} rawRecords={} peakForce={} discarded={} invalid={} mutation=OFF",
-                        stamp.dimension,stamp.tick,group.runtimePair().lowId(),group.runtimePair().highId(),
-                        group.originalRecordCount(),group.forcePeak(),batch.discardedRecords(),batch.invalidRecords());
+                if(fullTrace && lines++<MAX_LOG_PER_TICK)logObservation(log,group,batch);
                 List<NativeCollisionTelemetry.Contact> records=contactsByPair.getOrDefault(group.runtimePair(),List.of());
                 RuntimeOwners owners=resolveOwners(ownerIndex,stamp,group,records);
                 if(owners==null) {
                     missingOwner++;zero++;
+                    if(!fullTrace && lines++<MAX_LOG_PER_TICK)logObservation(log,group,batch);
                     if(lines++<MAX_LOG_PER_TICK)log.info("[PDD-OBS] source=POST_EFFECT dimension={} tick={} ids={}/{} peak={} result=OWNER_UNVERIFIED mutation=OFF",
                             stamp.dimension,stamp.tick,group.runtimePair().lowId(),group.runtimePair().highId(),group.forcePeak());
                     continue;
@@ -452,7 +481,11 @@ public final class RealFixRuntimeBridge {
                 if(t==null && tracked.size()<MAX_TRACKED) {
                     t=new Tracked();tracked.put(pair,t);
                 }
-                if(t==null){zero++;continue;}
+                if(t==null){
+                    zero++;
+                    if(!fullTrace && lines++<MAX_LOG_PER_TICK)logObservation(log,group,batch);
+                    continue;
+                }
                 if(a!=null)t.a=a;
                 if(b!=null)t.b=b;
                 Box boxA=box(server,pair.a().stableKey(),a==null?t.a:a,stamp.dimension,worldBounds,knownWorldBlocks);
@@ -558,10 +591,9 @@ public final class RealFixRuntimeBridge {
                         }
                     }
                 }
-                if(lines++<MAX_LOG_PER_TICK) log.info("[PDD-NATIVE-TARGET] dim={} tick={} ownerA={} ownerB={} methodA={} reasonA={} checkedA={} methodB={} reasonB={} checkedB={} regionCount={} rejectedPoints={} callbackHintA={} callbackHintB={} sourceCapSaturated={} worldMutation=OFF",
-                        stamp.dimension,stamp.tick,pair.a().stableKey(),pair.b().stableKey(),
-                        methodA,regions.status(),regions.checksA(),methodB,regions.status(),regions.checksB(),
-                        regions.regions().size(),regions.rejected(),r1a!=null,r1b!=null,saturatedPoll);
+                boolean incomplete=!complete || batch.invalidRecords()>0 || batch.discardedRecords()>0 || batch.malformedArray();
+                if((fullTrace || incomplete) && lines++<MAX_LOG_PER_TICK)
+                    logNativeTarget(log,stamp,pair,methodA,methodB,regions,r1a!=null,r1b!=null,saturatedPoll);
                 // R4 shadow audit. This only describes plausible loaded world
                 // blocks; WITHOUT in-game ground truth it can never mint credit.
                 if(auditEligible && pair.a().stableKey().startsWith("WORLD:") && a==null) {
@@ -578,8 +610,9 @@ public final class RealFixRuntimeBridge {
                     if(!probe.status().startsWith("PROVISIONAL_ONLY"))
                         logVerfR4(log,t,now,stamp.tick,pair,probe,records.size(),before,remainingR4Checks[0],sweptA);
                 }
-                if(!complete || batch.invalidRecords()>0 || batch.discardedRecords()>0 || batch.malformedArray()) {
+                if(incomplete) {
                     zero++;
+                    if(!fullTrace && lines++<MAX_LOG_PER_TICK)logObservation(log,group,batch);
                     if(lines++<MAX_LOG_PER_TICK)log.info("[PDD-EPISODE] dimension={} tick={} ownerA={} ownerB={} reason=INCOMPLETE_INPUT Q=0 worldMutation=OFF",
                             stamp.dimension,stamp.tick,pair.a().stableKey(),pair.b().stableKey());
                     continue;
@@ -590,6 +623,17 @@ public final class RealFixRuntimeBridge {
                     // mapped, verified owner-local block. Force is a GAME proxy.
                     var frame=new Frame(pair,now,group.samples(),false,approach,a,b,group.forcePeak(),regionalReimpact);
                     var result=credit.step(frame);
+                    // Keep actual audit evidence, every approved credit, all state/rejection changes
+                    // and a periodic witness. Suppress only repetitive diagnostic groups, not credit work.
+                    boolean showGroup=t.rejectionTrace.sample(fullTrace,
+                            auditEligible || result.credited() || phaseBefore!=result.phase(),
+                            now,result.reason(),regions.status(),VERF_SAMPLE_TICKS);
+                    if(!showGroup)repeatedDiagnosticGroupsSuppressed++;
+                    if(!fullTrace && showGroup) {
+                        if(lines++<MAX_LOG_PER_TICK)logObservation(log,group,batch);
+                        if(lines++<MAX_LOG_PER_TICK)
+                            logNativeTarget(log,stamp,pair,methodA,methodB,regions,r1a!=null,r1b!=null,saturatedPoll);
+                    }
                     // A large force is diagnostic evidence, not permission to
                     // bypass the episode gate. Sample the actual rejection
                     // cause even when no F/Q credit was issued.
@@ -985,7 +1029,7 @@ public final class RealFixRuntimeBridge {
                                 grant.observedRegions(),regions.checksA(),regions.checksB(),regions.rejected(),
                                 grant.issuedQ(),grant.allocatedA(),grant.allocatedB(),grant.unused(),
                                 grant.a(),grant.b(),pair.a().generation(),pair.b().generation(),saturatedPoll);
-                    if(lines++<MAX_LOG_PER_TICK) log.info("[PDD-TARGET] dimension={} tick={} ownerA={} ownerAGeneration={} ownerB={} ownerBGeneration={} targetA={} fingerprintA={} targetB={} fingerprintB={} frameMethodA={} frameMethodB={} shapeAudit={} quality={} reason={} approachByAabb={} armedFromGap={} recentGap={} worldMutation=OFF",
+                    if(showGroup && lines++<MAX_LOG_PER_TICK) log.info("[PDD-TARGET] dimension={} tick={} ownerA={} ownerAGeneration={} ownerB={} ownerBGeneration={} targetA={} fingerprintA={} targetB={} fingerprintB={} frameMethodA={} frameMethodB={} shapeAudit={} quality={} reason={} approachByAabb={} armedFromGap={} recentGap={} worldMutation=OFF",
                             stamp.dimension,stamp.tick,pair.a().stableKey(),pair.a().generation(),pair.b().stableKey(),pair.b().generation(),
                             a==null?"UNVERIFIED":a.localBlock(),a==null?"UNVERIFIED":a.fingerprint(),
                             b==null?"UNVERIFIED":b.localBlock(),b==null?"UNVERIFIED":b.fingerprint(),
@@ -994,7 +1038,7 @@ public final class RealFixRuntimeBridge {
                             !auditEligible?"NOT_AUDITED_DUPLICATE":a==null&&b==null?"SOURCE_UNVERIFIED":"POST_EFFECT_CORROBORATED_GAME_PROXY",
                             !auditEligible?"NO_Q_AUTHORIZATION":a==null&&b==null?"TARGET_UNVERIFIED":"SABLE_NATIVE_CONSUMER_MAPPED",
                             aabbClosing,armedFromGap,previousSeparated);
-                    if(lines++<MAX_LOG_PER_TICK)log.info("[PDD-EPISODE] dimension={} tick={} bodyIds={}/{} records={} peak={} previousSeparated={} separationEvidenceTick={} phaseBefore={} armedFromGap={} aabbClosing={} forceRise={} state={} reason={} creditCount={} episodeGeneration={} authorizationTick={} Q={} shareA={} shareB={} unused={} regionQuality={} groupCause={} source=POST_EFFECT_GAME_POLICY worldMutation=OFF",
+                    if(showGroup && lines++<MAX_LOG_PER_TICK)log.info("[PDD-EPISODE] dimension={} tick={} bodyIds={}/{} records={} peak={} previousSeparated={} separationEvidenceTick={} phaseBefore={} armedFromGap={} aabbClosing={} forceRise={} state={} reason={} creditCount={} episodeGeneration={} authorizationTick={} Q={} shareA={} shareB={} unused={} regionQuality={} groupCause={} source=POST_EFFECT_GAME_POLICY worldMutation=OFF",
                             stamp.dimension,stamp.tick,group.runtimePair().lowId(),group.runtimePair().highId(),
                             group.originalRecordCount(),group.forcePeak(),previousSeparated,separationEvidenceTick,
                             phaseBefore,armedFromGap,aabbClosing,
@@ -1067,14 +1111,14 @@ public final class RealFixRuntimeBridge {
             // had a contact. Expiring on lastSeen (-1) discards its verified
             // clearance/AABB evidence while GameImpactCredit stays ARMED.
             tracked.entrySet().removeIf(e->trackedIdleExpired(now,e.getValue().lastProcessed));
-            log.info("[PDD-0.4.0finalFix] phase=SUMMARY observed={} credited={} zero={} ownerMissing={} targetMissing={} ambiguous={} trackedPairs={} r2Verified={} r2Rejected={} r3Verified={} prearmed={} r1Fallback={} regionGroups={} regionCount={} regionTooBroad={} ledgerRejected={} activeCredits={} observerErrors={} nativeDropped={} nativeMalformed={} nativeCapSaturatedPolls={} r2Audits={} r2SkippedDuplicate={} r2ActualShapeChecks={} callbackDropped={} preHistoryDropped={} generation=IDS-1.0.7 mutation=OFF",
+            log.info("[PDD-0.4.0finalFix] phase=SUMMARY observed={} credited={} zero={} ownerMissing={} targetMissing={} ambiguous={} trackedPairs={} r2Verified={} r2Rejected={} r3Verified={} prearmed={} r1Fallback={} regionGroups={} regionCount={} regionTooBroad={} ledgerRejected={} activeCredits={} observerErrors={} nativeDropped={} nativeMalformed={} nativeCapSaturatedPolls={} r2Audits={} r2SkippedDuplicate={} r2ActualShapeChecks={} callbackDropped={} preHistoryDropped={} repeatedDiagnosticGroupsSuppressed={} generation=IDS-1.0.7 mutation=OFF",
                     observed,credited,zero,missingOwner,missingTarget,ambiguousOwners,tracked.size(),
                     r2Verified,r2Rejected,r3Verified,prearmed,r1Fallback,
                     multiGroupCredits,multiRegions,multiTooBroad,ledgerRejected,regionLedger.size(),
                     NativeCollisionTelemetry.observerErrors(),
                     NativeCollisionTelemetry.dropped(),NativeCollisionTelemetry.malformed(),
                     NativeCollisionTelemetry.nativeCapSaturatedPolls(),r2Audits,r2SkippedDuplicate,r2ShapeChecks,
-                    com.physicaldestroydeform.diagnostics.SableContactQueue.dropped(),SableFrameCapture.preHistoryDropped());
+                    com.physicaldestroydeform.diagnostics.SableContactQueue.dropped(),SableFrameCapture.preHistoryDropped(),repeatedDiagnosticGroupsSuppressed);
             log.info("[PDD-MATERIAL-PLAN] phase=SUMMARY targetsPlanned={} missingMaterialEvents={} " +
                     "planRejected={} mode=PREVIEW_ONLY storedEntries={} fixedTotal={} " +
                     "handledCredits={} duplicatePreview={} previewCapacityRejected={} " +

@@ -304,9 +304,16 @@ public final class NeoForgePlotGateway implements WorldCommitCore.WorldGateway,M
         Cell cell=locate(virtual,false);
         if(cell==null)return "PLOT_OWNER_NOT_READY";
         if(ownerMoves.containsKey(PlotOwnerFence.Owner.of(cell.real())))return "PLOT_MOVE_POSTSTATE_PENDING";
-        return deferBreakReason(cell);
+        return deferBreakReason(cell,false);
     }
-    private String deferBreakReason(Cell cell) {
+    private static PlotHeatMapReadCache.Pending readPendingHeatMap(SableHeatMapSafetyAccessor s){
+        boolean initialized=s.pdd$initialized(),complete=s.pdd$splitComplete();
+        int flood=s.pdd$floodfill().size(),removed=s.pdd$removed().size(),
+                starts=s.pdd$newStarts().size(),splitCells=s.pdd$subLevelSplits().size();
+        return !initialized||!complete||flood>0||removed>0||starts>0||splitCells>0
+                ?new PlotHeatMapReadCache.Pending(initialized,complete,flood,removed,starts,splitCells):null;
+    }
+    private String deferBreakReason(Cell cell,boolean forceLive) {
         try {
             if(cell.sub().isRemoved())return "PLOT_OWNER_NOT_READY";
             var heat=cell.sub().getHeatMapManager();
@@ -317,23 +324,23 @@ public final class NeoForgePlotGateway implements WorldCommitCore.WorldGateway,M
                             cell.sub().getUniqueId(),cell.sub().getRuntimeId(),heatMapHolds);
                 return "SABLE_HEATMAP_UNVERIFIED";
             }
-            boolean initialized=s.pdd$initialized(), complete=s.pdd$splitComplete();
-            int flood=s.pdd$floodfill().size(), removed=s.pdd$removed().size(),
-                    starts=s.pdd$newStarts().size(), splitCells=s.pdd$subLevelSplits().size();
-            if(!initialized || !complete || flood>0 || removed>0 || starts>0 || splitCells>0) {
+            long tick=server.getTickCount();
+            var pending=(Object)heat instanceof PlotHeatMapReadCache.Witness witness
+                    ?witness.pdd$heatMapReadCache().pending(tick,forceLive,()->readPendingHeatMap(s))
+                    :readPendingHeatMap(s);
+            if(pending!=null) {
                 if(++heatMapHolds==1 || heatMapHolds%256==0)
                     LOG.warn("[PDD-PLOT-SAFE] phase=WAIT_SABLE_HEATMAP " +
                                     "owner={} generation={} runtimeBodyId={} initialized={} " +
                                     "splitComplete={} floodfill={} removed={} newStarts={} splitCells={} " +
                                     "holdCount={} action=DEFER_BEFORE_PREPARED",
                             cell.sub().getUniqueId(),cell.real().ownerGeneration(),cell.sub().getRuntimeId(),
-                            initialized,complete,flood,removed,starts,splitCells,heatMapHolds);
+                            pending.initialized(),pending.complete(),pending.flood(),pending.removed(),pending.starts(),pending.splitCells(),heatMapHolds);
                 return "SABLE_HEATMAP_PENDING_SPLIT";
             }
             var owner=PlotOwnerFence.Owner.of(cell.real());
             long completed=(Object)cell.sub() instanceof PlotHeatMapTickWitness witness
                     ?witness.pdd$completedHeatMapServerTick():-1;
-            long tick=server.getTickCount();
             String hold=PlotBreakPacing.holdReason(tick,completed,lastBreakAttempt.get(owner),breakSpacingTicks);
             if("PLOT_BREAK_SPACING".equals(hold)) spacingHolds++;
             else if(hold!=null) {
@@ -537,6 +544,9 @@ public final class NeoForgePlotGateway implements WorldCommitCore.WorldGateway,M
                 &&b.materialRevision().equals(resolved.revision());
     }
     @Override public MoveTransactionExecutor.Gate validate(MoveTransactionJournal.BeforeImage b){
+        return validate(b,false);
+    }
+    private MoveTransactionExecutor.Gate validate(MoveTransactionJournal.BeforeImage b,boolean forceLive){
         final var unknown=MoveTransactionExecutor.Gate.UNKNOWN;final var blocked=MoveTransactionExecutor.Gate.BLOCKED;
         final var deferred=MoveTransactionExecutor.Gate.DEFERRED;
         try{
@@ -550,7 +560,7 @@ public final class NeoForgePlotGateway implements WorldCommitCore.WorldGateway,M
                     ||service.moveRevision(b.source())!=b.sourceRevision()||service.moveRevision(b.destinationBefore())!=b.destinationRevision()
                     ||!service.incarnation(PlotKeyCodec.real(b.source()),a.sub().getPlot().getCenterBlock()).equals(b.sourceState().incarnation())
                     ||!registeredMaterialMatches(b))return gate(b,unknown,"STALE_BEFORE_STATE_OR_MATERIAL");
-            if(deferBreakReason(a)!=null)return deferred;
+            if(deferBreakReason(a,forceLive)!=null)return deferred;
             if(!Double.isFinite(selfMass(a)))return gate(b,unknown,"SABLE_MASS_UNAVAILABLE");
             if(!authorized(a)||!authorized(d))return gate(b,blocked,"MOVE_CLAIM_DENIED");
             if(!clearPath(d))return gate(b,blocked,"DESTINATION_OCCUPIED");
@@ -618,7 +628,7 @@ public final class NeoForgePlotGateway implements WorldCommitCore.WorldGateway,M
         return waitForHeat(b,MoveTransactionExecutor.Readback.RESTORED_BEFORE_IMAGE,originalMass);
     }
     @Override public MoveTransactionExecutor.Readback mutateOnce(MoveTransactionJournal.BeforeImage b){
-        if(validate(b)!=MoveTransactionExecutor.Gate.APPROVED)return MoveTransactionExecutor.Readback.UNCERTAIN;
+        if(validate(b,true)!=MoveTransactionExecutor.Gate.APPROVED)return MoveTransactionExecutor.Readback.UNCERTAIN;
         Cell a=locate(b.source(),false),d=locate(b.destinationBefore(),false);
         if(!sameOwner(a,d))return MoveTransactionExecutor.Readback.UNCERTAIN;
         try{
@@ -626,7 +636,7 @@ public final class NeoForgePlotGateway implements WorldCommitCore.WorldGateway,M
             var sourceVeto=new BlockEvent.BreakEvent(a.level(),a.allocated(),original,actor);
             NeoForge.EVENT_BUS.post(sourceVeto);
             if(sourceVeto.isCanceled())return bothBefore(b)?MoveTransactionExecutor.Readback.RESTORED_BEFORE_IMAGE:MoveTransactionExecutor.Readback.UNCERTAIN;
-            if(!bothBefore(b)||validate(b)!=MoveTransactionExecutor.Gate.APPROVED)return MoveTransactionExecutor.Readback.UNCERTAIN;
+            if(!bothBefore(b)||validate(b,true)!=MoveTransactionExecutor.Gate.APPROVED)return MoveTransactionExecutor.Readback.UNCERTAIN;
             double originalMass=selfMass(a),fromMass=blockMass(a,original),oldDestinationMass=blockMass(d,oldDestination);
             if(!Double.isFinite(originalMass)||!Double.isFinite(fromMass)||fromMass<0
                     ||!Double.isFinite(oldDestinationMass)||oldDestinationMass<0)return MoveTransactionExecutor.Readback.UNCERTAIN;
@@ -667,7 +677,7 @@ public final class NeoForgePlotGateway implements WorldCommitCore.WorldGateway,M
             if(!sameOwner(a,d))return MoveTransactionExecutor.Readback.WAITING;
             if(wait.expected()==MoveTransactionExecutor.Readback.CONFIRMED?!bothAfter(b):!bothBefore(b))return MoveTransactionExecutor.Readback.UNCERTAIN;
             long complete=(Object)a.sub() instanceof PlotHeatMapTickWitness witness?witness.pdd$completedHeatMapServerTick():-1;
-            if(complete<=wait.tick()||deferBreakReason(a)!=null)return MoveTransactionExecutor.Readback.WAITING;
+            if(complete<=wait.tick()||deferBreakReason(a,true)!=null)return MoveTransactionExecutor.Readback.WAITING;
             double actualMass=selfMass(a),tolerance=Math.max(1e-6,Math.abs(wait.expectedMass())*1e-9);
             if(!Double.isFinite(actualMass)||Math.abs(actualMass-wait.expectedMass())>tolerance){
                 LOG.warn("[PDD-DEFORM] phase=PLOT_MASS_MISMATCH moveId={} expectedMass={} actualMass={} tolerance={} action=QUARANTINE",b.id(),wait.expectedMass(),actualMass,tolerance);
@@ -709,7 +719,7 @@ public final class NeoForgePlotGateway implements WorldCommitCore.WorldGateway,M
                     .equals(observation.fingerprint()))return false;
         // Last defensive check at the irreversible call boundary. The core has
         // already checked before PREPARED; a newly uncertain state is not retried.
-        if(deferBreakReason(cell)!=null)return false;
+        if(deferBreakReason(cell,true)!=null)return false;
         PlotBreakMutationWitness.begin(cell.level(),cell.allocated(),expected);
         // Reserve the owner slot BEFORE the irreversible Sable API call.
         // A false return/exception is still one attempted mutation.

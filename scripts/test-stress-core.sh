@@ -17,6 +17,7 @@ java com.sun.tools.javac.Main -Xlint:all -d "$classes" \
   src/main/java/com/physicaldestroydeform/stress/StressCommitHandoff.java \
   src/main/java/com/physicaldestroydeform/stress/StressPropagation.java \
   src/main/java/com/physicaldestroydeform/stress/StressReservationJournal.java \
+  src/main/java/com/physicaldestroydeform/stress/StressClosedArchive.java \
   src/main/java/com/physicaldestroydeform/stress/StressScheduler.java \
   src/main/java/com/physicaldestroydeform/stress/StressWorkCoordinator.java \
   src/test/java/com/physicaldestroydeform/stress/StressCoordinatorSelfTest.java \
