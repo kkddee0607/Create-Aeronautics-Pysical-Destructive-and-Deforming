@@ -34,8 +34,10 @@ final class ContactFacePatch {
     private static final double SPARSE_HALO = 1.01;
     private static final double GRID_EPS = 1e-6;
 
-    record Result(List<GameImpactCredit.Target> added, int attempted, String reason) {
-        Result { added = List.copyOf(added); }
+    record Result(List<GameImpactCredit.Target> added, int attempted, String reason,
+                  Set<GameImpactCredit.Target> planarInterior) {
+        Result { added = List.copyOf(added); planarInterior=Set.copyOf(planarInterior); }
+        Result(List<GameImpactCredit.Target> added,int attempted,String reason){this(added,attempted,reason,Set.of());}
     }
     private record Point(double u, double v) {}
     private record Witness(double[] normal,double plane,Point point,int axis,boolean axisAligned) {}
@@ -43,8 +45,12 @@ final class ContactFacePatch {
         final Witness first;
         final List<Point> points=new ArrayList<>();
         double planeSum;
+        double minPlane=Double.POSITIVE_INFINITY,maxPlane=Double.NEGATIVE_INFINITY;
         Plane(Witness first) {this.first=first;include(first);}
-        void include(Witness witness) {points.add(witness.point());planeSum+=witness.plane();}
+        void include(Witness witness) {
+            points.add(witness.point());planeSum+=witness.plane();
+            minPlane=Math.min(minPlane,witness.plane());maxPlane=Math.max(maxPlane,witness.plane());
+        }
         double plane() {return planeSum/points.size();}
     }
 
@@ -102,6 +108,7 @@ final class ContactFacePatch {
         for(var target:verified)if(owner.equals(target.ownerKey()))original.add(target.localBlock());
         Set<String> seen=new HashSet<>(original);
         var added=new ArrayList<GameImpactCredit.Target>();
+        var planarInterior=new HashSet<GameImpactCredit.Target>();
         int attempted=0,faces=0,insufficient=0,limited=0,sparse=0;
         for(var group:planes) {
             var points=group.points;
@@ -176,6 +183,11 @@ final class ContactFacePatch {
                             new FrameMath.Vec(p[0],p[1],p[2]));
                     if(found!=null && owner.equals(found.ownerKey()) && key.equals(found.localBlock())) {
                         added.add(found);seen.add(key);
+                        // A halo or line is a damage approximation, not evidence
+                        // of an actual surface patch suitable for derived movement.
+                        if(group.first.axisAligned()
+                                && group.maxPlane-group.minPlane<=SableConsumerTargets.EPSILON
+                                && strictlyWithinPolygon(hull,cu,cv))planarInterior.add(found);
                     }
                 }
             }
@@ -183,8 +195,9 @@ final class ContactFacePatch {
                 // An incomplete face MUST NOT appear to have been fully
                 // recovered. Roll back its new identities, keep earlier
                 // complete faces and report the work budget explicitly.
-                for(int i=added.size()-1;i>=faceStart;i--)
-                    seen.remove(added.remove(i).localBlock());
+                for(int i=added.size()-1;i>=faceStart;i--){
+                    var removed=added.remove(i);seen.remove(removed.localBlock());planarInterior.remove(removed);
+                }
                 limited++;
             } else {
                 faces++;
@@ -194,7 +207,7 @@ final class ContactFacePatch {
         if(faces==0)return new Result(List.of(),attempted,
                 limited>0?"PATCH_BUDGET":normalsMissing?"NO_VALID_NORMAL":"NO_PROVEN_SURFACE");
         return new Result(added,attempted,"SHAPE_VERIFIED_SURFACES faces="+faces+
-                " sparseLocalHalos="+sparse+" limited="+limited+" unsupported="+insufficient);
+                " sparseLocalHalos="+sparse+" limited="+limited+" unsupported="+insufficient,planarInterior);
     }
 
     /** Conservative column-band bound: never removes a cell that could
@@ -265,5 +278,11 @@ final class ContactFacePatch {
             if(segmentDistanceSquared(a,b,u,v)<=tol2)return true;
         }
         return inside;
+    }
+    private static boolean strictlyWithinPolygon(List<Point> hull,double u,double v){
+        if(hull.size()<3)return false;
+        var p=new Point(u,v);
+        for(int i=0;i<hull.size();i++)if(cross(hull.get(i),hull.get((i+1)%hull.size()),p)<=GRID_EPS)return false;
+        return true;
     }
 }

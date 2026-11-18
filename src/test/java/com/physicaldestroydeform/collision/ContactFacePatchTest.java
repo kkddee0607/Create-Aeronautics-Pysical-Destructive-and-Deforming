@@ -66,6 +66,8 @@ class ContactFacePatchTest {
         assertTrue(patch.reason().startsWith("SHAPE_VERIFIED_SURFACES"),patch.reason());
         assertEquals(21,patch.added().size());
         assertEquals(21,patch.attempted());
+        assertTrue(patch.planarInterior().contains(target(2,2)));
+        assertFalse(patch.planarInterior().contains(target(0,2)));
         assertTrue(visited.contains("2,2"));
         var all=new HashSet<>(onlyFour);all.addAll(patch.added());
         assertEquals(25,all.size());
@@ -102,6 +104,17 @@ class ContactFacePatchTest {
             String[] c=t.localBlock().split(",");
             return c[0].equals(c[2]);
         }),"A diagonal native contact may recover a line, never a whole rectangle");
+        assertTrue(result.planarInterior().isEmpty());
+    }
+    @Test void damagePatchMayGroupNearbyPlanesButMovementEvidenceMustBeCoplanar() {
+        var records=new ArrayList<NativeCollisionTelemetry.Contact>();
+        for(int x:new int[]{0,4})for(int z:new int[]{0,4})
+            records.add(new NativeCollisionTelemetry.Contact(7,-1,3500,
+                    0,-1,0,0,1,0,0,0,0,x+0.5,x==0?65:64.9,z+0.5,DIM,5));
+        var result=ContactFacePatch.reconstruct(DIM,OWNER,BlockPos.ZERO,cornerIslands(),records,
+                (pos,point)->target(pos.getX(),pos.getZ()));
+        assertEquals(9,result.added().size());
+        assertTrue(result.planarInterior().isEmpty());
     }
     @Test void onlyIndividuallyProvenFaceBlocksReceiveRecoveredTargets() {
         var four=List.of(target(0,0),target(0,4),target(4,0),target(4,4));
@@ -134,6 +147,7 @@ class ContactFacePatchTest {
         var limited=ContactFacePatch.reconstruct(DIM,OWNER,BlockPos.ZERO,cornerIslands(),
                 corners().subList(0,1),(pos,point)->target(pos.getX(),pos.getZ()));
         assertTrue(limited.reason().contains("sparseLocalHalos=1"),limited.reason());
+        assertTrue(limited.planarInterior().isEmpty());
         assertTrue(limited.added().size()<=8);
         assertTrue(limited.added().stream().allMatch(t->{
             String[] xyz=t.localBlock().split(",");

@@ -82,8 +82,13 @@ public final class SableContactRegions {
      * only when R2 finds no block. Multiple real contact cells are preserved. */
     public static Result audit(MinecraftServer server,String dimension,GameImpactCredit.Pair pair,
                                List<NativeCollisionTelemetry.Contact> records) {
+        return audit(server,dimension,pair,records,new TargetDirections());
+    }
+    static Result audit(MinecraftServer server,String dimension,GameImpactCredit.Pair pair,
+                        List<NativeCollisionTelemetry.Contact> records,TargetDirections directions) {
         // Repeated identical native points share shape audits, not credit.
         var cache=new HashMap<AuditKey,Check>();
+        var witnesses=new HashMap<AuditKey,DirectionWitness>();
         var nativeBatch=new OwnerResolver.NativeAuditBatch(server,dimension);
         var ownerOffsets=new HashMap<String,net.minecraft.core.BlockPos>();
         var inconsistentOffsets=new java.util.HashSet<String>();
@@ -95,9 +100,14 @@ public final class SableContactRegions {
             if(point==null)return new Check(List.of(),0,false,"UNVERIFIED","NATIVE_POINT_OR_FRAME_MISSING");
             var key=new AuditKey(owner,point,onA?contact.frameA():contact.frameB());
             var prior=cache.get(key);
-            if(prior!=null)return new Check(prior.targets(),0,false,prior.method(),prior.detail());
+            if(prior!=null){
+                if(directions.active())observeDirection(directions,nativeBatch,contact,owner,point,witnesses.get(key));
+                return new Check(prior.targets(),0,false,prior.method(),prior.detail());
+            }
             var positions=SableConsumerTargets.cells(point);
             var found=new LinkedHashSet<GameImpactCredit.Target>();
+            var cells=new HashMap<GameImpactCredit.Target,net.minecraft.core.BlockPos>();
+            boolean uncertain=false;
             int checked=0,reused=0;
             for(var pos:positions){
                 // Only a *new owner/cell* consumes a block lookup budget.
@@ -115,8 +125,9 @@ public final class SableContactRegions {
                             pos.getY()-targetKey.y(),pos.getZ()-targetKey.z());
                     var previous=ownerOffsets.putIfAbsent(owner,offset);
                     if(previous!=null && !previous.equals(offset))inconsistentOffsets.add(owner);
-                    found.add(new GameImpactCredit.Target(owner,targetKey.x()+","+targetKey.y()+","+targetKey.z(),targetKey.fingerprint()));
-                }
+                    var target=new GameImpactCredit.Target(owner,targetKey.x()+","+targetKey.y()+","+targetKey.z(),targetKey.fingerprint());
+                    found.add(target);if(directions.active())cells.put(target,pos);
+                }else if(evidence.status()!=OwnerResolver.Status.NO_TARGET&&!java.util.Set.of("CACHED_SHAPE_POINT_MISS","PLOT_SHAPE_EMPTY","WORLD_SHAPE_EMPTY","BLOCK_MISSING_OR_AIR").contains(evidence.detail()))uncertain=true;
             }
             Check result;
             if(!found.isEmpty())result=new Check(new ArrayList<>(found),checked,false,"R2_CONTACT_REGION",
@@ -129,6 +140,10 @@ public final class SableContactRegions {
                         "R2_NO_SHAPE_R3_CROSS_PHASE_UNCALIBRATED");
             }
             cache.put(key,result);
+            if(directions.active()){
+                var witness=new DirectionWitness(cells,uncertain);witnesses.put(key,witness);
+                observeDirection(directions,nativeBatch,contact,owner,point,witness);
+            }
             return result;
         }, RUNTIME_MAX_UNIQUE_CELLS_PER_SIDE);
         // Each evidenced source-local surface may contribute real shape-proven
@@ -158,6 +173,8 @@ public final class SableContactRegions {
                 int already=side==0?collected.checksA():collected.checksB();
                 int[] additional={0};
                 boolean[] exceeded={false};
+                var patchAxis=directions.uniformPatchAxis(owner);
+                var patchFaces=new java.util.HashSet<GameImpactCredit.Target>();
                 var patch=ContactFacePatch.reconstruct(dimension,owner,offset,originals,records,(pos,point)-> {
                     net.minecraft.core.BlockPos absolute;
                     try { absolute=new net.minecraft.core.BlockPos(Math.addExact(pos.getX(),offset.getX()),
@@ -172,17 +189,20 @@ public final class SableContactRegions {
                     if(sample.newCell())additional[0]++;
                     if(!sample.result().verified())return null;
                     var key=sample.result().key();
-                    return new GameImpactCredit.Target(owner,
-                            key.x()+","+key.y()+","+key.z(),key.fingerprint());
+                    var target=new GameImpactCredit.Target(owner,key.x()+","+key.y()+","+key.z(),key.fingerprint());
+                    if(patchAxis!=null&&nativeBatch.targetFace(owner,absolute,new FrameMath.Vec(
+                            point.x()+offset.getX(),point.y()+offset.getY(),point.z()+offset.getZ()),patchAxis))patchFaces.add(target);
+                    return target;
                 });
                 if(side==0){shapeChecksA=additional[0];attemptedA=patch.attempted();}
                 else {shapeChecksB=additional[0];attemptedB=patch.attempted();}
                 int size=originals.size()+patch.added().size();
                 if(!exceeded[0] && size<=ContactCreditLedger.MAX_TARGETS_PER_SIDE
                         && joined.size()+patch.added().size()<=ContactCreditLedger.MAX_REGIONS) {
-                    for(var target:patch.added())joined.add(side==0
-                            ?new ContactCreditLedger.Region(target,null)
-                            :new ContactCreditLedger.Region(null,target));
+                    for(var target:patch.added()){
+                        joined.add(side==0?new ContactCreditLedger.Region(target,null):new ContactCreditLedger.Region(null,target));
+                        if(directions.active())directions.patch(target,patch.planarInterior().contains(target)&&patchFaces.contains(target)?patchAxis:null);
+                    }
                     if(side==0)expandedA=patch.added().size();
                     else expandedB=patch.added().size();
                 }
@@ -197,6 +217,10 @@ public final class SableContactRegions {
                     collected.rejected(),collected.methodA(),collected.methodB(),collected.trace());
         }
         var t=collected.trace();
+        if(directions.active())for(var region:collected.regions()){
+            if(region.a()!=null)directions.seed(region.a());
+            if(region.b()!=null)directions.seed(region.b());
+        }
         var stats=nativeBatch.stats();
         var t2=new Trace(t.failure(),t.sourceIndex(),t.processedRecords(),
                 Math.max(0,RUNTIME_MAX_UNIQUE_CELLS_PER_SIDE-collected.checksA()),
@@ -219,6 +243,15 @@ public final class SableContactRegions {
     }
     private record AuditKey(String owner, FrameMath.Vec point,
                             NativeCollisionTelemetry.OwnerFrame frame) {}
+    private record DirectionWitness(java.util.Map<GameImpactCredit.Target,net.minecraft.core.BlockPos> cells,boolean uncertain) {}
+    private static void observeDirection(TargetDirections directions,OwnerResolver.NativeAuditBatch batch,
+                                         NativeCollisionTelemetry.Contact contact,String owner,FrameMath.Vec point,DirectionWitness witness){
+        var axes=directions.axis(owner,contact);
+        var faces=new ArrayList<GameImpactCredit.Target>();
+        if(axes!=null)for(var entry:witness.cells().entrySet())
+            if(batch.targetFace(owner,entry.getValue(),point,axes))faces.add(entry.getKey());
+        directions.observe(witness.cells().keySet(),faces,axes,witness.uncertain());
+    }
     /** Testable no-world-evidence policy: never approve a side from a guessed owner. */
     public static Result collect(GameImpactCredit.Pair pair,
                                  List<NativeCollisionTelemetry.Contact> records,Inspector inspector) {

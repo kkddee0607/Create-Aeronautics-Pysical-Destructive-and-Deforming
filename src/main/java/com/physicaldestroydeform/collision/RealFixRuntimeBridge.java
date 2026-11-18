@@ -406,7 +406,8 @@ public final class RealFixRuntimeBridge {
                 if(probeReimpact && auditEligible)priorTracking.lastRegionalAuditTick=now;
                 if(firstUncreditedRetry)priorTracking.lastUncreditedAudit=now;
                 long r2Start=auditEligible?System.nanoTime():0;
-                var regions=auditEligible?SableContactRegions.audit(server,stamp.dimension,pair,massSafe.contacts())
+                var targetDirections=auditEligible?TargetDirections.forEvent(pair,massSafe.contacts(),pre,stamp.tick,complete&&massSafe.maskedFrames()==0):new TargetDirections();
+                var regions=auditEligible?SableContactRegions.audit(server,stamp.dimension,pair,massSafe.contacts(),targetDirections)
                         :SableContactRegions.skippedDuplicate();
                 long r2Nanos=auditEligible?System.nanoTime()-r2Start:0;
                 if(auditEligible){
@@ -649,7 +650,6 @@ public final class RealFixRuntimeBridge {
                     }
                     var materialSnapshot=MaterialRegistry.snapshot();
                     var targetMaterials=new com.physicaldestroydeform.material.TargetMaterials(server,stamp.dimension,materialSnapshot);
-                    var targetDirections=result.credited()&&massSafe!=null?TargetDirections.capture(server,pair,massSafe.contacts(),pre,stamp.tick,complete&&massSafe.maskedFrames()==0):new TargetDirections();
                     targetMaterials.setDirections(targetDirections);
                     // Sable 2.0.6 exports opposing local manifold normals per
                     // native record. Validate each pair, then average all
@@ -711,7 +711,9 @@ public final class RealFixRuntimeBridge {
                             pair,result,ContactCreditLedger.Source.SABLE_POST_EFFECT,regions.regions(),
                             OwnerResolver.propagationSnapshot(server,stamp.dimension),
                             targetMaterials::material,credit.settings(),damageSettings,
-                            nativeNormal.owners(),event->{targetDirections.trace(event);if(fTrace!=null)fTrace.accept(event);},materialSnapshot::resolveFingerprint):null;
+                            nativeNormal.owners(),targetDirections.hasProvenSeed()||fTrace!=null
+                                    ?event->{targetDirections.trace(event);if(fTrace!=null)fTrace.accept(event);}:null,
+                            materialSnapshot::resolveFingerprint):null;
                     long propagationNanos=System.nanoTime()-propagationStart;
                     boolean granted=grant!=null && grant.credited();
                     if(result.credited() && !granted) {
@@ -727,6 +729,7 @@ public final class RealFixRuntimeBridge {
                     }
                     if(granted) {
                         targetDirections.bind(grant,credit.settings(),targetMaterials::material);
+                        log.info("[PDD-DEFORM-EVIDENCE] credit={} {}",grant.id(),targetDirections.summary());
                         t.lastCreditedPeak=currentPeak;
                         t.quietForceFrames=0;
                         t.lastCreditedTick=now;

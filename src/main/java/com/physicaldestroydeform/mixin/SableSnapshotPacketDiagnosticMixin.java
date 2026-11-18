@@ -28,7 +28,7 @@ public abstract class SableSnapshotPacketDiagnosticMixin {
     @Inject(method="handleClient(Lnet/minecraft/world/level/Level;Ldev/ryanhcode/sable/network/packets/PacketReceiveMode;)V",
             at=@At("HEAD"),remap=false,require=1)
     private void pdd$traceUnmappedPlot(Level level,PacketReceiveMode mode,CallbackInfo ci) {
-        if(!Boolean.getBoolean("pdd.traceSublevelPackets") || PDD_MISSING_LOGGED.get()>=32)return;
+        if(!Boolean.parseBoolean(System.getProperty("pdd.traceSublevelPackets","true")) || PDD_MISSING_LOGGED.get()>=32)return;
         try {
             SubLevelContainer container=SubLevelContainer.getContainer(level);
             for(var entry:entries) {

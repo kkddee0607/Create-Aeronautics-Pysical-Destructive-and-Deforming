@@ -76,8 +76,8 @@ public final class MoveRuntime {
     }
     private void trace(long tick,String status,MovePlan p,double candidate,double paid){
         if(logTick!=tick){logTick=tick;logged=0;}
-        if(TRACE&&logged++<16)log.info("[PDD-DEFORM] phase=RESULT gameTick={} status={} id={} source={} steps={} K={} F={} reservedQ={} blockedCandidateQ={} reservedCapQ={} shortfall={} normalFixed={} priorFixed={}",
-                tick,status,p.creditId(),p.source(),p.steps(),p.k(),p.sourceF(),p.reservedQ(),candidate,paid,Math.max(0,candidate-paid),p.eventNormalDamageFixed(),p.damageBeforeFixed());
+        if(TRACE&&logged++<16)log.info("[PDD-DEFORM] phase=RESULT gameTick={} status={} id={} source={} steps={} K={} F={} FSource={} reservedQ={} blockedCandidateQ={} reservedCapQ={} shortfall={} normalFixed={} priorFixed={}",
+                tick,status,p.creditId(),p.source(),p.steps(),p.k(),p.sourceF(),p.sourceF()>0?"TARGET_EVIDENCE":"UNAVAILABLE",p.reservedQ(),candidate,paid,Math.max(0,candidate-paid),p.eventNormalDamageFixed(),p.damageBeforeFixed());
     }
     /** Coordinate-level lock independent of a block fingerprint. External changes invalidate CAS. */
     public static final class Fences {
