@@ -6,6 +6,8 @@ import com.physicaldestroydeform.DamageModel;
 import com.physicaldestroydeform.MaterialProperties;
 import com.physicaldestroydeform.state.SparseStateKey;
 import java.nio.file.*;
+import java.util.HashSet;
+import java.util.Set;
 
 /** Pure JUnit contract. Actual NeoForge block events/drops require in-game verification. */
 final class WorldCommitIntegrationTest {
@@ -49,11 +51,13 @@ final class WorldCommitIntegrationTest {
     private static class FakeWorld implements WorldCommitCore.WorldGateway {
         boolean loaded=true,air,permission=true,entity,unsafe,unbreakable,thread=true,altered;
         int breaks,drops;
+        final Set<SparseStateKey> broken=new HashSet<>();
         @Override public boolean isServerThread(){return thread;}
         @Override public WorldCommitCore.Observation readIfLoaded(SparseStateKey key){
             if(!loaded)return null;
+            boolean cellAir=air||broken.contains(key);
             return new WorldCommitCore.Observation(DIM,key.fingerprint(),1,altered?"1-new":"0-fingerprint-sha",
-                    true,air,entity&&!air,unsafe&&!air,unbreakable&&!air,false);
+                    true,cellAir,entity&&!cellAir,unsafe&&!cellAir,unbreakable&&!cellAir,false);
         }
         @Override public WorldCommitCore.Permission canDamage(SparseStateKey key,WorldCommitCore.Observation read) {
             return permission?WorldCommitCore.Permission.ALLOW:WorldCommitCore.Permission.DENY;
@@ -62,7 +66,7 @@ final class WorldCommitIntegrationTest {
             return permission?WorldCommitCore.Permission.ALLOW:WorldCommitCore.Permission.DENY;
         }
         @Override public boolean breakVanillaOnce(SparseStateKey key) {
-            breaks++;if(air)return false;air=true;drops++;return true;
+            breaks++;if(air||!broken.add(key))return false;drops++;return true;
         }
     }
     @Test void accumulatedStoneFixedDamageSurvivesReloadAndBreakDropsOnce() throws Exception {
@@ -169,11 +173,43 @@ final class WorldCommitIntegrationTest {
         var journal=new WorldReceiptJournal(Files.createTempDirectory("pdd-64-").resolve("world.wal"));
         var engine=new WorldCommitCore(journal,DamageModel.Settings.defaults(),1);
         engine.submit(intent("A",at(4),1500));engine.submit(intent("B",at(5),1500));
-        assertEquals(1,engine.tick(new FakeWorld(),201).stream()
+        var world=new FakeWorld();
+        var first=engine.tick(world,201);
+        assertEquals(1,first.stream()
                 .filter(x->x.result()==WorldCommitCore.Outcome.APPLIED_BREAK).count());
         assertEquals(1,engine.queued());
-        assertTrue(engine.tick(new FakeWorld(),202).stream()
+        assertEquals("BREAK_CAP",first.getLast().reason());
+        assertTrue(world.readIfLoaded(at(4)).isAir());
+        assertFalse(world.readIfLoaded(at(5)).isAir());
+        assertTrue(engine.tick(world,202).stream()
                 .anyMatch(x->x.result()==WorldCommitCore.Outcome.APPLIED_BREAK));
+        assertTrue(world.readIfLoaded(at(5)).isAir());
+        assertEquals(0,engine.queued());assertEquals(2,world.breaks);assertEquals(2,world.drops);
+    }
+    @Test void repeatedCallsInSameTickCannotResetBreakCapOrLoseDurableQ() throws Exception {
+        var path=Files.createTempDirectory("pdd-break-cap-durable-");
+        var journal=new WorldPersistentJournal(path.resolve("new"),path.resolve("legacy"));
+        var settings=DamageModel.Settings.defaults();
+        var engine=new WorldCommitCore(journal,settings,1);
+        var a=intent("A",at(4),1500);var b=intent("B",at(5),1500);
+        var world=new FakeWorld();
+        engine.submit(a);engine.submit(b);
+        assertEquals(WorldCommitCore.Outcome.APPLIED_BREAK,engine.tick(world,201,1).getFirst().result());
+        var pending=journal.receipt("B");
+        assertEquals(WorldReceiptJournal.Status.DEFERRED,pending.status());
+        assertEquals(b,pending.pending().intent());
+        assertEquals("BREAK_CAP",engine.tick(world,201).getFirst().reason());
+        assertEquals(1,engine.queued());assertEquals(1,world.drops);
+        assertEquals(pending,journal.receipt("B"));
+        var reopened=new WorldPersistentJournal(path.resolve("new"),path.resolve("legacy"));
+        assertEquals(pending,reopened.receipt("B"));
+        var recovered=new WorldCommitCore(reopened,settings,1);
+        assertEquals(1,recovered.queued());
+        assertEquals(WorldCommitCore.Outcome.DUPLICATE,recovered.submit(b).result());
+        assertEquals(WorldCommitCore.Outcome.APPLIED_BREAK,recovered.tick(world,202).getFirst().result());
+        assertEquals(WorldReceiptJournal.Status.APPLIED,reopened.receipt("B").status());
+        assertEquals(0,recovered.queued());assertEquals(2,world.breaks);assertEquals(2,world.drops);
+        assertEquals(WorldCommitCore.Outcome.DUPLICATE,recovered.submit(b).result());
     }
     @Test void damageOnlyDoesNotRequestBreakAuthorizationAndBreakVetoIsFinal() throws Exception {
         var journal=new WorldReceiptJournal(Files.createTempDirectory("pdd-break-event-").resolve("world.wal"));

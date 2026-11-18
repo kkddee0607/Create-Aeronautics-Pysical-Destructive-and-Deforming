@@ -22,10 +22,12 @@ public final class WorldCommitCoreSelfTest {
         boolean flipAfterCanBreak=false,breakReportsFalse=false;
         String incarnation="incarnation-1";
         int drops,breaks;
+        final Set<SparseStateKey> broken=new HashSet<>();
         @Override public boolean isServerThread(){return thread;}
         @Override public WorldCommitCore.Observation readIfLoaded(SparseStateKey key) {
             if(!loaded)return null;
-            return new WorldCommitCore.Observation(DIM,key.fingerprint(),1,incarnation,true,air,be&&!air,multiblock&&!air,immune&&!air,stepping);
+            boolean cellAir=air||broken.contains(key);
+            return new WorldCommitCore.Observation(DIM,key.fingerprint(),1,incarnation,true,cellAir,be&&!cellAir,multiblock&&!cellAir,immune&&!cellAir,stepping);
         }
         @Override public WorldCommitCore.Permission canDamage(SparseStateKey key,WorldCommitCore.Observation expected) {
             return deny?WorldCommitCore.Permission.DENY:WorldCommitCore.Permission.ALLOW;
@@ -35,8 +37,8 @@ public final class WorldCommitCoreSelfTest {
             return deny||cancel?WorldCommitCore.Permission.DENY:WorldCommitCore.Permission.ALLOW;
         }
         @Override public boolean breakVanillaOnce(SparseStateKey key) {
-            breaks++;if(air)return false;
-            air=true;drops++;return !breakReportsFalse;
+            breaks++;if(air||!broken.add(key))return false;
+            drops++;return !breakReportsFalse;
         }
     }
     public static void main(String[] args)throws Exception{
@@ -107,22 +109,23 @@ public final class WorldCommitCoreSelfTest {
         check(vanillaImmune.breaks==0&&vanillaImmune.drops==0,"vanilla immune untouched");
         // Previously whitelisted by type only: slime and netherite are now
         // allowed if they are ordinary breakable World cells.
+        long allowedTick=108;
         for (String id : List.of("minecraft:slime_block", "minecraft:netherite_block", "example:metal_block")) {
             int x=id.equals("minecraft:slime_block")?63:id.equals("minecraft:netherite_block")?64:65;
             var k=new SparseStateKey(DIM,"WORLD",DIM,1,x,64,0,id+"|Block{"+id+"}");
             var intent=new WorldCommitCore.Intent("allow-"+id,k,"incarnation-1",500,STONE,1,100,true);
             var allowed=new Fake();
             core.submit(intent);
-            check(core.tick(allowed,108).get(0).result()==WorldCommitCore.Outcome.APPLIED_BREAK,
+            check(core.tick(allowed,allowedTick++).get(0).result()==WorldCommitCore.Outcome.APPLIED_BREAK,
                     "type allow-list removed: "+id);
             check(allowed.breaks==1&&allowed.drops==1,"one break/drop "+id);
         }
         var unloaded=new Fake();unloaded.loaded=false;
         core.submit(hit("unloaded",key(8),500));
-        check(core.tick(unloaded,109).get(0).result()==WorldCommitCore.Outcome.DEFERRED,"unloaded deferred");
+        check(core.tick(unloaded,111).get(0).result()==WorldCommitCore.Outcome.DEFERRED,"unloaded deferred");
         check(core.queued()==1,"unloaded retained");
         unloaded.loaded=true;
-        check(core.tick(unloaded,110).get(0).result()==WorldCommitCore.Outcome.APPLIED_BREAK,"deferred replay same run");
+        check(core.tick(unloaded,112).get(0).result()==WorldCommitCore.Outcome.APPLIED_BREAK,"deferred replay same run");
         // Interrupted PREPARED receipt must be quarantined after reboot, never invoked again.
         Path crashPath=dir.resolve("crash.dat");
         var interrupted=new WorldReceiptJournal(crashPath);
@@ -150,12 +153,16 @@ public final class WorldCommitCoreSelfTest {
         var capped=new WorldCommitCore(new WorldReceiptJournal(dir.resolve("cap.dat")),
                 DamageModel.Settings.defaults(),1);
         capped.submit(hit("cap-1",key(11),500));capped.submit(hit("cap-2",key(12),500));
-        var cap1=capped.tick(new Fake(),114);
+        var capWorld=new Fake();
+        var cap1=capped.tick(capWorld,114);
         check(cap1.stream().filter(d->d.result()==WorldCommitCore.Outcome.APPLIED_BREAK).count()==1,
                 "per tick world break cap");
         check(capped.queued()==1,"cap defers second break");
-        check(capped.tick(new Fake(),115).stream().anyMatch(d->d.result()==WorldCommitCore.Outcome.APPLIED_BREAK),
+        check(capped.tick(capWorld,114).getFirst().reason().equals("BREAK_CAP"),"same tick does not reset cap");
+        check(capped.queued()==1&&capWorld.drops==1,"same tick retains pending block");
+        check(capped.tick(capWorld,115).stream().anyMatch(d->d.result()==WorldCommitCore.Outcome.APPLIED_BREAK),
                 "cap backlog progresses");
+        check(capped.queued()==0&&capWorld.breaks==2&&capWorld.drops==2,"each distinct block breaks once");
         // CAS after claim/event hook: any changed observation aborts before break.
         var raced=new Fake();raced.flipAfterCanBreak=true;
         core.submit(hit("race-cas",key(20),500));
