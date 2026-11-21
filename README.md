@@ -1,4 +1,4 @@
-# PDD 0.6.0 moreFix — Physical Destructive and Deforming
+# PDD 0.6.0 deformFix — Physical Destructive and Deforming
 
 Minecraft 1.21.1 · Java 21 · NeoForge 21.1.228 · Sable 2.0.6 · Create 6.0.10 · Aeronautics 1.3.2. 선택 호환: Copycats+ 3.0.11.
 
@@ -15,6 +15,8 @@ Minecraft 1.21.1 · Java 21 · NeoForge 21.1.228 · Sable 2.0.6 · Create 6.0.10
 [0.6.0 Fix4: 대형 충돌 응력 예약·분할 처리·로그 경량화](docs/verification/PDD-0.6.0-Fix4.md). 한쪽 F 상한 32,768, 양쪽 합계 65,536개까지 동일 예약으로 보존. 128개 파생 상한/512 공통 작업량/원본 TTL 유지. 대형 원장만 압축하고 원래 v4 해시 및 CRC를 유지한다. 월드 백업 필수.
 
 [0.6.0 moreFix: 시간 역행 복원·진단 연산 개선](docs/verification/PDD-0.6.0-moreFix.md). 기존 월드 전체 백업 후 적용한다. JAR 파일명은 `physical-destroy-deform-0.6.0-moreFix.jar`, 시작 로그는 `revision=moreFix`이다. 기존 Fix4 JAR와 동시에 설치하지 않는다.
+
+[0.6.0 deformFix: 접착된 Plot 벽 변형 안전 판정](docs/verification/PDD-0.6.0-deformFix.md). 동일 Plot의 검증된 Create Super Glue/Simulated Honey Glue 영역은 그대로 두고, 실제 엔티티와 구분한다. Sable의 18방향 연결성으로 이동 전후 연결을 검증한다. 기존 버전 대신 `physical-destroy-deform-0.6.0-deformFix.jar` 하나만 설치한다. 시작 로그: `revision=deformFix`.
 
 ## 기능
 
@@ -35,4 +37,4 @@ Minecraft 1.21.1 · Java 21 · NeoForge 21.1.228 · Sable 2.0.6 · Create 6.0.10
 
 실제 Gradle/JUnit, GitHub Actions 및 인게임 검증은 사용자 실행 전에는 NOT_RUN이다. 검증 로그의 주요 태그: `[PDD-0.6.0]`, `[PDD-STRESS-LEDGER]`, `[PDD-STRESS-APPLY]`, `[PDD-MOVE]`, `[PDD-DEFORM]`, `[PDD-DEFORM-Q]`, `[PDD-DEFORM-BLOCKED]`, `[PDD-COPYCAT]`, `[PDD-PERSIST]`. 상세 절차는 검증 문서를 참조한다.
 
-moreFix 기준 main SHA: `8a72c2f7e60525af07ec9331a13d67dd5bab3496`. 기존 저장 데이터는 백업한 뒤 사용하고 구버전으로 다운그레이드하지 않는다. 안전하지 않은 소유권, 재질, 이동, 연결성 또는 HeatMap 상태는 허용하지 않는다.
+deformFix 기준 moreFix ZIP은 main에서 확인한 커밋 `2723603a965b4b42ff9c806339819497b87d836f`에 업로드된 ZIP과 Git blob SHA가 일치한다. 기존 저장 데이터는 백업한 뒤 사용하고 구버전으로 다운그레이드하지 않는다. 안전하지 않은 소유권, 재질, 이동, 연결성 또는 HeatMap 상태는 허용하지 않는다.

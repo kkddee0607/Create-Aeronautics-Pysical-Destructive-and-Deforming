@@ -3,12 +3,15 @@ package com.physicaldestroydeform.deform;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.Function;
+import java.util.function.Predicate;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.level.Level;
+import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.FallingBlock;
 import net.minecraft.world.level.block.state.BlockState;
@@ -52,6 +55,32 @@ public final class MoveSafety {
         return state.isAir()||state.canBeReplaced()&&"minecraft".equals(BuiltInRegistries.BLOCK.getKey(state.getBlock()).getNamespace())
                 &&state.getCollisionShape(level,pos).isEmpty();
     }
+    /** Exact metadata types from the pinned Create and bundled Simulated JARs.
+     * Do not infer this from collision box, namespace, invisibility or a tag. */
+    public static boolean isAssemblyGlue(String className,String typeId){
+        return "com.simibubi.create.content.contraptions.glue.SuperGlueEntity".equals(className)
+                &&"create:super_glue".equals(typeId)
+                ||"dev.simulated_team.simulated.content.entities.honey_glue.HoneyGlueEntity".equals(className)
+                &&"simulated:honey_glue".equals(typeId);
+    }
+    public static Gate plotEntityGate(boolean knownGlue,boolean sameOwner){
+        return knownGlue?(sameOwner?Gate.APPROVED:Gate.UNKNOWN):Gate.BLOCKED;
+    }
+    /** Sable allocation is an axis-aligned rectangular chunk grid (getPlot).
+     * Check the anchor and four half-open horizontal corners, never load chunks. */
+    public static boolean glueWithinPlot(AABB bounds,double anchorX,double anchorZ,Predicate<ChunkPos> sameOwner){
+        if(bounds==null||!Double.isFinite(bounds.minY)||!Double.isFinite(bounds.maxY)
+                ||!(bounds.maxX>bounds.minX&&bounds.maxY>bounds.minY&&bounds.maxZ>bounds.minZ))return false;
+        double endX=Math.nextDown(bounds.maxX),endZ=Math.nextDown(bounds.maxZ);
+        return ownChunk(anchorX,anchorZ,sameOwner)&&ownChunk(bounds.minX,bounds.minZ,sameOwner)
+                &&ownChunk(bounds.minX,endZ,sameOwner)&&ownChunk(endX,bounds.minZ,sameOwner)
+                &&ownChunk(endX,endZ,sameOwner);
+    }
+    private static boolean ownChunk(double x,double z,Predicate<ChunkPos> sameOwner){
+        return Double.isFinite(x)&&Double.isFinite(z)&&x>=Integer.MIN_VALUE&&x<=Integer.MAX_VALUE
+                &&z>=Integer.MIN_VALUE&&z<=Integer.MAX_VALUE
+                &&sameOwner.test(new ChunkPos((int)Math.floor(x)>>4,(int)Math.floor(z)>>4));
+    }
     private static final class CreateChecks {
         static final Method ALLOWED,ATTACHED;
         static final Class<? extends Entity> GLUE;
@@ -70,6 +99,11 @@ public final class MoveSafety {
      * independently relocatable; unknown checks never authorize mutation. Copycat BE approval
      * is a separate payload check in each owner gateway. */
     public static Gate checkConnections(ServerLevel level,BlockPos pos,BlockState state) {
+        return checkConnections(level,pos,state,e->Gate.BLOCKED);
+    }
+    /** Plot-only caller may prove a glue region remains in the same allocation.
+     * The World entry above retains the original unconditional glue veto. */
+    public static Gate checkConnections(ServerLevel level,BlockPos pos,BlockState state,Function<Entity,Gate> glueGate) {
         if(!loaded(level,pos))return Gate.DEFERRED;
         for(Direction side:Direction.values())if(!loaded(level,pos.relative(side)))return Gate.DEFERRED;
         try {
@@ -78,7 +112,11 @@ public final class MoveSafety {
                     ||!((Boolean)CreateChecks.ALLOWED.invoke(null,state,level,pos))))return Gate.BLOCKED;
             // Query the real glue entities (collectCropped would create temporary entities).
             AABB area=new AABB(pos.getX(),pos.getY(),pos.getZ(),pos.getX()+1,pos.getY()+1,pos.getZ()+1);
-            if(!level.getEntitiesOfClass(CreateChecks.GLUE,area.inflate(0.001)).isEmpty())return Gate.BLOCKED;
+            for(Entity glue:level.getEntitiesOfClass(CreateChecks.GLUE,area.inflate(0.001))){
+                Gate decision=glueGate.apply(glue);
+                if(decision==null)return Gate.UNKNOWN;
+                if(decision!=Gate.APPROVED)return decision;
+            }
             for(Direction side:Direction.values()) {
                 BlockPos adjacent=pos.relative(side);BlockState neighbor=level.getBlockState(adjacent);
                 if(!state.isAir()&&((Boolean)CreateChecks.ATTACHED.invoke(null,state,level,pos,side)))return Gate.BLOCKED;

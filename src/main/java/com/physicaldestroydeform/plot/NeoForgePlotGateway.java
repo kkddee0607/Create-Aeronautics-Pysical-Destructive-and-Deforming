@@ -490,11 +490,32 @@ public final class NeoForgePlotGateway implements WorldCommitCore.WorldGateway,M
         }
         return MoveTransactionExecutor.Gate.APPROVED;
     }
-    private static boolean entityClear(Cell c){
+    private static boolean assemblyGlue(Entity entity){
+        return MoveSafety.isAssemblyGlue(entity.getClass().getName(),
+                String.valueOf(BuiltInRegistries.ENTITY_TYPE.getKey(entity.getType())));
+    }
+    private static MoveTransactionExecutor.Gate plotEntityGate(Cell c,Entity entity){
+        boolean glue=assemblyGlue(entity);
+        return MoveSafety.plotEntityGate(glue,glue&&ownGlueRegion(c,entity));
+    }
+    private static boolean ownGlueRegion(Cell c,Entity entity){
+        if(entity.level()!=c.level())return false;
+        var container=SubLevelContainer.getContainer(c.level());
+        return container!=null&&MoveSafety.glueWithinPlot(entity.getBoundingBox(),entity.getX(),entity.getZ(),
+                chunk->container.getPlot(chunk)==c.sub().getPlot());
+    }
+    private static MoveTransactionExecutor.Gate entityGate(Cell c){
         // The EmbeddedPlotLevelAccessor translates this LOCAL AABB by its center.
-        // Glue (including simulated:honey_glue) and actual entity occupancy both veto.
+        // Retain verified assembly regions in place. A moved block may leave
+        // that region; never move, clone, trim or remove its glue entity.
         BlockPos p=c.local();var area=new AABB(p.getX(),p.getY(),p.getZ(),p.getX()+1d,p.getY()+1d,p.getZ()+1d).inflate(0.001);
-        return c.accessor().getEntities((Entity)null,area,e->!e.isSpectator()).isEmpty();
+        var result=MoveTransactionExecutor.Gate.APPROVED;
+        for(Entity entity:c.accessor().getEntities((Entity)null,area,e->!e.isSpectator())){
+            var gate=plotEntityGate(c,entity);
+            if(gate==MoveTransactionExecutor.Gate.BLOCKED)return gate;
+            if(gate==MoveTransactionExecutor.Gate.UNKNOWN)result=gate;
+        }
+        return result;
     }
     private static double selfMass(Cell c){
         var tracker=c.sub().getSelfMassTracker();
@@ -536,7 +557,8 @@ public final class NeoForgePlotGateway implements WorldCommitCore.WorldGateway,M
                     var state=c.level().getBlockState(pos);
                     if(!state.isAir()||!state.getFluidState().isEmpty())return MoveTransactionExecutor.Gate.UNKNOWN;
                 }
-        return c.level().getEntitiesOfClass(Entity.class,area,e->!e.isSpectator()).isEmpty()
+        return c.level().getEntitiesOfClass(Entity.class,area,e->!e.isSpectator()
+                &&plotEntityGate(c,e)!=MoveTransactionExecutor.Gate.APPROVED).isEmpty()
                 ?MoveTransactionExecutor.Gate.APPROVED:MoveTransactionExecutor.Gate.UNKNOWN;
     }
     private boolean registeredMaterialMatches(MoveTransactionJournal.BeforeImage b){
@@ -578,19 +600,25 @@ public final class NeoForgePlotGateway implements WorldCommitCore.WorldGateway,M
             for(BlockPos p:MoveSafety.path(a.local(),d.local())){
                 Cell step=local(a,p);
                 if(!sameOwner(a,step))return deferred;
-                if(!clearPath(step)||!authorized(step)||!entityClear(step))return gate(b,blocked,"DIAGONAL_CORRIDOR_BLOCKED");
+                if(!clearPath(step))return gate(b,blocked,"PLOT_CORRIDOR_OCCUPIED");
+                if(!authorized(step))return gate(b,blocked,"PLOT_CORRIDOR_CLAIM_DENIED");
+                var occupancy=entityGate(step);
+                if(occupancy!=MoveTransactionExecutor.Gate.APPROVED)
+                    return gate(b,occupancy,occupancy==blocked?"PLOT_CORRIDOR_ENTITY":"PLOT_CORRIDOR_GLUE_OWNER_UNVERIFIED");
                 var physical=physicalClear(step);
                 if(physical!=MoveTransactionExecutor.Gate.APPROVED)return gate(b,physical,"PHYSICAL_ROUTE_UNVERIFIED");
             }
-            if(!entityClear(a)||!s.canSurvive(d.accessor(),d.local()))
-                return gate(b,blocked,"VETO_NEIGHBOR_SUPPORT_OR_KINETIC");
+            var occupancy=entityGate(a);
+            if(occupancy!=MoveTransactionExecutor.Gate.APPROVED)
+                return gate(b,occupancy,occupancy==blocked?"PLOT_SOURCE_ENTITY":"PLOT_SOURCE_GLUE_OWNER_UNVERIFIED");
+            if(!s.canSurvive(d.accessor(),d.local()))return gate(b,blocked,"VETO_NEIGHBOR_SUPPORT_OR_KINETIC");
             var dependency=dependencies(a,d);
             if(dependency!=MoveTransactionExecutor.Gate.APPROVED)return gate(b,dependency,"SOURCE_NEIGHBOR_UNSAFE");
             dependency=dependencies(d,a);
             if(dependency!=MoveTransactionExecutor.Gate.APPROVED)return gate(b,dependency,"DEST_NEIGHBOR_UNSAFE");
-            dependency=MoveSafety.checkConnections(a.level(),a.allocated(),s);
+            dependency=MoveSafety.checkConnections(a.level(),a.allocated(),s,e->plotEntityGate(a,e));
             if(dependency!=MoveTransactionExecutor.Gate.APPROVED)return gate(b,dependency,"VETO_SOURCE_GLUE_OR_KINETIC");
-            dependency=MoveSafety.checkConnections(d.level(),d.allocated(),Blocks.AIR.defaultBlockState());
+            dependency=MoveSafety.checkConnections(d.level(),d.allocated(),Blocks.AIR.defaultBlockState(),e->plotEntityGate(d,e));
             if(dependency!=MoveTransactionExecutor.Gate.APPROVED)return gate(b,dependency,"VETO_DEST_GLUE_OR_KINETIC");
             // SableCommonEvents.handleBlockChange calls HeatMap onSolidAdded/
             // onSolidRemoved on the actual air<->nonair transition (2.0.6).
