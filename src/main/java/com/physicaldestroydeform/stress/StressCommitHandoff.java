@@ -85,7 +85,33 @@ public final class StressCommitHandoff {
      * immutable list element in O(1), not a full contains() for every plan. */
     public static boolean offer(WorldCommitCore core,StressReservationJournal.Entry sealed,
                                 PlannedNode plan,WorldCommitCore.Intent original,long gameTick,int index)throws IOException {
-        Objects.requireNonNull(core);Objects.requireNonNull(sealed);
+        Objects.requireNonNull(core);validate(sealed,plan,original,index);
+        if(sealed.clockRolledBack()||gameTick<sealed.reservation().createdGameTick())
+            throw new IllegalArgumentException("stress game clock rollback");
+        long expires=deadline(sealed.reservation().createdGameTick(),sealed.reservation().policy().ttlTicks());
+        var result=core.trySubmitSealed(original,sealed.reservation().settings(),gameTick,expires);
+        if(core.ioFault())throw new IOException("stress commit journal fault: "+result.reason());
+        var receipt=result.receipt();
+        if(!verifyReceipt(original,sealed.reservation().settings(),receipt))return false;
+        if(receipt.pending()!=null&&receipt.pending().expiresGameTick()!=expires)
+            throw new IOException("stress ApplyId aliases another deadline");
+        return true;
+    }
+
+    public static boolean cancelOnRollback(WorldCommitCore core,StressReservationJournal.Entry sealed,
+                                           PlannedNode plan,WorldCommitCore.Intent original,long tick,int index)throws IOException {
+        Objects.requireNonNull(core);validate(sealed,plan,original,index);
+        if(!sealed.clockRolledBack())throw new IllegalArgumentException("clock rollback was not saved");
+        var r=sealed.reservation();
+        core.abortSealedOnRollback(original,r.settings(),deadline(r.createdGameTick(),r.policy().ttlTicks()),tick);
+        return true;
+    }
+
+    public static long deadline(long created,long ttl){return created>Long.MAX_VALUE-ttl?Long.MAX_VALUE:created+ttl;}
+
+    private static void validate(StressReservationJournal.Entry sealed,PlannedNode plan,
+                                 WorldCommitCore.Intent original,int index) {
+        Objects.requireNonNull(sealed);
         Objects.requireNonNull(plan);Objects.requireNonNull(original);
         if(sealed.phase()==StressReservationJournal.Phase.RESERVED || index<0||index>=sealed.plans().size()
                 ||!sealed.plans().get(index).equals(plan))
@@ -103,15 +129,5 @@ public final class StressCommitHandoff {
                 || original.fFirstPreDamped()
                 || !DamageModel.plan(plan.incomingQ(),n.material(),new BlockDamageState(),reservation.settings()).equals(plan.plan()))
             throw new IllegalArgumentException("stress handoff changed sealed target or Q");
-        long created=reservation.createdGameTick(),ttl=reservation.policy().ttlTicks();
-        if(gameTick<created)throw new IllegalArgumentException("stress game clock rollback");
-        long expires=created>Long.MAX_VALUE-ttl?Long.MAX_VALUE:created+ttl;
-        var result=core.trySubmitSealed(original,reservation.settings(),gameTick,expires);
-        if(core.ioFault())throw new IOException("stress commit journal fault: "+result.reason());
-        var receipt=result.receipt();
-        if(!verifyReceipt(original,reservation.settings(),receipt))return false;
-        if(receipt.pending()!=null&&receipt.pending().expiresGameTick()!=expires)
-            throw new IOException("stress ApplyId aliases another deadline");
-        return true;
     }
 }

@@ -91,6 +91,7 @@ public final class WorldCommitCore {
     private void resetBreakBudget(long tick){if(breakBudgetTick!=tick){breakBudgetTick=tick;breakAttempts=0;}}
     private boolean ioFault;
     private java.util.function.Predicate<Intent> executionHold=intent->false;
+    private java.util.function.Predicate<Intent> rollbackHold=intent->false;
     @FunctionalInterface public interface DeformationHandler {
         void afterDamage(Intent intent,MovePlan plan,WorldReceiptJournal.State state,
                          DamageModel.Settings settings,long gameTick,long deadline);
@@ -100,6 +101,10 @@ public final class WorldCommitCore {
     /** Server-owned reservations may hold an intent without renewing its deadline. */
     public synchronized void setExecutionHold(java.util.function.Predicate<Intent> hold) {
         executionHold=Objects.requireNonNull(hold);
+    }
+    /** A marked reservation owns cancellation. Other queue entries may still proceed. */
+    public synchronized void setRollbackHold(java.util.function.Predicate<Intent> hold) {
+        rollbackHold=Objects.requireNonNull(hold);
     }
     public WorldCommitCore(WorldJournal journal,DamageModel.Settings settings,int breakCapPerTick) {
         this.journal=Objects.requireNonNull(journal);damageSettings=Objects.requireNonNull(settings);
@@ -149,6 +154,48 @@ public final class WorldCommitCore {
         if(!ioFault&&gameTick<=expiresGameTick&&queue.size()>=MAX_QUEUED&&journal.receipt(intent.applyId())==null)
             return new Decision(Outcome.DEFERRED,"STRESS_QUEUE_PRESSURE",null);
         return submitSealed(intent,settings,gameTick,expiresGameTick);
+    }
+    /** Record non-execution for a missing or unprepared ApplyId without admission,
+     * world access or a new deadline. Existing PREPARED and terminal results stay authoritative. */
+    public synchronized void abortSealedOnRollback(Intent intent,DamageModel.Settings settings,
+                                                    long deadline,long tick)throws IOException {
+        Objects.requireNonNull(intent);Objects.requireNonNull(settings);
+        if(deadline<0||tick<0||!journal.supportsPendingPayload())
+            throw new IllegalArgumentException("invalid sealed rollback cancellation");
+        if(ioFault)throw new IOException("commit journal fault before clock rollback cancellation");
+        var previous=journal.receipt(intent.applyId());
+        if(previous!=null){
+            if(!previous.id().equals(intent.applyId())||!previous.key().equals(intent.key())){
+                ioFault=true;throw new IOException("clock rollback ApplyId aliases another target");
+            }
+            if(previous.status()!=WorldReceiptJournal.Status.DEFERRED)return;
+            var pending=previous.pending();
+            if(pending==null||!pending.intent().equals(intent)||!pending.settings().equals(settings)
+                    ||pending.expiresGameTick()!=deadline){
+                ioFault=true;throw new IOException("clock rollback ApplyId aliases another payload, settings or deadline");
+            }
+        }
+        var result=finish(intent,WorldReceiptJournal.Status.ABORTED,Outcome.ABORTED,
+                "STRESS_CLOCK_ROLLBACK_UNUSED",null,tick);
+        if(ioFault)throw new IOException("clock rollback cancellation journal failed: "+result.reason());
+    }
+    /** Legacy compact stress archives retain receipt ownership but omit creation ticks.
+     * Production stress uses a fixed TTL, so a later saved deadline proves future creation. */
+    public synchronized int abortRecoveredFutureStress(long startupGameTick,long ttl,long tick,
+            java.util.function.Predicate<Intent> archived)throws IOException {
+        if(startupGameTick<0||ttl<1||tick<0)throw new IllegalArgumentException("invalid startup clock or TTL");
+        Objects.requireNonNull(archived);
+        long latest=startupGameTick>Long.MAX_VALUE-ttl?Long.MAX_VALUE:startupGameTick+ttl;
+        int cancelled=0;
+        for(var intent:queue){
+            if(!journal.recoveredUncertain(intent.applyId()))continue;
+            var receipt=journal.receipt(intent.applyId());
+            var pending=receipt==null?null:receipt.pending();
+            if(pending==null||pending.expiresGameTick()<=latest||!archived.test(intent))continue;
+            abortSealedOnRollback(intent,pending.settings(),pending.expiresGameTick(),tick);
+            cancelled++;
+        }
+        return cancelled;
     }
     private Decision enqueue(Intent intent,DamageModel.Settings settings,long gameTick,
                              long deadline,boolean sealedHandoff,boolean expired) {
@@ -221,6 +268,11 @@ public final class WorldCommitCore {
             var terminal=journal.receipt(intent.applyId());
             if(terminal!=null && terminal.status()!=WorldReceiptJournal.Status.DEFERRED){
                 results.add(new Decision(Outcome.DUPLICATE,"TERMINAL_RECEIPT_"+terminal.status(),terminal));
+                continue;
+            }
+            if(rollbackHold.test(intent)){
+                queue.addLast(intent);queuedIds.add(intent.applyId());
+                results.add(new Decision(Outcome.DEFERRED,"STRESS_CLOCK_ROLLBACK_HOLD",terminal));
                 continue;
             }
             var pending=terminal==null?null:terminal.pending();

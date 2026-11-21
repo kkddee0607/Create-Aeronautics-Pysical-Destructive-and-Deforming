@@ -49,12 +49,15 @@ sourceSets.test.runtimeClasspath += sourceSets.main.compileClasspath
 
 tasks.named('test', Test).configure { useJUnitPlatform() }
 jar {
+    // Keep mod/save version 0.6.0; distinguish the actual release artifact.
+    archiveClassifier.set('moreFix')
     manifest {
         attributes([
             'Specification-Title': 'Physical Destruction and Deforming',
             'Specification-Version': '0.6.0',
             'Implementation-Title': project.name,
-            'Implementation-Version': project.version
+            'Implementation-Version': project.version,
+            'PDD-Revision': 'moreFix'
         ])
     }
 }

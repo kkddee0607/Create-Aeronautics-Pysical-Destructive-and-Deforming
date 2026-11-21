@@ -30,6 +30,7 @@ public final class StressReservationJournal {
     private static final int MAX_SNAPSHOT_CELLS=7*(MAX_ROOTS+4096);
     private static final int MAGIC=0x50535452,VERSION=4;
     private static final int CLOSURE_HEADROOM=2048;
+    private static final String CLOCK_ROLLBACK_UNUSED="STRESS_CLOCK_ROLLBACK_UNUSED";
     public static final class CapacityException extends IOException {
         CapacityException(String reason){super(reason);}
     }
@@ -73,6 +74,7 @@ public final class StressReservationJournal {
     public record Entry(Reservation reservation,Phase phase,List<PlannedNode> plans,Ledger ledger,String reason,Map<Cell,Probe> snapshot) {
         public Entry(Reservation reservation,Phase phase,List<PlannedNode> plans,Ledger ledger,String reason){this(reservation,phase,plans,ledger,reason,Map.of());}
         public boolean holdsOrigins(){return phase==Phase.RESERVED||"ROOTS_PENDING".equals(reason);}
+        public boolean clockRolledBack(){return CLOCK_ROLLBACK_UNUSED.equals(reason);}
         public Entry {
             Objects.requireNonNull(reservation);Objects.requireNonNull(phase);text(reason);plans=List.copyOf(plans);snapshot=Map.copyOf(snapshot);
             if(snapshot.size()>Math.max(65536,7*(reservation.seeds().size()+reservation.policy().maxNodes())))
@@ -217,12 +219,24 @@ public final class StressReservationJournal {
         persistClosing(new Entry(old.reservation,Phase.SEALED,old.plans,closed,reason,old.snapshot));
     }
     public synchronized List<Entry> entries(){return List.copyOf(entries.values());}
+    /** Mark before serving a tick. A second restart after the clock catches up
+     * must still reconcile every saved ApplyId as cancelled. */
+    public synchronized void closeForClockRollback(String id)throws IOException {
+        ensureHealthy();var old=require(id);
+        if(old.clockRolledBack())return;
+        if(old.phase==Phase.CLOSED){
+            persistClosing(new Entry(old.reservation,old.phase,old.plans,old.ledger,CLOCK_ROLLBACK_UNUSED,old.snapshot));
+            return;
+        }
+        closeResidual(id,CLOCK_ROLLBACK_UNUSED);
+    }
     /** Call only after EVERY output ApplyId is durably queued or terminal in the commit journal. */
     public synchronized void acknowledgeHandoff(String creditId)throws IOException {
         ensureHealthy();Entry old=require(creditId);
         if(old.phase==Phase.CLOSED)return;
         if(old.phase!=Phase.SEALED||!old.ledger.finished()||old.ledger.pendingQ()!=0)throw new IllegalStateException("cannot close an unfinished handoff");
-        persistClosing(new Entry(old.reservation,Phase.CLOSED,old.plans,old.ledger,"HANDED_TO_DURABLE_COMMIT_JOURNAL",old.snapshot));
+        String reason=old.clockRolledBack()?old.reason:"HANDED_TO_DURABLE_COMMIT_JOURNAL";
+        persistClosing(new Entry(old.reservation,Phase.CLOSED,old.plans,old.ledger,reason,old.snapshot));
     }
     public synchronized void cancelUnplanned(String creditId,String reason)throws IOException {
         ensureHealthy();Entry old=require(creditId);
@@ -249,6 +263,12 @@ public final class StressReservationJournal {
     public synchronized boolean matchesArchivedRetry(Reservation r)throws IOException{return archive.matchesReservation(r,true);}
     public synchronized Ledger archivedLedger(String id){return archive.ledger(id);}
     public synchronized String sourceOwner(String originId){return sourceOwners.get(originId);}
+    synchronized boolean isArchivedHandoff(String applyId,Set<String> activeOutputs){
+        String owner=sourceOwners.get(applyId);
+        // Archived source ownership is explicit. Published legacy output IDs
+        // belong exclusively to the derived namespace and may outlive the plan.
+        return owner!=null?archive.contains(owner):isDerivedApplyId(applyId)&&!activeOutputs.contains(applyId);
+    }
     public synchronized int activeCount(){return entries.size();}
     public synchronized int archivedCount(){return archive.size();}
     public synchronized long activeBytes(){return bytes;}
@@ -313,6 +333,14 @@ public final class StressReservationJournal {
             }
             return "STRESS:"+hash(bytes.toByteArray());
         }catch(IOException impossible){throw new UncheckedIOException(impossible);}
+    }
+    static boolean isDerivedApplyId(String id){
+        if(id.length()!=71||!id.startsWith("STRESS:"))return false;
+        for(int i=7;i<id.length();i++){
+            char ch=id.charAt(i);
+            if(!(ch>='0'&&ch<='9'||ch>='a'&&ch<='f'))return false;
+        }
+        return true;
     }
     private static String filename(String id){return hash(id.getBytes(java.nio.charset.StandardCharsets.UTF_8))+".psr";}
     static String hash(byte[] bytes){

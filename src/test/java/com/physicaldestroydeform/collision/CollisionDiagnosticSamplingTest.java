@@ -6,6 +6,14 @@ import static com.physicaldestroydeform.collision.SableContactRegions.Status.*;
 import static org.junit.jupiter.api.Assertions.*;
 
 final class CollisionDiagnosticSamplingTest {
+    @Test void previewModeDefaultsToSummaryAndSupportsExplicitFullOrOff() {
+        var summary=RealFixRuntimeBridge.PreviewMode.SUMMARY;
+        assertEquals(summary,RealFixRuntimeBridge.PreviewMode.parse("summary"));
+        assertEquals(summary,RealFixRuntimeBridge.PreviewMode.parse(""));
+        assertEquals(summary,RealFixRuntimeBridge.PreviewMode.parse("invalid"));
+        assertEquals(RealFixRuntimeBridge.PreviewMode.FULL,RealFixRuntimeBridge.PreviewMode.parse(" Full "));
+        assertEquals(RealFixRuntimeBridge.PreviewMode.OFF,RealFixRuntimeBridge.PreviewMode.parse("off"));
+    }
     @Test void restingDuplicateLogsFirstAndThenOnePerHundredTicks() {
         var trace=new RealFixRuntimeBridge.RejectionTrace();
         int shows=0;

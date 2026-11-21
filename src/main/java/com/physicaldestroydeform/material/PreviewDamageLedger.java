@@ -14,6 +14,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.Set;
 import java.util.function.Function;
 
@@ -28,6 +29,9 @@ public final class PreviewDamageLedger {
     private final Map<SparseStateKey,SparseDamageState> states=new HashMap<>();
     private final Set<ContactCreditLedger.CreditId> handled=new HashSet<>();
     private long accepted,duplicates,capacityRejected,roundTrips,roundTripErrors;
+    private long fixedTotal;
+    private boolean changedSinceRestore;
+    private boolean codecCheckPending;
 
     public Result record(ContactCreditLedger.Grant grant,long generation,long tick,
                          Function<String,MaterialProperties> materials,
@@ -42,37 +46,54 @@ public final class PreviewDamageLedger {
         if(tick<0)throw new IllegalArgumentException("invalid tick");
         if(handled.contains(grant.id())) {
             duplicates++;
-            return new Result(ResultStatus.DUPLICATE,null,states.size(),fixedTotal(),fixedTotal(),0);
+            return new Result(ResultStatus.DUPLICATE,null,states.size(),fixedTotal,fixedTotal,0);
         }
         if(handled.size()>=MAX_CREDITS) {
             capacityRejected++;
-            return new Result(ResultStatus.CAPACITY,null,states.size(),fixedTotal(),fixedTotal(),0);
+            return new Result(ResultStatus.CAPACITY,null,states.size(),fixedTotal,fixedTotal,0);
         }
         var report=MaterialPlanner.planTargets(grant,generation,materials,settings,
-                key->states.containsKey(key)?states.get(key).unpack():new BlockDamageState(),directions);
+                key->{
+                    var previous=states.get(key);
+                    return previous==null?new BlockDamageState():previous.unpack();
+                },directions);
         if(Math.abs(report.accountedQ()-grant.issuedQ())>1e-7)
             throw new IllegalArgumentException("preview Q accounting mismatch");
-        long before=fixedTotal();
+        long before=fixedTotal;
         Map<SparseStateKey,SparseDamageState> staged=new HashMap<>();
+        int newKeys=0;
         for(var target:report.plans()) {
-            var old=states.get(target.key());
-            BlockDamageState next=old==null?new BlockDamageState():old.unpack();
-            next.setDamage(target.plan().plannedDamageUnits());
-            next.setRemainder(target.plan().plannedRemainderU8());
-            if(!next.isPristine())staged.put(target.key(),
-                    SparseDamageState.from(target.key(),next,generation,tick));
+            var key=target.key();
+            var old=states.get(key);
+            int damage=target.plan().plannedDamageUnits();
+            int remainder=target.plan().plannedRemainderU8();
+            int deformation=old==null?0:old.deformationU8();
+            int crack=old==null?0:old.crackVisualU8();
+            if(damage==0&&remainder==0&&deformation==0&&crack==0)continue;
+            if(old==null&&!staged.containsKey(key)) {
+                if(newKeys==MAX_ENTRIES-states.size()) {
+                    capacityRejected++;
+                    return new Result(ResultStatus.CAPACITY,report,states.size(),before,before,0);
+                }
+                newKeys++;
+            }
+            staged.put(key,new SparseDamageState(key,damage,deformation,crack,remainder,generation,tick));
         }
-        long newKeys=staged.keySet().stream().filter(key->!states.containsKey(key)).count();
-        if(states.size()+newKeys>MAX_ENTRIES) {
-            capacityRejected++;
-            return new Result(ResultStatus.CAPACITY,report,states.size(),before,before,0);
+        for(var next:staged.values()) {
+            var old=states.put(next.key(),next);
+            if(next.equals(old))continue;
+            fixedTotal+=fixedDamage(next)-fixedDamage(old);
+            changedSinceRestore=true;
+            codecCheckPending=true;
         }
-        states.putAll(staged);
         handled.add(grant.id());
         accepted++;
-        return new Result(ResultStatus.ACCEPTED,report,states.size(),before,fixedTotal(),staged.size());
+        return new Result(ResultStatus.ACCEPTED,report,states.size(),before,fixedTotal,staged.size());
     }
-    public long fixedTotal() {long sum=0;for(var s:states.values())sum+=s.unpack().fixedDamage();return sum;}
+    private static long fixedDamage(SparseDamageState state) {
+        return state==null?0:state.damageU16()*(long)BlockDamageState.FIXED_SCALE+state.remainderU8();
+    }
+    public long fixedTotal(){return fixedTotal;}
     public int size() {return states.size();}
     public int handledCredits(){return handled.size();}
     public long accepted(){return accepted;}
@@ -82,18 +103,25 @@ public final class PreviewDamageLedger {
     public long roundTripErrors(){return roundTripErrors;}
     public SparseDamageState state(SparseStateKey key){return states.get(key);}
     public List<SparseDamageState> snapshot(){return List.copyOf(states.values());}
+    public boolean changedSinceRestore(){return changedSinceRestore;}
+    /** Attempt the diagnostic check once per snapshot; a failure remains visible in its counter. */
+    public OptionalInt verifyPendingRoundTrip(){
+        return codecCheckPending?OptionalInt.of(verifyRoundTrip().length):OptionalInt.empty();
+    }
     /** Binary schema+CRC in memory, exactly same bytes as the optional restart checkpoint. */
     public byte[] verifyRoundTrip(){
+        codecCheckPending=false;
         try {
             byte[] bytes=SparseStateCodec.encode(snapshot());
             var restored=SparseStateCodec.decode(bytes);
-            if(restored.size()!=states.size() || !new HashSet<>(restored).equals(new HashSet<>(states.values())))
-                throw new IllegalStateException("preview roundtrip mismatch");
-            byte[] damaged=bytes.clone();
-            damaged[12]^=1; // deterministic CRC veto probe; never modify the live bytes
+            if(restored.size()!=states.size())throw new IllegalStateException("preview roundtrip count mismatch");
+            for(var state:restored)
+                if(!state.equals(states.get(state.key())))throw new IllegalStateException("preview roundtrip mismatch");
+            bytes[12]^=1; // Probe the temporary buffer and restore it before returning it.
             boolean refused=false;
-            try { SparseStateCodec.decode(damaged); }
+            try { SparseStateCodec.decode(bytes); }
             catch(IllegalArgumentException expected){refused=true;}
+            finally {bytes[12]^=1;}
             if(!refused)throw new IllegalStateException("preview corruption was accepted");
             roundTrips++;
             return bytes;
@@ -104,10 +132,21 @@ public final class PreviewDamageLedger {
         var decoded=SparseStateCodec.decode(bytes);
         if(decoded.size()>MAX_ENTRIES)throw new IllegalArgumentException("preview capacity exceeded");
         Map<SparseStateKey,SparseDamageState> candidate=new HashMap<>();
-        for(var state:decoded) if(candidate.putIfAbsent(state.key(),state)!=null)
-            throw new IllegalArgumentException("duplicate preview key");
-        states.clear();states.putAll(candidate);handled.clear();
+        long restoredTotal=0;
+        for(var state:decoded) {
+            if(candidate.putIfAbsent(state.key(),state)!=null)
+                throw new IllegalArgumentException("duplicate preview key");
+            restoredTotal+=fixedDamage(state);
+        }
+        clear();
+        states.putAll(candidate);
+        fixedTotal=restoredTotal;
+        codecCheckPending=!states.isEmpty();
+    }
+    public void clear(){
+        states.clear();handled.clear();
+        fixedTotal=0;
+        changedSinceRestore=codecCheckPending=false;
         accepted=duplicates=capacityRejected=roundTrips=roundTripErrors=0;
     }
-    public void clear(){states.clear();handled.clear();accepted=duplicates=capacityRejected=roundTrips=roundTripErrors=0;}
 }

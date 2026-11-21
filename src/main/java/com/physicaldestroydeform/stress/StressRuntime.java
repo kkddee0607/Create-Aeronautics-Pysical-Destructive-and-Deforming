@@ -77,6 +77,7 @@ public final class StressRuntime {
         final Reservation reservation;
         final List<WorldCommitCore.Intent> orderedOrigins;
         final boolean plotOrigins;
+        final boolean clockRolledBack;
         Session session;
         final StressProbeCursor probes=new StressProbeCursor();
         final Map<Cell,Probe> snapshot=new TreeMap<>();
@@ -92,7 +93,8 @@ public final class StressRuntime {
             id=entry.reservation().creditId();reservation=entry.reservation();
             orderedOrigins=com.physicaldestroydeform.deform.MoveRuntime.reverseOrder(reservation.origins());
             plotOrigins=!orderedOrigins.isEmpty()&&PlotKeyCodec.isPlotStorage(orderedOrigins.getFirst().key());
-            if(entry.phase()!=Phase.CLOSED)snapshot.putAll(entry.snapshot());
+            clockRolledBack=entry.clockRolledBack();
+            if(entry.phase()!=Phase.CLOSED&&!clockRolledBack)snapshot.putAll(entry.snapshot());
             // A final capped plan only waits for residual expiry/handoff, never replans.
             finished=entry.phase()!=Phase.RESERVED&&entry.ledger().finished();
         }
@@ -106,23 +108,37 @@ public final class StressRuntime {
     private final int workCap;
     private final Map<String,Job> jobs=new LinkedHashMap<>();
     private final Map<String,String> originJobs=new HashMap<>();
+    private final Set<String> rollbackOutputs=new HashSet<>();
     private final Deque<String> order=new ArrayDeque<>();
     private final Deque<String> worldOriginOrder=new ArrayDeque<>(),plotOriginOrder=new ArrayDeque<>();
     private final Map<Cell,Set<String>> watches=new HashMap<>();
     private final StaticMaterialLookup materialLookup=new StaticMaterialLookup();
-    private boolean faulted;
+    private boolean faulted,liveClockRollback;
     private long lastTick=-1;
     private int used,shown,activeSessions,originsThisTick;
-    private int archivesThisTick;
+    private int archivesThisTick,rollbackJobsRemaining;
     private long archiveStartedNanos;
-    private long snapshotWritesAvoided,sealWritesAvoided,seals,handoffs,traceSuppressed,capacityRetries,archiveConflicts;
+    private long snapshotWritesAvoided,sealWritesAvoided,seals,handoffs,traceSuppressed,capacityRetries,archiveConflicts,rollbackJobsReconciled;
 
     public StressRuntime(MinecraftServer server,WorldCommitService world,PlotCommitService plot,Logger log)throws IOException {
         this.server=Objects.requireNonNull(server);this.world=world;this.plot=plot;this.log=Objects.requireNonNull(log);
         policy=configuredPolicy();workCap=policy.maxNodesPerTick();
         Path path=server.getWorldPath(LevelResource.ROOT).resolve("data/pdd-stress-0.6.0");
         journal=new StressReservationJournal(path);
+        long startupGameTick=server.overworld().getGameTime();
+        Set<String> activeOutputs=new HashSet<>();
         for(var entry:journal.entries().stream().sorted(Comparator.comparingLong(e->e.reservation().createdGameTick())).toList()){
+            var id=entry.reservation().creditId();
+            if(entry.reservation().createdGameTick()>startupGameTick&&!entry.clockRolledBack()){
+                journal.closeForClockRollback(id);
+                entry=journal.get(id);
+            }
+            if(entry.clockRolledBack())rollbackJobsRemaining++;
+            for(var plan:entry.plans()){
+                String apply=applyId(id,plan.node().cell());
+                activeOutputs.add(apply);
+                if(entry.clockRolledBack())rollbackOutputs.add(apply);
+            }
             for(var origin:entry.reservation().origins()){
                 String prior=originJobs.putIfAbsent(origin.applyId(),entry.reservation().creditId());
                 if(prior!=null&&!prior.equals(entry.reservation().creditId()))throw new IOException("stress source origin reserved twice");
@@ -130,8 +146,18 @@ public final class StressRuntime {
             // CLOSED still has source origins. Repair a crash after reservation/handoff but before direct submit.
             add(entry);
         }
+        // Old archives dropped creation time while retaining DEFERRED commit
+        // ownership. The production TTL is constant and lets us recover it
+        // from the original deadline for IDs with no full active record.
+        java.util.function.Predicate<WorldCommitCore.Intent> archived=intent->journal.isArchivedHandoff(intent.applyId(),activeOutputs);
+        long ttl=Policy.defaults().ttlTicks();
+        int archivedPending=(world==null?0:world.cancelRecoveredArchivedStress(startupGameTick,ttl,archived))
+                +(plot==null?0:plot.cancelRecoveredArchivedStress(startupGameTick,ttl,archived));
         if(world!=null)world.attachStress(this);
         if(plot!=null)plot.attachStress(this);
+        if(rollbackJobsRemaining>0||archivedPending>0)
+            log.warn("[PDD-STRESS-LEDGER] phase=ROLLBACK_RECOVERY startupGameTick={} markedReservations={} cancelledArchivedPending={} reason=STRESS_CLOCK_ROLLBACK_UNUSED QReissue=false",
+                    startupGameTick,rollbackJobsRemaining,archivedPending);
         log.info("[PDD-STRESS-LEDGER] phase=START records={} depth={} nodes={} globalWork={} minQ={} ttl={} activeRecords={} archivedRecords={} activeBytes={} recovery=FROZEN_GRAPH_SAME_Q_STABLE_APPLY_ID",
                 journal.size(),policy.maxDepth(),policy.maxNodes(),workCap,policy.minQ(),policy.ttlTicks(),journal.activeCount(),journal.archivedCount(),journal.activeBytes());
     }
@@ -145,9 +171,9 @@ public final class StressRuntime {
     }
     private void add(Entry entry){
         Job job=new Job(entry);jobs.put(job.id,job);order.addLast(job.id);
-        if(!job.orderedOrigins.isEmpty())originOrder(job).addLast(job.id);
-        else job.originsRecovered=true;
-        if(entry.phase()!=Phase.CLOSED){
+        if(job.orderedOrigins.isEmpty())job.originsRecovered=true;
+        else if(!job.clockRolledBack)originOrder(job).addLast(job.id);
+        if(entry.phase()!=Phase.CLOSED&&!job.clockRolledBack){
             for(var cell:job.snapshot.keySet())watch(job,cell);
             if(!job.reservation.origins().isEmpty())
                 for(var seed:job.reservation.seeds())watch(job,seed.node().cell());
@@ -165,7 +191,7 @@ public final class StressRuntime {
                     ||prior.reservation().materialGeneration()!=materials.generation()
                     ||!prior.reservation().settings().equals(settings))
                 throw new IOException("stress source ID reused with changed payload");
-            return true;
+            return !prior.clockRolledBack();
         }
         // A changed projection of the same Grant cannot reserve one of its origins again.
         for(var origin:ordered){String owner=journal.sourceOwner(origin.applyId());
@@ -205,6 +231,14 @@ public final class StressRuntime {
         String id=originJobs.get(intent.applyId());if(id==null)return false;
         Entry entry=journal.get(id);
         return entry!=null&&entry.phase()!=Phase.CLOSED&&(faulted||entry.holdsOrigins());
+    }
+    public boolean holdsForClockRollback(WorldCommitCore.Intent intent){
+        if(rollbackJobsRemaining==0&&!liveClockRollback)return false;
+        String id=intent.applyId();
+        if(liveClockRollback&&(isDerivedApplyId(id)||journal.sourceOwner(id)!=null))return true;
+        if(rollbackOutputs.contains(id))return true;
+        Job job=jobs.get(originJobs.get(id));
+        return job!=null&&job.clockRolledBack;
     }
     public boolean faulted(){return faulted;}
     private void charge(){if(used>=workCap)throw BUDGET_END;used++;}
@@ -282,7 +316,7 @@ public final class StressRuntime {
     public void tick(){
         requireThread();long tick=server.overworld().getGameTime();
         if(faulted||tick==lastTick)return;
-        if(tick<lastTick){faulted=true;log.error("[PDD-STRESS-LEDGER] phase=HALT reason=GAME_CLOCK_ROLLBACK");return;}
+        if(tick<lastTick){faulted=true;liveClockRollback=true;log.error("[PDD-STRESS-LEDGER] phase=HALT reason=GAME_CLOCK_ROLLBACK");return;}
         lastTick=tick;used=0;shown=0;archivesThisTick=0;originsThisTick=0;materialLookup.beginTick();
         try{
             int turns=order.size();
@@ -303,8 +337,8 @@ public final class StressRuntime {
                 }
                 if(jobs.containsKey(id))order.addLast(id);
             }
-            if(server.getTickCount()%100==0)log.info("[PDD-STRESS-LEDGER] phase=SUMMARY jobs={} work={} cap={} records={} fault=false seals={} handoffs={} unchangedSnapshotWritesAvoided={} unchangedSealWritesAvoided={} traceSuppressed={} activeRecords={} archivedRecords={} activeBytes={} decodedBytes={} worldOriginJobs={} plotOriginJobs={} pressureRetries={} archiveConflicts={}",
-                    jobs.size(),used,workCap,journal.size(),seals,handoffs,snapshotWritesAvoided,sealWritesAvoided,traceSuppressed,journal.activeCount(),journal.archivedCount(),journal.activeBytes(),journal.activeLogicalBytes(),worldOriginOrder.size(),plotOriginOrder.size(),capacityRetries,archiveConflicts);
+            if(server.getTickCount()%100==0)log.info("[PDD-STRESS-LEDGER] phase=SUMMARY jobs={} work={} cap={} records={} fault=false seals={} handoffs={} unchangedSnapshotWritesAvoided={} unchangedSealWritesAvoided={} traceSuppressed={} activeRecords={} archivedRecords={} activeBytes={} decodedBytes={} worldOriginJobs={} plotOriginJobs={} pressureRetries={} archiveConflicts={} rollbackJobsReconciled={}",
+                    jobs.size(),used,workCap,journal.size(),seals,handoffs,snapshotWritesAvoided,sealWritesAvoided,traceSuppressed,journal.activeCount(),journal.archivedCount(),journal.activeBytes(),journal.activeLogicalBytes(),worldOriginOrder.size(),plotOriginOrder.size(),capacityRetries,archiveConflicts,rollbackJobsReconciled);
         }catch(IOException|RuntimeException failure){
             faulted=true;log.error("[PDD-STRESS-LEDGER] phase=HALT reason=SAVE_OR_PLAN_FAILURE QReissue=false",failure);
         }
@@ -315,6 +349,7 @@ public final class StressRuntime {
     }
     private void step(Job job,long tick)throws IOException {
         Entry entry=journal.get(job.id);var r=job.reservation;
+        if(job.clockRolledBack){cancelRolledBackJob(job,entry);return;}
         if(entry.phase()==Phase.CLOSED){
             if(!deliverOrigins(job))return;
             // A v4 CLOSED record claims handoff, not successful damage. Verify
@@ -451,10 +486,36 @@ public final class StressRuntime {
             archive(job);
         }
     }
+    private void cancelRolledBackJob(Job job,Entry entry)throws IOException {
+        var r=job.reservation;
+        int batch=0;
+        while(job.originIndex<job.orderedOrigins.size()&&used<workCap
+                &&originsThisTick<MAX_ORIGINS_PER_TICK&&batch++<MAX_ORIGINS_PER_TICK/2){
+            charge();originsThisTick++;
+            var origin=job.orderedOrigins.get(job.originIndex);
+            boolean cancelled=PlotKeyCodec.isPlotStorage(origin.key())
+                    ?plot!=null&&plot.cancelStressOriginOnRollback(origin,r.settings(),deadline(r))
+                    :world!=null&&world.cancelStressOriginOnRollback(origin,r.settings(),deadline(r));
+            if(!cancelled)return;
+            job.originIndex++;
+        }
+        if(job.originIndex<job.orderedOrigins.size())return;
+        job.originsRecovered=true;
+        batch=0;
+        while(job.deliveryIndex<entry.plans().size()&&used<workCap&&batch++<QUANTUM){
+            charge();var plan=entry.plans().get(job.deliveryIndex);
+            var intent=derivedIntent(job,plan);
+            boolean cancelled=PlotKeyCodec.isPlotStorage(intent.key())
+                    ?plot!=null&&plot.cancelStressOutputOnRollback(entry,plan,intent,job.deliveryIndex)
+                    :world!=null&&world.cancelStressOutputOnRollback(entry,plan,intent,job.deliveryIndex);
+            if(!cancelled)return;
+            job.deliveryIndex++;
+        }
+        if(job.deliveryIndex>=entry.plans().size())archive(job);
+    }
     private Deque<String> originOrder(Job job){return job.plotOrigins?plotOriginOrder:worldOriginOrder;}
     private static long deadline(Reservation r){
-        long start=r.createdGameTick(),ttl=r.policy().ttlTicks();
-        return start>Long.MAX_VALUE-ttl?Long.MAX_VALUE:start+ttl;
+        return StressCommitHandoff.deadline(r.createdGameTick(),r.policy().ttlTicks());
     }
     /** The reservation is the durable input spool. No source is dropped merely
      * because the direct receipt queue is temporarily full. Preserve each
@@ -490,7 +551,14 @@ public final class StressRuntime {
         // change any Q or original TTL. Bound migration fsync bursts per tick.
         if(archivesThisTick>=MAX_ARCHIVES_PER_TICK||archivesThisTick>0&&System.nanoTime()-archiveStartedNanos>=2_000_000L)return;
         charge();if(archivesThisTick++==0)archiveStartedNanos=System.nanoTime();
-        journal.compactHandoff(job.id);remove(job);
+        Entry entry=journal.get(job.id);
+        journal.compactHandoff(job.id);
+        if(job.clockRolledBack){
+            for(var plan:entry.plans())rollbackOutputs.remove(applyId(job.id,plan.node().cell()));
+            rollbackJobsRemaining--;
+            rollbackJobsReconciled++;
+        }
+        remove(job);
     }
     private static WorldCommitCore.Intent derivedIntent(Job job,PlannedNode plan){
         var r=job.reservation;var key=StressCommitHandoff.keyFor(plan.node().cell(),plan.node().fingerprint());
@@ -500,7 +568,7 @@ public final class StressRuntime {
     }
     private void remove(Job job){
         jobs.remove(job.id);if(job.session!=null)activeSessions--;
-        if(!job.originsRecovered)originOrder(job).remove(job.id);
+        if(!job.originsRecovered&&!job.clockRolledBack)originOrder(job).remove(job.id);
         for(var origin:job.reservation.origins())originJobs.remove(origin.applyId(),job.id);
         for(var cell:job.watched){
             Set<String> owners=watches.get(cell);if(owners==null)continue;owners.remove(job.id);
@@ -513,6 +581,6 @@ public final class StressRuntime {
     }
     public void stop(){
         for(var job:new ArrayList<>(jobs.values()))remove(job);
-        order.clear();originJobs.clear();
+        order.clear();originJobs.clear();rollbackOutputs.clear();
     }
 }

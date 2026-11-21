@@ -74,6 +74,7 @@ public final class PlotCommitService {
         movement=new MoveRuntime(parent.resolve("pdd-plot-moves-0.6.0"),journal,gateway.movementGateway(),gateway::planMove,log);
         core.setDeformationHandler(movement::afterDamage);
         core.setExecutionHold(i->movement.busy()||(stress!=null&&stress.holds(i)));
+        core.setRollbackHold(i->stress!=null&&stress.holdsForClockRollback(i));
         for(var state:journal.stateSnapshot())registerState(state.key());
         for(var receipt:journal.quarantinedSnapshot()){
             if(receipt.id().startsWith("ORPHAN:1:")) {
@@ -416,6 +417,19 @@ public final class PlotCommitService {
     }
     public void attachStress(StressRuntime runtime){
         stress=runtime;
+    }
+    public int cancelRecoveredArchivedStress(long startupTick,long ttl,
+            java.util.function.Predicate<WorldCommitCore.Intent> archived)throws IOException {
+        return core.abortRecoveredFutureStress(startupTick,ttl,server.getTickCount(),archived);
+    }
+    public boolean cancelStressOriginOnRollback(WorldCommitCore.Intent intent,DamageModel.Settings settings,long deadline)throws IOException {
+        if(fault||core.ioFault())return false;
+        core.abortSealedOnRollback(intent,settings,deadline,server.getTickCount());
+        return true;
+    }
+    public boolean cancelStressOutputOnRollback(StressReservationJournal.Entry entry,StressPropagation.PlannedNode plan,
+            WorldCommitCore.Intent intent,int index)throws IOException {
+        return !fault&&!core.ioFault()&&StressCommitHandoff.cancelOnRollback(core,entry,plan,intent,server.getTickCount(),index);
     }
     public void watchStress(SparseStateKey key,boolean watch){
         var owner=PlotOwnerFence.Owner.of(PlotKeyCodec.real(key));

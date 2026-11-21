@@ -2,9 +2,9 @@ package com.physicaldestroydeform.collision;
 
 import com.physicaldestroydeform.diagnostics.NativeCollisionTelemetry;
 import com.physicaldestroydeform.diagnostics.TraceBudget;
-import com.physicaldestroydeform.material.MaterialPlanner;
 import com.physicaldestroydeform.material.MaterialRegistry;
 import com.physicaldestroydeform.material.PreviewDamageLedger;
+import com.physicaldestroydeform.material.TargetMaterials;
 import com.physicaldestroydeform.world.WorldCommitService;
 import com.physicaldestroydeform.plot.PlotCommitService;
 import com.physicaldestroydeform.plot.NeoForgePlotGateway;
@@ -27,8 +27,10 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 
@@ -77,6 +79,18 @@ public final class RealFixRuntimeBridge {
     private final WorldClearanceVerifier worldClearance=new WorldClearanceVerifier();
     private final ForceCalibration forceCalibration=new ForceCalibration();
     private final PreviewDamageLedger preview=new PreviewDamageLedger();
+    enum PreviewMode {
+        OFF, SUMMARY, FULL;
+        static PreviewMode parse(String configured) {
+            return switch(configured.trim().toUpperCase(Locale.ROOT)) {
+                case "OFF" -> OFF;
+                case "FULL" -> FULL;
+                default -> SUMMARY;
+            };
+        }
+    }
+    private PreviewMode previewMode=PreviewMode.SUMMARY;
+    private boolean previewCheckpointEnabled;
     private WorldCommitService worldCommit;
     private PlotCommitService plotCommit;
     /** Side-effect commit is intentionally outside physics/native callback. */
@@ -196,6 +210,8 @@ public final class RealFixRuntimeBridge {
         preview.clear();
         worldCommit=null;
         plotCommit=null;
+        previewMode=PreviewMode.SUMMARY;
+        previewCheckpointEnabled=false;
         previewCheckpointWritable=true;
         previewPolicyId=null;
     }
@@ -219,14 +235,18 @@ public final class RealFixRuntimeBridge {
                 "inwardWeight=0.70 lateralWeight=0.30 transferShare=0.50 " +
                 "reverseEdges=FORBIDDEN verifiedNeighbors=REQUIRED " +
                 "shapeConeVeto=DISABLED FSourceBudget=ONE_COLLISION");
-        // A changed Q, damage, material override or datapack cache must not replay
-        // the previous calibration's diagnostic damage as this policy's result.
-        previewPolicyId=calibrationIdentity();
-        if(!PreviewCheckpoint.enabled()) {
+        previewMode=PreviewMode.parse(System.getProperty("pdd.preview.mode","SUMMARY"));
+        previewCheckpointEnabled=previewMode!=PreviewMode.OFF&&PreviewCheckpoint.enabled();
+        log.info("[PDD-PREVIEW-POLICY] mode={} periodicCodec={} checkpoint={} maxEntries={} maxCredits={} authoritative=false",
+                previewMode,previewMode==PreviewMode.FULL,previewCheckpointEnabled,
+                PreviewDamageLedger.MAX_ENTRIES,PreviewDamageLedger.MAX_CREDITS);
+        if(!previewCheckpointEnabled) {
             log.info("[PDD-PREVIEW-SAVE] phase=START status=DISABLED persisted=false mutation=OFF");
             return;
         }
         try {
+            // Keep saved diagnostic state isolated by calibration policy.
+            previewPolicyId=calibrationIdentity();
             var path=previewPath(server);
             var bytes=PreviewCheckpoint.load(path);
             if(bytes==null) {
@@ -246,18 +266,23 @@ public final class RealFixRuntimeBridge {
         }
     }
     public void savePreview(MinecraftServer server,Logger log) {
-        if(!PreviewCheckpoint.enabled())return;
-        if(previewPolicyId==null || !previewPolicyId.equals(calibrationIdentity())) {
-            log.warn("[PDD-PREVIEW-SAVE] phase=STOP status=SKIPPED_POLICY_CHANGED " +
-                    "originalCheckpointPreserved=true mutation=OFF");
-            return;
-        }
+        if(!previewCheckpointEnabled)return;
         if(!previewCheckpointWritable) {
             log.warn("[PDD-PREVIEW-SAVE] phase=STOP status=SKIPPED_BAD_INPUT " +
                     "originalCheckpointPreserved=true mutation=OFF");
             return;
         }
         try {
+            if(previewPolicyId==null || !previewPolicyId.equals(calibrationIdentity())) {
+                log.warn("[PDD-PREVIEW-SAVE] phase=STOP status=SKIPPED_POLICY_CHANGED " +
+                        "originalCheckpointPreserved=true mutation=OFF");
+                return;
+            }
+            if(!preview.changedSinceRestore()) {
+                log.info("[PDD-PREVIEW-SAVE] phase=STOP status=SKIPPED_UNCHANGED entries={} fixedTotal={} " +
+                        "authoritative=false mutation=OFF",preview.size(),preview.fixedTotal());
+                return;
+            }
             byte[] bytes=preview.verifyRoundTrip();
             var path=previewPath(server);
             PreviewCheckpoint.save(path,bytes);
@@ -697,7 +722,7 @@ public final class RealFixRuntimeBridge {
                         t.lastVerfFsm=fsmSignature;t.lastVerfFsmTick=now;
                     }
                     var materialSnapshot=MaterialRegistry.snapshot();
-                    var targetMaterials=new com.physicaldestroydeform.material.TargetMaterials(server,stamp.dimension,materialSnapshot);
+                    var targetMaterials=new TargetMaterials(server,stamp.dimension,materialSnapshot);
                     targetMaterials.setDirections(targetDirections);
                     // Sable 2.0.6 exports opposing local manifold normals per
                     // native record. Validate each pair, then average all
@@ -933,71 +958,8 @@ public final class RealFixRuntimeBridge {
                                 witness.reason(),fVectorValid?"CORROBORATED":"UNKNOWN",nativeNormal.reason(),
                                 witness.owners().isEmpty()?"NONAXIAL_OR_UNVERIFIED":"AXIS_CORROBORATED",
                                 witness.auditedFrames(),witness.owners());
-                        try {
-                            var materials=materialSnapshot;
-                            long materialStart=System.nanoTime();
-                            var previewResult=preview.recordTargets(grant,materials.generation(),now,
-                                    targetMaterials::material,damageSettings,
-                                    key->java.util.Optional.ofNullable(witness.owners().get(
-                                            key.ownerSpace()+":"+key.ownerId())));
-                            long materialNanos=System.nanoTime()-materialStart;
-                            log.info("[PDD-MATERIAL-PERF] credit={} previewNanos={} targetsA={} " +
-                                            "targetsB={} status={} mutation=OFF",
-                                    grant.id(),materialNanos,grant.a().size(),grant.b().size(),
-                                    previewResult.status());
-                            if(previewResult.status()!=PreviewDamageLedger.ResultStatus.ACCEPTED) {
-                                previewFailures++;
-                                log.warn("[PDD-MATERIAL-PLAN] credit={} status={} " +
-                                        "reason=PREVIEW_DEDUP_OR_BOUNDED_CAP mutation=OFF",
-                                        grant.id(),previewResult.status());
-                            } else {
-                                var planReport=previewResult.report();
-                                materialPlanned+=planReport.plans().size();
-                                if(planReport.missingMaterialQ()>0)materialMissing++;
-                                double difference=Math.abs(planReport.accountedQ()-grant.issuedQ());
-                                if(difference>1.0e-7)
-                                    throw new IllegalStateException("material Q reconciliation failed " + difference);
-                                if(materialLines++<MAX_MATERIAL_LOGS_PER_TICK)log.info("[PDD-MATERIAL-PLAN] credit={} " +
-                                        "revision={} materialGeneration={} verifiedTargets={} missingMaterialQ={} " +
-                                        "reservedQ={} absorbedQ={} directQ={} unusedPlannedQ={} " +
-                                        "fixedIncrement={} directionWitnesses={} stress=INACTIVE plastic=INACTIVE " +
-                                        "state=PREVIEW_ONLY committedDamage=0 previewEntries={} previewFixedBefore={} " +
-                                        "previewFixedAfter={} previewUpdated={} mutation=OFF",
-                                        planReport.creditId(),DamageModel.ALGORITHM_REVISION,
-                                        planReport.materialGeneration(),planReport.plans().size(),
-                                        planReport.missingMaterialQ(),grant.issuedQ(),planReport.absorbedQ(),
-                                        planReport.directQ(),planReport.unusedPlannedQ(),
-                                        planReport.fixedIncrementTotal(),witness.owners().size(),
-                                        previewResult.entries(),previewResult.fixedBefore(),
-                                        previewResult.fixedAfter(),previewResult.updatedTargets());
-                                int targetsLogged=0;
-                                for(int i=0;i<planReport.plans().size() && materialLines<MAX_MATERIAL_LOGS_PER_TICK;i++) {
-                                    var targetPlan=planReport.plans().get(i);
-                                    var m=targetPlan.material();var planned=targetPlan.plan();
-                                    materialLines++;targetsLogged++;
-                                    log.info("[PDD-MATERIAL-TARGET] key={} H={} T={} D={} E={} unbreakable={} " +
-                                                    "Q={} absorbed={} direct={} plasticUnused={} stressUnused={} " +
-                                                    "rawDamage={} incrementFixed={} predictedDamage={} remainder={} " +
-                                                    "thresholdReached={} plasticPreview={} direction={} " +
-                                                    "applied=false reason=SHADOW_PREVIEW_ONLY mutation=OFF",
-                                            targetPlan.key(),m.hardness(),m.threshold(),m.ductilityPercent(),
-                                            m.elasticityPercent(),m.unbreakable(),planned.incomingQ(),
-                                            planned.absorbedQ(),planned.directQ(),planned.plasticQ(),planned.stressQ(),
-                                            planned.rawDamage(),planned.fixedIncrement(),planned.plannedDamageUnits(),
-                                            planned.plannedRemainderU8(),planned.thresholdReached(),
-                                            planned.plannedPlasticIncrement(),
-                                            targetPlan.direction().map(Object::toString).orElse("UNKNOWN"));
-                                }
-                                log.info("[PDD-MATERIAL-TRACE] credit={} plannedTargets={} " +
-                                                "logged={} suppressed={} maxPerTick={} mutation=OFF",
-                                        grant.id(),planReport.plans().size(),targetsLogged,
-                                        planReport.plans().size()-targetsLogged,MAX_MATERIAL_LOGS_PER_TICK);
-                            }
-                        } catch (RuntimeException invalidMaterialPlan) {
-                            materialRejected++;
-                            log.warn("[PDD-MATERIAL-PLAN] reason=PLAN_REJECTED " +
-                                    "credit={} Q={} applied=false mutation=OFF",grant.id(),grant.issuedQ(),invalidMaterialPlan);
-                        }
+                        if(previewMode!=PreviewMode.OFF)
+                            materialLines=recordPreview(grant,materialSnapshot,targetMaterials,witness,now,materialLines,log);
                         if(worldCommit!=null) {
                             try {worldCommit.offer(grant,materialSnapshot,targetMaterials);}
                             catch(RuntimeException commitError) {
@@ -1120,20 +1082,21 @@ public final class RealFixRuntimeBridge {
                     NativeCollisionTelemetry.dropped(),NativeCollisionTelemetry.malformed(),
                     NativeCollisionTelemetry.nativeCapSaturatedPolls(),r2Audits,r2SkippedDuplicate,r2ShapeChecks,
                     com.physicaldestroydeform.diagnostics.SableContactQueue.dropped(),SableFrameCapture.preHistoryDropped(),repeatedDiagnosticGroupsSuppressed);
-            log.info("[PDD-MATERIAL-PLAN] phase=SUMMARY targetsPlanned={} missingMaterialEvents={} " +
-                    "planRejected={} mode=PREVIEW_ONLY storedEntries={} fixedTotal={} " +
+            if(previewMode!=PreviewMode.OFF)log.info("[PDD-MATERIAL-PLAN] phase=SUMMARY targetsPlanned={} missingMaterialEvents={} " +
+                    "planRejected={} mode=PREVIEW_ONLY detail={} storedEntries={} fixedTotal={} " +
                     "handledCredits={} duplicatePreview={} previewCapacityRejected={} " +
-                    "directionCorroborated={} directionUnknown={} previewFailures={} applied=0 mutation=OFF",
-                    materialPlanned,materialMissing,materialRejected,preview.size(),preview.fixedTotal(),
+                    "directionCorroborated={} directionUnknown={} previewFailures={} codecRoundTrips={} " +
+                    "codecRoundTripErrors={} applied=0 mutation=OFF",
+                    materialPlanned,materialMissing,materialRejected,previewMode,preview.size(),preview.fixedTotal(),
                     preview.handledCredits(),preview.duplicates(),preview.capacityRejected(),
-                    directionApproved,directionUnknown,previewFailures);
-            if(VERF_ENABLED && preview.size()>0) {
+                    directionApproved,directionUnknown,previewFailures,preview.roundTrips(),preview.roundTripErrors());
+            if(previewMode==PreviewMode.FULL) {
                 try {
-                    byte[] encoded=preview.verifyRoundTrip();
-                    log.info("[PDD-PREVIEW-CODEC] status=PASS entries={} bytes={} " +
+                    var bytes=preview.verifyPendingRoundTrip();
+                    if(bytes.isPresent())log.info("[PDD-PREVIEW-CODEC] status=PASS entries={} bytes={} " +
                                     "roundTrips={} fixedTotal={} schema={} corruptionVeto=PASS " +
                                     "authoritative=false mutation=OFF",
-                            preview.size(),encoded.length,preview.roundTrips(),preview.fixedTotal(),
+                            preview.size(),bytes.getAsInt(),preview.roundTrips(),preview.fixedTotal(),
                             com.physicaldestroydeform.state.SparseStateCodec.SCHEMA_VERSION);
                 }catch(RuntimeException invalid) {
                     log.warn("[PDD-PREVIEW-CODEC] status=FAIL reason={} " +
@@ -1155,6 +1118,73 @@ public final class RealFixRuntimeBridge {
                         clearanceCalls,clearanceCellReads,clearanceElapsedNanos,clearanceProved,
                         WorldClearanceVerifier.MAX_CELLS,WorldClearanceVerifier.MAX_CONFIRM_PER_TICK);
             }
+        }
+    }
+
+    private int recordPreview(ContactCreditLedger.Grant grant,MaterialRegistry.Snapshot materials,
+                              TargetMaterials targetMaterials,NativePlotDirection.Prepared.DirectionResult witness,
+                              long tick,int materialLines,Logger log) {
+        boolean fullTrace=previewMode==PreviewMode.FULL;
+        try {
+            boolean timePreview=fullTrace&&materialLines<MAX_MATERIAL_LOGS_PER_TICK;
+            long start=timePreview?System.nanoTime():0;
+            var result=preview.recordTargets(grant,materials.generation(),tick,
+                    targetMaterials::material,damageSettings,
+                    key->fullTrace?Optional.ofNullable(witness.owners().get(key.ownerSpace()+":"+key.ownerId()))
+                            :Optional.empty());
+            if(timePreview) {
+                materialLines++;
+                log.info("[PDD-MATERIAL-PERF] credit={} previewNanos={} targetsA={} targetsB={} status={} mutation=OFF",
+                        grant.id(),System.nanoTime()-start,grant.a().size(),grant.b().size(),result.status());
+            }
+            if(result.status()!=PreviewDamageLedger.ResultStatus.ACCEPTED) {
+                previewFailures++;
+                if(materialLines<MAX_MATERIAL_LOGS_PER_TICK&&(fullTrace||previewFailures==1)) {
+                    materialLines++;
+                    log.warn("[PDD-MATERIAL-PLAN] credit={} status={} " +
+                            "reason=PREVIEW_DEDUP_OR_BOUNDED_CAP mutation=OFF",grant.id(),result.status());
+                }
+                return materialLines;
+            }
+            var report=result.report();
+            materialPlanned+=report.plans().size();
+            if(report.missingMaterialQ()>0)materialMissing++;
+            if(materialLines>=MAX_MATERIAL_LOGS_PER_TICK)return materialLines;
+            materialLines++;
+            log.info("[PDD-MATERIAL-PLAN] credit={} revision={} materialGeneration={} verifiedTargets={} " +
+                            "missingMaterialQ={} reservedQ={} absorbedQ={} directQ={} unusedPlannedQ={} " +
+                            "fixedIncrement={} directionWitnesses={} stress=INACTIVE plastic=INACTIVE " +
+                            "state=PREVIEW_ONLY committedDamage=0 previewEntries={} previewFixedBefore={} " +
+                            "previewFixedAfter={} previewUpdated={} mutation=OFF",
+                    report.creditId(),DamageModel.ALGORITHM_REVISION,report.materialGeneration(),report.plans().size(),
+                    report.missingMaterialQ(),grant.issuedQ(),report.absorbedQ(),report.directQ(),report.unusedPlannedQ(),
+                    report.fixedIncrementTotal(),witness.owners().size(),result.entries(),result.fixedBefore(),
+                    result.fixedAfter(),result.updatedTargets());
+            if(!fullTrace||materialLines>=MAX_MATERIAL_LOGS_PER_TICK)return materialLines;
+            int targetsLogged=Math.min(report.plans().size(),MAX_MATERIAL_LOGS_PER_TICK-materialLines-1);
+            for(int i=0;i<targetsLogged;i++) {
+                var target=report.plans().get(i);
+                var material=target.material();var planned=target.plan();
+                log.info("[PDD-MATERIAL-TARGET] key={} H={} T={} D={} E={} unbreakable={} " +
+                                "Q={} absorbed={} direct={} plasticUnused={} stressUnused={} " +
+                                "rawDamage={} incrementFixed={} predictedDamage={} remainder={} " +
+                                "thresholdReached={} plasticPreview={} direction={} " +
+                                "applied=false reason=SHADOW_PREVIEW_ONLY mutation=OFF",
+                        target.key(),material.hardness(),material.threshold(),material.ductilityPercent(),
+                        material.elasticityPercent(),material.unbreakable(),planned.incomingQ(),
+                        planned.absorbedQ(),planned.directQ(),planned.plasticQ(),planned.stressQ(),
+                        planned.rawDamage(),planned.fixedIncrement(),planned.plannedDamageUnits(),
+                        planned.plannedRemainderU8(),planned.thresholdReached(),planned.plannedPlasticIncrement(),
+                        target.direction().map(Object::toString).orElse("UNKNOWN"));
+            }
+            log.info("[PDD-MATERIAL-TRACE] credit={} plannedTargets={} logged={} suppressed={} maxPerTick={} mutation=OFF",
+                    grant.id(),report.plans().size(),targetsLogged,report.plans().size()-targetsLogged,MAX_MATERIAL_LOGS_PER_TICK);
+            return materialLines+targetsLogged+1;
+        }catch(RuntimeException invalidMaterialPlan) {
+            materialRejected++;
+            log.warn("[PDD-MATERIAL-PLAN] reason=PLAN_REJECTED " +
+                    "credit={} Q={} applied=false mutation=OFF",grant.id(),grant.issuedQ(),invalidMaterialPlan);
+            return materialLines;
         }
     }
 
