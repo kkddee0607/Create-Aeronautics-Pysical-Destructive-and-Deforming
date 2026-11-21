@@ -27,7 +27,7 @@ import static com.physicaldestroydeform.stress.StressReservationJournal.*;
  * Frozen graph replay recalculates only the same reserved Q; stable ApplyIds deduplicate outputs.
  */
 public final class StressRuntime {
-    private static final int MAX_WORK=512,QUANTUM=16,MAX_LOGS=Math.max(0,Math.min(128,
+    private static final int MAX_WORK=512,QUANTUM=16,LARGE_QUANTUM=64,MAX_ORIGINS_PER_TICK=64,MAX_LOGS=Math.max(0,Math.min(128,
             Integer.getInteger("pdd.stress.trace.maxPerTick",8)));
     private static final int MAX_ARCHIVES_PER_TICK=4;
     private static final boolean TRACE=Boolean.parseBoolean(System.getProperty("pdd.stress.trace","true"));
@@ -56,6 +56,11 @@ public final class StressRuntime {
         private final Set<Cell> cells=new HashSet<>();
         boolean contains(Entry entry,Cell cell){
             if(indexed!=entry){
+                if(indexed!=null&&indexed.reservation()==entry.reservation()
+                        &&indexed.holdsOrigins()==entry.holdsOrigins()
+                        &&indexed.phase()==entry.phase()&&indexed.plans().equals(entry.plans())){
+                    indexed=entry;return cells.contains(cell);
+                }
                 cells.clear();
                 if(entry.phase()!=Phase.RESERVED){
                     if(!"ROOTS_PENDING".equals(entry.reason()))
@@ -71,18 +76,22 @@ public final class StressRuntime {
         final String id;
         final Reservation reservation;
         final List<WorldCommitCore.Intent> orderedOrigins;
+        final boolean plotOrigins;
         Session session;
         final StressProbeCursor probes=new StressProbeCursor();
         final Map<Cell,Probe> snapshot=new TreeMap<>();
         final Set<Cell> watched=new HashSet<>();
+        final Set<String> observedPlotOwners=new HashSet<>();
         final PublishedCells published=new PublishedCells();
         List<Map.Entry<Cell,Probe>> validation;
         int validationIndex,deliveryIndex,originIndex;
-        long pressureBytes=-1,pressureRetryAt;
+        long pressureBytes=-1,pressureLogical=-1,pressureRetryAt;
         boolean invalidated,finished,originsRecovered;
+        long lastQueuePressureLog=Long.MIN_VALUE;
         Job(Entry entry){
             id=entry.reservation().creditId();reservation=entry.reservation();
             orderedOrigins=com.physicaldestroydeform.deform.MoveRuntime.reverseOrder(reservation.origins());
+            plotOrigins=!orderedOrigins.isEmpty()&&PlotKeyCodec.isPlotStorage(orderedOrigins.getFirst().key());
             if(entry.phase()!=Phase.CLOSED)snapshot.putAll(entry.snapshot());
             // A final capped plan only waits for residual expiry/handoff, never replans.
             finished=entry.phase()!=Phase.RESERVED&&entry.ledger().finished();
@@ -98,11 +107,12 @@ public final class StressRuntime {
     private final Map<String,Job> jobs=new LinkedHashMap<>();
     private final Map<String,String> originJobs=new HashMap<>();
     private final Deque<String> order=new ArrayDeque<>();
+    private final Deque<String> worldOriginOrder=new ArrayDeque<>(),plotOriginOrder=new ArrayDeque<>();
     private final Map<Cell,Set<String>> watches=new HashMap<>();
     private final StaticMaterialLookup materialLookup=new StaticMaterialLookup();
     private boolean faulted;
     private long lastTick=-1;
-    private int used,shown,activeSessions;
+    private int used,shown,activeSessions,originsThisTick;
     private int archivesThisTick;
     private long archiveStartedNanos;
     private long snapshotWritesAvoided,sealWritesAvoided,seals,handoffs,traceSuppressed,capacityRetries,archiveConflicts;
@@ -112,7 +122,7 @@ public final class StressRuntime {
         policy=configuredPolicy();workCap=policy.maxNodesPerTick();
         Path path=server.getWorldPath(LevelResource.ROOT).resolve("data/pdd-stress-0.6.0");
         journal=new StressReservationJournal(path);
-        for(var entry:journal.entries()){
+        for(var entry:journal.entries().stream().sorted(Comparator.comparingLong(e->e.reservation().createdGameTick())).toList()){
             for(var origin:entry.reservation().origins()){
                 String prior=originJobs.putIfAbsent(origin.applyId(),entry.reservation().creditId());
                 if(prior!=null&&!prior.equals(entry.reservation().creditId()))throw new IOException("stress source origin reserved twice");
@@ -135,9 +145,12 @@ public final class StressRuntime {
     }
     private void add(Entry entry){
         Job job=new Job(entry);jobs.put(job.id,job);order.addLast(job.id);
+        if(!job.orderedOrigins.isEmpty())originOrder(job).addLast(job.id);
+        else job.originsRecovered=true;
         if(entry.phase()!=Phase.CLOSED){
             for(var cell:job.snapshot.keySet())watch(job,cell);
-            for(var origin:job.reservation.origins())watch(job,StressCommitHandoff.cellFor(origin.key()));
+            if(!job.reservation.origins().isEmpty())
+                for(var seed:job.reservation.seeds())watch(job,seed.node().cell());
         }
     }
     /** Called once per projected owner-side Grant, BEFORE any original direct intent is queued. */
@@ -166,7 +179,9 @@ public final class StressRuntime {
                     axes==null?null:new Direction(axes.x(),axes.y(),axes.z())));
         }
         // Original full Q and its immutable settings persist beside stress; plastic stays separate.
-        var reservation=new Reservation(id,materials.generation(),server.overworld().getGameTime(),policy,settings,seeds,ordered);
+        long gameTick=server.overworld().getGameTime();
+        long age=Math.max(0,(long)server.getTickCount()-ordered.getFirst().eventTick());
+        var reservation=new Reservation(id,materials.generation(),Math.max(0,gameTick-age),policy,settings,seeds,ordered);
         if(journal.isArchived(id)){
             if(!journal.matchesArchivedRetry(reservation))throw new IOException("archived stress source reused with changed payload");
             return false; // never resubmit a completed direct intent
@@ -174,6 +189,8 @@ public final class StressRuntime {
         journal.reserve(reservation);
         for(var origin:ordered)originJobs.put(origin.applyId(),id);
         add(journal.get(id));
+        if(TRACE&&ordered.size()>8192)log.info("[PDD-STRESS-LEDGER] phase=LARGE_RESERVED id={} roots={} Q={} deadline={} activeBytes={} decodedBytes={} QReissue=false",
+                id,ordered.size(),reservation.reservedQ(),deadline(reservation),journal.activeBytes(),journal.activeLogicalBytes());
         return true;
     }
     private static String originId(List<WorldCommitCore.Intent> ordered){
@@ -214,7 +231,33 @@ public final class StressRuntime {
         charge();watch(job,cell);
         var key=StressCommitHandoff.keyFor(cell,"PDD:STRESS_PROBE");
         WorldCommitCore.Observation observation;
-        if(PlotKeyCodec.isPlotStorage(key))observation=plot==null?null:plot.readStress(key);
+        if(PlotKeyCodec.isPlotStorage(key)){
+            observation=plot==null?null:plot.readStress(key);
+            // A crash before the first direct receipt can leave no restored
+            // Plot fence. Only a saved root's exact incarnation may bind it.
+            if(observation==null&&plot!=null&&!job.observedPlotOwners.contains(cell.owner())){
+                var roots=job.reservation.seeds();
+                int lo=0,hi=roots.size()-1,ownerRoot=-1;
+                while(lo<=hi){
+                    int mid=(lo+hi)>>>1;var root=roots.get(mid).node();
+                    int comparison=root.cell().compareTo(cell);
+                    if(comparison==0){ownerRoot=mid;break;}
+                    if(root.cell().owner().equals(cell.owner()))ownerRoot=mid;
+                    if(comparison<0)lo=mid+1;else hi=mid-1;
+                }
+                if(ownerRoot>=0){
+                    var root=roots.get(ownerRoot).node();
+                    var rootKey=StressCommitHandoff.keyFor(root.cell(),"PDD:STRESS_PROBE");
+                    var recovered=plot.readRecoveredStress(rootKey,root.incarnation());
+                    if(recovered!=null){
+                        job.observedPlotOwners.add(cell.owner());
+                        if(root.cell().equals(cell))observation=recovered;
+                        else observation=plot.readStress(key);
+                    }
+                }
+            }
+            if(observation!=null)job.observedPlotOwners.add(cell.owner());
+        }
         else observation=world==null?null:world.readStress(key);
         if(observation==null||!observation.loaded())return Probe.unavailable();
         if(observation.isAir())return Probe.empty();
@@ -240,12 +283,12 @@ public final class StressRuntime {
         requireThread();long tick=server.overworld().getGameTime();
         if(faulted||tick==lastTick)return;
         if(tick<lastTick){faulted=true;log.error("[PDD-STRESS-LEDGER] phase=HALT reason=GAME_CLOCK_ROLLBACK");return;}
-        lastTick=tick;used=0;shown=0;archivesThisTick=0;materialLookup.beginTick();
+        lastTick=tick;used=0;shown=0;archivesThisTick=0;originsThisTick=0;materialLookup.beginTick();
         try{
             int turns=order.size();
             while(turns-->0&&!order.isEmpty()&&used<workCap){
                 String id=order.removeFirst();Job job=jobs.get(id);if(job==null)continue;
-                if(job.pressureBytes==journal.activeBytes()&&tick<job.pressureRetryAt){order.addLast(id);continue;}
+                if(job.pressureBytes==journal.activeBytes()&&job.pressureLogical==journal.activeLogicalBytes()&&tick<job.pressureRetryAt){order.addLast(id);continue;}
                 job.pressureBytes=-1;
                 try{step(job,tick);}catch(BudgetEnd exhausted){/* exact shared allowance; preserve cursors */}
                 catch(CapacityException pressure){
@@ -253,14 +296,15 @@ public final class StressRuntime {
                     // keep its immutable prefix, and allow other jobs to drain.
                     long created=job.reservation.createdGameTick(),ttl=job.reservation.policy().ttlTicks();
                     long deadline=created>Long.MAX_VALUE-ttl?Long.MAX_VALUE:created+ttl;
-                    job.pressureBytes=journal.activeBytes();job.pressureRetryAt=Math.min(deadline,tick>Long.MAX_VALUE-20?Long.MAX_VALUE:tick+20);
+                    job.pressureBytes=journal.activeBytes();job.pressureLogical=journal.activeLogicalBytes();job.pressureRetryAt=Math.min(deadline,tick>Long.MAX_VALUE-20?Long.MAX_VALUE:tick+20);
                     if(++capacityRetries==1||capacityRetries%256==0)
-                        log.warn("[PDD-STRESS-LEDGER] phase=PRESSURE id={} activeBytes={} activeRecords={} retries={} QReissue=false",id,journal.activeBytes(),journal.activeCount(),capacityRetries);
+                        log.warn("[PDD-STRESS-LEDGER] phase=PRESSURE id={} reason={} roots={} snapshot={} activeBytes={} decodedBytes={} activeRecords={} retries={} QReissue=false",
+                                id,pressure.getMessage(),job.reservation.seeds().size(),job.snapshot.size(),journal.activeBytes(),journal.activeLogicalBytes(),journal.activeCount(),capacityRetries);
                 }
                 if(jobs.containsKey(id))order.addLast(id);
             }
-            if(server.getTickCount()%100==0)log.info("[PDD-STRESS-LEDGER] phase=SUMMARY jobs={} work={} cap={} records={} fault=false seals={} handoffs={} unchangedSnapshotWritesAvoided={} unchangedSealWritesAvoided={} traceSuppressed={} activeRecords={} archivedRecords={} activeBytes={} pressureRetries={} archiveConflicts={}",
-                    jobs.size(),used,workCap,journal.size(),seals,handoffs,snapshotWritesAvoided,sealWritesAvoided,traceSuppressed,journal.activeCount(),journal.archivedCount(),journal.activeBytes(),capacityRetries,archiveConflicts);
+            if(server.getTickCount()%100==0)log.info("[PDD-STRESS-LEDGER] phase=SUMMARY jobs={} work={} cap={} records={} fault=false seals={} handoffs={} unchangedSnapshotWritesAvoided={} unchangedSealWritesAvoided={} traceSuppressed={} activeRecords={} archivedRecords={} activeBytes={} decodedBytes={} worldOriginJobs={} plotOriginJobs={} pressureRetries={} archiveConflicts={}",
+                    jobs.size(),used,workCap,journal.size(),seals,handoffs,snapshotWritesAvoided,sealWritesAvoided,traceSuppressed,journal.activeCount(),journal.archivedCount(),journal.activeBytes(),journal.activeLogicalBytes(),worldOriginOrder.size(),plotOriginOrder.size(),capacityRetries,archiveConflicts);
         }catch(IOException|RuntimeException failure){
             faulted=true;log.error("[PDD-STRESS-LEDGER] phase=HALT reason=SAVE_OR_PLAN_FAILURE QReissue=false",failure);
         }
@@ -271,17 +315,8 @@ public final class StressRuntime {
     }
     private void step(Job job,long tick)throws IOException {
         Entry entry=journal.get(job.id);var r=job.reservation;
-        if(!job.originsRecovered){
-            while(job.originIndex<job.orderedOrigins.size()){
-                charge();var origin=job.orderedOrigins.get(job.originIndex);
-                boolean accepted=PlotKeyCodec.isPlotStorage(origin.key())
-                        ?plot!=null&&plot.recoverStressOrigin(origin,r.settings(),r.createdGameTick(),r.policy().ttlTicks())
-                        :world!=null&&world.recoverStressOrigin(origin,r.settings(),r.createdGameTick(),r.policy().ttlTicks());
-                if(!accepted)return;job.originIndex++;
-            }
-            job.originsRecovered=true;
-        }
         if(entry.phase()==Phase.CLOSED){
+            if(!deliverOrigins(job))return;
             // A v4 CLOSED record claims handoff, not successful damage. Verify
             // every output without reissuing any missing receipt after a restore.
             while(job.deliveryIndex<entry.plans().size()){
@@ -308,21 +343,50 @@ public final class StressRuntime {
             charge();journal.deferResidual(job.id,"SNAPSHOT_REPLACED_DEFERRED_BOUNDED");job.finished=true;
             entry=journal.get(job.id);
         }
+        boolean originsAttempted=!entry.holdsOrigins();
+        if(originsAttempted)deliverOrigins(job);
         if(!job.finished){
             if(job.session==null){
                 if(activeSessions>=StressScheduler.MAX_JOBS)return;
                 charge();job.session=new Session(r.seeds(),r.policy(),r.settings(),r.createdGameTick(),true);activeSessions++;
             }
             if(job.validation==null){
-                for(int i=0;i<QUANTUM&&used<workCap;i++){
-                    job.probes.advance(job.session,cell->frozen(job,cell),tick,this::charge);
-                    if(job.session.finished())break;
+                int quantum=r.seeds().size()>256?LARGE_QUANTUM:QUANTUM;
+                try{
+                    for(int i=0;i<quantum&&used<workCap;i++){
+                        job.probes.advance(job.session,cell->frozen(job,cell),tick,this::charge);
+                        if(job.session.finished()||job.session.waiting())break;
+                    }
+                }catch(BudgetEnd exhausted){/* persist the frozen partial operation too */}
+                job.session.verify();
+                // Before the last root, no derived plan can exist. Persist its
+                // frozen observations, but do not repeatedly CAS the entire
+                // growing graph. Validate once at the root publication barrier.
+                if(!job.session.rootsExpanded()){
+                    journal.snapshot(job.id,job.snapshot);
+                    return;
+                }
+                if(!entry.holdsOrigins()&&!job.session.finished()&&!job.session.waiting()&&r.seeds().size()>256){
+                    // Let a large graph finish a bounded planning slice before
+                    // revalidating its full prefix again. Direct roots already
+                    // own their original durable partition.
+                    journal.snapshot(job.id,job.snapshot);
+                    return;
                 }
                 // Persist observations before they may influence a later durable output.
                 // Retain the validation cursor even when quota pressure prevents
                 // this snapshot write. No output is published until sealProgress
                 // durably writes the same frozen graph and exact plan together.
-                job.validation=new ArrayList<>(job.snapshot.entrySet());job.validationIndex=0;
+                // A published ordinary cell is already consumed; the mutation
+                // watcher handles replacements and the commit has its own CAS.
+                // Positional Copycat revisions still receive a live read.
+                job.validation=new ArrayList<>();
+                for(var probe:job.snapshot.entrySet()){
+                    var saved=probe.getValue().node();
+                    if(!job.published.contains(entry,probe.getKey())||saved!=null&&!saved.materialRevision().isEmpty())
+                        job.validation.add(Map.entry(probe.getKey(),probe.getValue()));
+                }
+                job.validationIndex=0;
                 if(entry.phase()==Phase.RESERVED){
                     journal.snapshot(job.id,job.snapshot);
                     if(journal.get(job.id)==entry)snapshotWritesAvoided++;
@@ -363,7 +427,7 @@ public final class StressRuntime {
                 else{
                     seals++;
                     if(showTrace())log.info("[PDD-STRESS-LEDGER] phase=SEALED id={} Q={} absorbed={} direct={} plasticReservedUnused={} unused={} deferred={} nodes={} deadline={}",
-                            job.id,sealed.ledger().reservedQ(),sealed.ledger().absorbedQ(),sealed.ledger().directQ(),sealed.ledger().plasticUnusedQ(),sealed.ledger().unusedQ(),sealed.ledger().pendingQ(),sealed.plans().size(),r.createdGameTick()+r.policy().ttlTicks());
+                            job.id,sealed.ledger().reservedQ(),sealed.ledger().absorbedQ(),sealed.ledger().directQ(),sealed.ledger().plasticUnusedQ(),sealed.ledger().unusedQ(),sealed.ledger().pendingQ(),sealed.plans().size(),deadline(r));
                 }
                 entry=sealed;
             }
@@ -371,6 +435,7 @@ public final class StressRuntime {
         }
         if(job.finished&&job.session!=null){job.session=null;activeSessions--;}
         entry=journal.get(job.id);
+        if(entry.holdsOrigins()||(!originsAttempted&&!deliverOrigins(job))||!job.originsRecovered)return;
         int handoffs=0;
         while(job.deliveryIndex<entry.plans().size()&&handoffs++<QUANTUM&&used<workCap){
             charge();var plan=entry.plans().get(job.deliveryIndex);
@@ -385,6 +450,40 @@ public final class StressRuntime {
         if(entry.phase()==Phase.SEALED&&entry.ledger().finished()&&entry.ledger().pendingQ()==0&&job.deliveryIndex>=entry.plans().size()){
             archive(job);
         }
+    }
+    private Deque<String> originOrder(Job job){return job.plotOrigins?plotOriginOrder:worldOriginOrder;}
+    private static long deadline(Reservation r){
+        long start=r.createdGameTick(),ttl=r.policy().ttlTicks();
+        return start>Long.MAX_VALUE-ttl?Long.MAX_VALUE:start+ttl;
+    }
+    /** The reservation is the durable input spool. No source is dropped merely
+     * because the direct receipt queue is temporarily full. Preserve each
+     * grant's reverse-layer order and do not overtake older same-domain jobs. */
+    private boolean deliverOrigins(Job job)throws IOException{
+        if(job.originsRecovered)return true;
+        var pending=originOrder(job);
+        if(!job.id.equals(pending.peekFirst()))return false;
+        var r=job.reservation;
+        int batch=0;
+        while(job.originIndex<job.orderedOrigins.size()&&used<workCap
+                &&originsThisTick<MAX_ORIGINS_PER_TICK&&batch++<MAX_ORIGINS_PER_TICK/2){
+            charge();originsThisTick++;
+            var origin=job.orderedOrigins.get(job.originIndex);
+            boolean accepted=job.plotOrigins
+                    ?plot!=null&&plot.recoverStressOrigin(origin,r.settings(),r.createdGameTick(),r.policy().ttlTicks())
+                    :world!=null&&world.recoverStressOrigin(origin,r.settings(),r.createdGameTick(),r.policy().ttlTicks());
+            if(!accepted){
+                if(job.lastQueuePressureLog==Long.MIN_VALUE||lastTick-job.lastQueuePressureLog>=100){
+                    job.lastQueuePressureLog=lastTick;
+                    if(showTrace())log.info("[PDD-STRESS-LEDGER] phase=ORIGIN_WAIT id={} applyId={} owner={} delivered={} total={} deadline={} gameTick={} QReissue=false",
+                            job.id,origin.applyId(),job.plotOrigins?"PLOT":"WORLD",job.originIndex,job.orderedOrigins.size(),deadline(r),lastTick);
+                }
+                return false;
+            }
+            job.originIndex++;
+        }
+        if(job.originIndex<job.orderedOrigins.size())return false;
+        job.originsRecovered=true;pending.removeFirst();return true;
     }
     private void archive(Job job)throws IOException {
         // Retirement is not a damage/mutation operation; delaying it does not
@@ -401,6 +500,7 @@ public final class StressRuntime {
     }
     private void remove(Job job){
         jobs.remove(job.id);if(job.session!=null)activeSessions--;
+        if(!job.originsRecovered)originOrder(job).remove(job.id);
         for(var origin:job.reservation.origins())originJobs.remove(origin.applyId(),job.id);
         for(var cell:job.watched){
             Set<String> owners=watches.get(cell);if(owners==null)continue;owners.remove(job.id);

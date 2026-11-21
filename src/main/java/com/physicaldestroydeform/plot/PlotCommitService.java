@@ -58,6 +58,8 @@ public final class PlotCommitService {
     private boolean fault;
     private long lastLifecycleTick=-1;
     private long accepted,rejected,damaged,broken,blocked,splitOrphans,lastSummary,suppressedCommitLogs;
+    private long lastSourceLogTick=Long.MIN_VALUE;
+    private int sourceLogs;
     public PlotCommitService(MinecraftServer server,DamageModel.Settings settings,Logger log) throws IOException {
         this.server=Objects.requireNonNull(server);this.log=Objects.requireNonNull(log);
         this.damageSettings=Objects.requireNonNull(settings);
@@ -170,9 +172,15 @@ public final class PlotCommitService {
                                 ?observed.incarnation():null;
                     },targetMaterials::direction);
             try{
-                if(stress!=null&&!stress.reserve(projection.plot(),materials,damageSettings))return;
+                if(stress!=null){
+                    boolean reserved=stress.reserve(projection.plot(),materials,damageSettings);
+                    if(!projection.plot().isEmpty()||projection.missingOwnerQ()>0)
+                        log.info("[PDD-PLOT] phase=RESERVED credit={} plotTargets={} QPlot={} queued={} reserved={} QWorldUnchanged={} QMissingMaterial={} QUnavailableOwner={} QRejected={} QUnused={} handoff=BOUNDED_STRESS_SPOOL",
+                                grant.id(),projection.plot().size(),projection.plot().stream().mapToDouble(WorldCommitCore.Intent::sealedQ).sum(),core.queued(),reserved,projection.worldQ(),projection.missingMaterialQ(),projection.missingOwnerQ(),projection.rejectedQ(),grant.unused());
+                    return;
+                }
             }catch(StressReservationJournal.CapacityException pressure){
-                rejected++;log.warn("[PDD-STRESS-LEDGER] phase=ADMISSION_REJECT owner=PLOT reason=ACTIVE_CAPACITY credit={} QUnused={} QReissue=false",grant.id(),projection.plot().stream().mapToDouble(WorldCommitCore.Intent::sealedQ).sum());return;
+                rejected++;log.warn("[PDD-STRESS-LEDGER] phase=ADMISSION_REJECT owner=PLOT reason={} credit={} roots={} QUnused={} QReissue=false",pressure.getMessage(),grant.id(),projection.plot().size(),projection.plot().stream().mapToDouble(WorldCommitCore.Intent::sealedQ).sum());return;
             }
             for(var intent:MoveRuntime.reverseOrder(projection.plot())){
                 var decision=core.submit(intent,server.getTickCount(),server.overworld().getGameTime());
@@ -427,6 +435,11 @@ public final class PlotCommitService {
                     observed.loaded(),false,observed.hasBlockEntity(),observed.unsafeMultiblock(),true,observed.unsafePhysicsPhase());
         return observed;
     }
+    public WorldCommitCore.Observation readRecoveredStress(SparseStateKey key,String expectedIncarnation){
+        if(fault||core.ioFault()||!server.isSameThread()||isMoveQuarantined(key)||movement.fences.held(key))return null;
+        if(!gateway.bindRecoveredStressRoot(key,expectedIncarnation))return null;
+        return readStress(key);
+    }
     public boolean hasStressReceipt(WorldCommitCore.Intent intent){
         return !fault&&!core.ioFault()&&StressCommitHandoff.receiptMatches(intent,journal.receipt(intent.applyId()));
     }
@@ -442,9 +455,18 @@ public final class PlotCommitService {
         if(prior!=null)return StressCommitHandoff.verifyReceipt(intent,settings,prior);
         gateway.readRecoveredIfLoaded(intent); // Bind only against saved owner UUID/epoch/incarnation.
         long deadline=created>Long.MAX_VALUE-ttl?Long.MAX_VALUE:created+ttl;
-        var result=core.submitSealed(intent,settings,server.overworld().getGameTime(),deadline);
+        var result=core.trySubmitSealed(intent,settings,server.overworld().getGameTime(),deadline);
         if(core.ioFault())throw new IOException("Plot origin recovery journal failure");
-        return StressCommitHandoff.verifyReceipt(intent,settings,result.receipt());
+        boolean durable=StressCommitHandoff.verifyReceipt(intent,settings,result.receipt());
+        if(durable&&result.result()==WorldCommitCore.Outcome.DEFERRED)accepted++;
+        if(durable&&result.result()==WorldCommitCore.Outcome.ABORTED){
+            rejected++;
+            long now=server.getTickCount();
+            if(lastSourceLogTick!=now){lastSourceLogTick=now;sourceLogs=0;}
+            if(sourceLogs++<MAX_LOGS_PER_TICK)log.warn("[PDD-PLOT] phase=SOURCE_HANDOFF id={} reason={} deadline={} gameTick={}",intent.applyId(),result.reason(),deadline,server.overworld().getGameTime());
+            else suppressedCommitLogs++;
+        }
+        return durable;
     }
     public boolean offerStress(StressReservationJournal.Entry entry,StressPropagation.PlannedNode plan,WorldCommitCore.Intent intent)throws IOException {
         if(fault||core.ioFault())return false;

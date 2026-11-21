@@ -1,4 +1,4 @@
-# PDD 0.6.0 Fix3 — Physical Destructive and Deforming
+# PDD 0.6.0 Fix4 — Physical Destructive and Deforming
 
 Minecraft 1.21.1 · Java 21 · NeoForge 21.1.228 · Sable 2.0.6 · Create 6.0.10 · Aeronautics 1.3.2. 선택 호환: Copycats+ 3.0.11.
 
@@ -11,6 +11,8 @@ Minecraft 1.21.1 · Java 21 · NeoForge 21.1.228 · Sable 2.0.6 · Create 6.0.10
 [0.6.0 Fix2: 충돌 ID·Plot 생명주기·응력 비용 및 회귀 검증](docs/verification/PDD-0.6.0-Fix2.md). 물성·F/Q 공식 및 응력 상한은 유지하고 중복 작업과 일상 로그 비용을 줄인다. 상세 진단 시 JVM 옵션 `-Dpdd.diagnostics.fullTrace=true`를 사용한다.
 
 [0.6.0 Fix3: 응력 완료 원장 압축·복구 및 반복 연산 절감](docs/verification/PDD-0.6.0-Fix3.md). 월드 백업을 먼저 만들고, 기존 v4 응력 원장은 삭제하지 않는다. 완료 원장만 증명 후 `closed-v1`로 이전한다. 실제 빌드는 사용자 검증 대기.
+
+[0.6.0 Fix4: 대형 충돌 응력 예약·분할 처리·로그 경량화](docs/verification/PDD-0.6.0-Fix4.md). 한쪽 F 상한 32,768, 양쪽 합계 65,536개까지 동일 예약으로 보존. 128개 파생 상한/512 공통 작업량/원본 TTL 유지. 대형 원장만 압축하고 원래 v4 해시 및 CRC를 유지한다. 월드 백업 필수.
 
 ## 기능
 
@@ -31,4 +33,4 @@ Minecraft 1.21.1 · Java 21 · NeoForge 21.1.228 · Sable 2.0.6 · Create 6.0.10
 
 실제 Gradle/JUnit, GitHub Actions 및 인게임 검증은 사용자 실행 전에는 NOT_RUN이다. 검증 로그의 주요 태그: `[PDD-0.6.0]`, `[PDD-STRESS-LEDGER]`, `[PDD-STRESS-APPLY]`, `[PDD-MOVE]`, `[PDD-DEFORM]`, `[PDD-DEFORM-Q]`, `[PDD-DEFORM-BLOCKED]`, `[PDD-COPYCAT]`, `[PDD-PERSIST]`. 상세 절차는 검증 문서를 참조한다.
 
-Fix3 기준 main SHA: `6be84b460b4aaca08a321b232a1361c3cab790ad`. 기존 저장 데이터는 백업한 뒤 사용하고 구버전으로 다운그레이드하지 않는다. 안전하지 않은 소유권, 재질, 이동, 연결성 또는 HeatMap 상태는 허용하지 않는다.
+Fix4 기준 main SHA: `a4b411b186e3da038609e4feb572ddc1da883192`. 기존 저장 데이터는 백업한 뒤 사용하고 구버전으로 다운그레이드하지 않는다. 안전하지 않은 소유권, 재질, 이동, 연결성 또는 HeatMap 상태는 허용하지 않는다.

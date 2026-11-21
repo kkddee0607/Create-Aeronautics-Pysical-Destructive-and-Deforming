@@ -1,6 +1,7 @@
 package com.physicaldestroydeform.collision;
 
 import com.physicaldestroydeform.diagnostics.NativeCollisionTelemetry;
+import com.physicaldestroydeform.diagnostics.TraceBudget;
 import com.physicaldestroydeform.material.MaterialPlanner;
 import com.physicaldestroydeform.material.MaterialRegistry;
 import com.physicaldestroydeform.material.PreviewDamageLedger;
@@ -1024,11 +1025,11 @@ public final class RealFixRuntimeBridge {
                         }
                     }
                     if(grant!=null && lines++<MAX_LOG_PER_TICK)
-                        log.info("[PDD-LEDGER] dimension={} tick={} episodeGeneration={} source={} status={} regions={} checksA={} checksB={} rejectedPoints={} Q={} allocatedA={} allocatedB={} unused={} aTargets={} bTargets={} ownerEpochA={} ownerEpochB={} sourceCapSaturated={} mutation=OFF",
+                        log.info("[PDD-LEDGER] dimension={} tick={} episodeGeneration={} source={} status={} regions={} checksA={} checksB={} rejectedPoints={} Q={} allocatedA={} allocatedB={} unused={} aTargets={} bTargets={} aSample={} bSample={} ownerEpochA={} ownerEpochB={} sourceCapSaturated={} mutation=OFF",
                                 stamp.dimension,stamp.tick,grant.id().episodeGeneration(),grant.source(),grant.status(),
                                 grant.observedRegions(),regions.checksA(),regions.checksB(),regions.rejected(),
                                 grant.issuedQ(),grant.allocatedA(),grant.allocatedB(),grant.unused(),
-                                grant.a(),grant.b(),pair.a().generation(),pair.b().generation(),saturatedPoll);
+                                grant.a().size(),grant.b().size(),TraceBudget.sample(grant.a(),fullTrace?32:4),TraceBudget.sample(grant.b(),fullTrace?32:4),pair.a().generation(),pair.b().generation(),saturatedPoll);
                     if(showGroup && lines++<MAX_LOG_PER_TICK) log.info("[PDD-TARGET] dimension={} tick={} ownerA={} ownerAGeneration={} ownerB={} ownerBGeneration={} targetA={} fingerprintA={} targetB={} fingerprintB={} frameMethodA={} frameMethodB={} shapeAudit={} quality={} reason={} approachByAabb={} armedFromGap={} recentGap={} worldMutation=OFF",
                             stamp.dimension,stamp.tick,pair.a().stableKey(),pair.a().generation(),pair.b().stableKey(),pair.b().generation(),
                             a==null?"UNVERIFIED":a.localBlock(),a==null?"UNVERIFIED":a.fingerprint(),

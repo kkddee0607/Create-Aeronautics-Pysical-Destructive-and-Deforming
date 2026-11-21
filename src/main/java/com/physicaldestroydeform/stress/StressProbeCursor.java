@@ -23,7 +23,7 @@ final class StressProbeCursor {
                 return prior.probe();
             }
             Probe probe=frozen.read(cell);reads.add(new Read(cell,probe));return probe;
-        },tick,1);
+        },tick,1,false);
         reads.clear();charged=false;return result;
     }
 }

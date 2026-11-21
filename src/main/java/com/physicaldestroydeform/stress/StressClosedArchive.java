@@ -47,7 +47,7 @@ final class StressClosedArchive {
     }
     boolean matchesEntry(Entry e)throws IOException {
         Closed c=records.get(e.reservation().creditId());
-        return c!=null&&c.entryHash().equals(hash(encode(e)));
+        return c!=null&&c.entryHash().equals(hash(encodeCanonical(e)));
     }
     void confirmDurable(String id)throws IOException {
         // A previous process may have stopped between rename and directory
@@ -59,13 +59,13 @@ final class StressClosedArchive {
         // Runtime retries have the same immutable sources/settings/generation but
         // may occur on a later tick or after a configuration reload. Never renew TTL.
         if(retry)r=new Reservation(r.creditId(),r.materialGeneration(),0,Policy.defaults(),r.settings(),r.seeds(),r.origins());
-        return hash(encode(new Entry(r,Phase.RESERVED,List.of(),null,"RESERVED")));
+        return hash(encodeCanonical(new Entry(r,Phase.RESERVED,List.of(),null,"RESERVED")));
     }
     void store(Entry e)throws IOException {
         Reservation r=e.reservation();
         var origins=r.origins().stream().map(o->o.applyId()).toList();
         for(String origin:origins)if(!r.creditId().equals(owners.get(origin)))throw new IOException("stress archive origin ownership conflict");
-        Closed c=new Closed(r.creditId(),reservationHash(r,false),reservationHash(r,true),hash(encode(e)),origins,e.ledger(),e.reason());
+        Closed c=new Closed(r.creditId(),reservationHash(r,false),reservationHash(r,true),hash(encodeCanonical(e)),origins,e.ledger(),e.reason());
         Path target=path(c.id()),part=target.getParent();
         if(!Files.exists(part)){Files.createDirectory(part);forceDirectory(root);}
         if(Files.exists(target))throw new IOException("unexpected existing stress archive receipt");
@@ -99,7 +99,7 @@ final class StressClosedArchive {
                 if(in.readInt()!=MAGIC||in.readInt()!=VERSION)throw new IOException("stress archive schema");
                 String id=in.readUTF(),reservation=in.readUTF(),retry=in.readUTF(),entry=in.readUTF();
                 if(id.isBlank()||id.length()>4096||!digest(reservation)||!digest(retry)||!digest(entry))throw new IOException("stress archive identity");
-                int n=in.readInt();if(n<0||n>8192)throw new IOException("stress archive origin count");
+                int n=in.readInt();if(n<0||n>MAX_ROOTS)throw new IOException("stress archive origin count");
                 var origins=new ArrayList<String>();var seen=new HashSet<String>();
                 for(int i=0;i<n;i++){String origin=in.readUTF();if(origin.isBlank()||!seen.add(origin))throw new IOException("stress archive origins");origins.add(origin);}
                 double q=in.readDouble(),a=in.readDouble(),d=in.readDouble(),p=in.readDouble(),u=in.readDouble();int nodes=in.readInt();

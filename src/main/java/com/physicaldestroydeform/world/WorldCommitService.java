@@ -45,6 +45,8 @@ public final class WorldCommitService {
     private Cell ownBreak;
     private boolean fault;
     private long lastSummaryTick, rejected, accepted, appliedDamage, appliedBreak, blocked, suppressedCommitLogs;
+    private long lastSourceLogTick=Long.MIN_VALUE;
+    private int sourceLogs;
     private long recoveredDeferredAborted, recoveredPreparedQuarantined, recoveryLoadMisses;
     private int recoverySamples;
     public WorldCommitService(MinecraftServer server,DamageModel.Settings damage,Logger log) throws IOException {
@@ -142,9 +144,15 @@ public final class WorldCommitService {
                                 ?observed.incarnation():null;
                     },targetMaterials::direction);
             try{
-                if(stress!=null&&!stress.reserve(projected.world(),materials,damageSettings))return;
+                if(stress!=null){
+                    boolean reserved=stress.reserve(projected.world(),materials,damageSettings);
+                    if(VERBOSE&&(!projected.world().isEmpty()||projected.missingIncarnationQ()>0||projected.rejectedQ()>0))
+                        log.info("[PDD-COMMIT] phase=RESERVED credit={} worldIntents={} QWorld={} queued={} reserved={} materialGeneration={} QPlotDeferred={} QMissingMaterial={} QInvalidOwner={} QMissingWorldOrQuarantine={} QUnusedSource={} handoff=BOUNDED_STRESS_SPOOL",
+                                grant.id(),projected.world().size(),projected.world().stream().mapToDouble(WorldCommitCore.Intent::sealedQ).sum(),core.queued(),reserved,materials.generation(),projected.plotQ(),projected.missingMaterialQ(),projected.rejectedQ(),projected.missingIncarnationQ(),grant.unused());
+                    return;
+                }
             }catch(StressReservationJournal.CapacityException pressure){
-                rejected++;log.warn("[PDD-STRESS-LEDGER] phase=ADMISSION_REJECT owner=WORLD reason=ACTIVE_CAPACITY credit={} QUnused={} QReissue=false",grant.id(),projected.world().stream().mapToDouble(WorldCommitCore.Intent::sealedQ).sum());return;
+                rejected++;log.warn("[PDD-STRESS-LEDGER] phase=ADMISSION_REJECT owner=WORLD reason={} credit={} roots={} QUnused={} QReissue=false",pressure.getMessage(),grant.id(),projected.world().size(),projected.world().stream().mapToDouble(WorldCommitCore.Intent::sealedQ).sum());return;
             }
             int count=0;
             for(var intent:MoveRuntime.reverseOrder(projected.world())) {
@@ -392,11 +400,18 @@ public final class WorldCommitService {
         var prior=journal.receipt(intent.applyId());
         if(prior!=null)return StressCommitHandoff.verifyReceipt(intent,settings,prior);
         long deadline=created>Long.MAX_VALUE-ttl?Long.MAX_VALUE:created+ttl;
-        var result=core.submitSealed(intent,settings,server.overworld().getGameTime(),deadline);
+        var result=core.trySubmitSealed(intent,settings,server.overworld().getGameTime(),deadline);
         if(core.ioFault())throw new IOException("World origin recovery journal failure");
         boolean accepted=StressCommitHandoff.verifyReceipt(intent,settings,result.receipt());
         if(accepted&&result.result()==WorldCommitCore.Outcome.DEFERRED){
             Cell cell=new Cell(intent.key());watched.add(cell);pendingCells.merge(cell,1,Integer::sum);
+            this.accepted++;
+        }else if(accepted&&result.result()==WorldCommitCore.Outcome.ABORTED){
+            rejected++;
+            long now=server.getTickCount();
+            if(lastSourceLogTick!=now){lastSourceLogTick=now;sourceLogs=0;}
+            if(sourceLogs++<MAX_COMMIT_LOGS_PER_TICK)log.warn("[PDD-COMMIT] phase=SOURCE_HANDOFF id={} reason={} deadline={} gameTick={}",intent.applyId(),result.reason(),deadline,server.overworld().getGameTime());
+            else suppressedCommitLogs++;
         }
         return accepted;
     }

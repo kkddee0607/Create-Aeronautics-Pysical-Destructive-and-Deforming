@@ -140,6 +140,16 @@ public final class WorldCommitCore {
             throw new IllegalStateException("sealed handoff requires durable pending payloads");
         return enqueue(intent,settings,gameTick,expiresGameTick,true,gameTick>expiresGameTick);
     }
+    /** The stress reservation still durably owns this Q until a receipt is
+     * returned. Temporary queue pressure is not a terminal rejection. */
+    public synchronized Decision trySubmitSealed(Intent intent,DamageModel.Settings settings,long gameTick,long expiresGameTick){
+        Objects.requireNonNull(intent);Objects.requireNonNull(settings);
+        if(gameTick<0||expiresGameTick<0||!journal.supportsPendingPayload())
+            return submitSealed(intent,settings,gameTick,expiresGameTick);
+        if(!ioFault&&gameTick<=expiresGameTick&&queue.size()>=MAX_QUEUED&&journal.receipt(intent.applyId())==null)
+            return new Decision(Outcome.DEFERRED,"STRESS_QUEUE_PRESSURE",null);
+        return submitSealed(intent,settings,gameTick,expiresGameTick);
+    }
     private Decision enqueue(Intent intent,DamageModel.Settings settings,long gameTick,
                              long deadline,boolean sealedHandoff,boolean expired) {
         if(ioFault)return new Decision(Outcome.QUARANTINED,"IO_FAULT",null);

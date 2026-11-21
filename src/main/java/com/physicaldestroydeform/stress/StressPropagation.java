@@ -10,6 +10,9 @@ import java.util.*;
  */
 public final class StressPropagation {
     public static final String REVISION="PDD-1.0.8/Q-STRESS-2";
+    // Both sides of a propagated Grant may project into the same Plot service.
+    // This is a source-root bound, NOT an increase to derived node or tick budgets.
+    public static final int MAX_ROOTS=2*com.physicaldestroydeform.collision.ForcePropagation.MAX_NODES_PER_SIDE;
     public record Policy(int maxDepth,int maxNodes,int maxNodesPerTick,double minQ,long ttlTicks) {
         public Policy {
             if(maxDepth<1||maxDepth>16||maxNodes<1||maxNodes>4096
@@ -106,6 +109,7 @@ public final class StressPropagation {
         private long lastTick=Long.MIN_VALUE;
         private int usedThisTick;
         private boolean finished;
+        private boolean waiting;
         private final boolean sealBounded;
         private double deferred;
         public Session(List<Seed> input,Policy policy,DamageModel.Settings damage,long tick) {
@@ -115,7 +119,7 @@ public final class StressPropagation {
         public Session(List<Seed> input,Policy policy,DamageModel.Settings damage,long tick,boolean sealBounded) {
             this.sealBounded=sealBounded;
             this.policy=Objects.requireNonNull(policy);this.damage=Objects.requireNonNull(damage);
-            if(tick<0||input.isEmpty()||input.size()>8192)throw new IllegalArgumentException("invalid stress roots");
+            if(tick<0||input.isEmpty()||input.size()>MAX_ROOTS)throw new IllegalArgumentException("invalid stress roots");
             started=tick;
             var sorted=new ArrayList<>(input);sorted.sort(Comparator.comparing(s->s.node.cell));
             double total=0;
@@ -133,22 +137,29 @@ public final class StressPropagation {
             return seeds.equals(sorted)&&policy.equals(p)&&damage.equals(d)&&started==tick;
         }
         public int advance(Graph graph,long tick,int allowance) {
+            return advance(graph,tick,allowance,true);
+        }
+        // Runtime cursor verifies at the durable batch boundary instead of
+        // rescanning every unprocessed root and frontier for each single probe.
+        int advance(Graph graph,long tick,int allowance,boolean verifyEachCall) {
             Objects.requireNonNull(graph);
             if(tick<started||tick<lastTick||allowance<0)throw new IllegalArgumentException("invalid stress clock/budget");
             if(finished)return 0;
+            waiting=false;
             if(lastTick!=tick){lastTick=tick;usedThisTick=0;}
             int available=Math.min(allowance,policy.maxNodesPerTick-usedThisTick),used=0;
             boolean expired=tick-started>=policy.ttlTicks;
             // Roots are visited at construction: stress can never return to an original direct target.
             while(seedIndex<seeds.size()&&used<available){
                 Seed seed=seeds.get(seedIndex);used++;
+                if(seed.q==0){seedIndex++;continue;}
                 Probe current=checked(graph,seed.node.cell);
-                if(current.state==State.UNAVAILABLE&&!expired)break;
+                if(current.state==State.UNAVAILABLE&&!expired){waiting=true;break;}
                 if(current.state!=State.SOLID||!current.node.equals(seed.node)){
                     close(current.state==State.UNAVAILABLE?Unused.UNAVAILABLE_TTL:Unused.STALE_NODE,seed.q);
                 }else{
                     List<Edge> edges=edges(graph,seed.node,seed.direction);
-                    if(edges==null&&!expired)break;
+                    if(edges==null&&!expired){waiting=true;break;}
                     if(edges==null)close(Unused.UNAVAILABLE_TTL,seed.q);
                     else distribute(seed.q,seed.direction,edges,frontier);
                 }
@@ -166,13 +177,13 @@ public final class StressPropagation {
                 }
                 if(a.q<policy.minQ){close(Unused.BELOW_MIN_Q,a.q);frontier.pollFirstEntry();continue;}
                 Probe live=checked(graph,entry.getKey());
-                if(live.state==State.UNAVAILABLE&&!expired)break;
+                if(live.state==State.UNAVAILABLE&&!expired){waiting=true;break;}
                 if(live.state!=State.SOLID||!live.node.equals(a.expected)){
                     close(live.state==State.UNAVAILABLE?Unused.UNAVAILABLE_TTL:Unused.STALE_NODE,a.q);
                     frontier.pollFirstEntry();continue;
                 }
                 List<Edge> edges=edges(graph,a.expected,a.direction);
-                if(edges==null&&!expired)break;
+                if(edges==null&&!expired){waiting=true;break;}
                 if(edges==null){close(Unused.UNAVAILABLE_TTL,a.q);frontier.pollFirstEntry();continue;}
                 frontier.pollFirstEntry();visited.add(entry.getKey());nodes++;
                 DamageModel.Plan p=DamageModel.plan(a.q,a.expected.material,new BlockDamageState(),damage);
@@ -186,7 +197,7 @@ public final class StressPropagation {
             }
             if(seedIndex==seeds.size()&&frontier.isEmpty()&&!next.isEmpty())barrier();
             finished=seedIndex==seeds.size()&&frontier.isEmpty()&&next.isEmpty();
-            usedThisTick+=used;verify();return used;
+            usedThisTick+=used;if(verifyEachCall)verify();return used;
         }
         private void barrier(){
             for(var e:next.entrySet()){
@@ -253,6 +264,7 @@ public final class StressPropagation {
         /** Completed nodes already have complete minimum-depth arrivals; future levels cannot alter them. */
         public List<PlannedNode> partialPlans(){return List.copyOf(plans);}
         boolean finished(){return finished;}
+        boolean waiting(){return waiting;}
         int plannedNodes(){return plans.size();}
         public List<PlannedNode> plans(){
             if(!finished)throw new IllegalStateException("stress level planning not sealed");
@@ -264,7 +276,7 @@ public final class StressPropagation {
             if(finished)return;
             close(Unused.STOPPED,ledger().pendingQ);deferred=0;seedIndex=seeds.size();frontier.clear();next.clear();finished=true;verify();
         }
-        private void verify(){
+        void verify(){
             Ledger l=ledger();
             if(!Double.isFinite(l.accountedQ())||Math.abs(l.reservedQ-l.accountedQ())>Math.max(1e-8,l.reservedQ*1e-10))
                 throw new IllegalStateException("stress Q conservation failed");

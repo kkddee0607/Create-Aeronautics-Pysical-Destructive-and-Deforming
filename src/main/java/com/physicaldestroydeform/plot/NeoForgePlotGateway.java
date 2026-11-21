@@ -238,6 +238,9 @@ public final class NeoForgePlotGateway implements WorldCommitCore.WorldGateway,M
         if(cell==null)return null;
         return readIfLoaded(intent.key());
     }
+    boolean bindRecoveredStressRoot(SparseStateKey key,String expectedIncarnation){
+        return locate(key,true,Objects.requireNonNull(expectedIncarnation))!=null;
+    }
     @Override public String rejectRecoveredReason(WorldCommitCore.Intent intent){
         if(service.isMoveQuarantined(intent.key()))return "RECOVERY_MOVE_CELL_QUARANTINED";
         var owner=PlotOwnerFence.Owner.of(PlotKeyCodec.real(intent.key()));

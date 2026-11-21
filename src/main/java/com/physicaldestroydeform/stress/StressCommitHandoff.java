@@ -106,7 +106,7 @@ public final class StressCommitHandoff {
         long created=reservation.createdGameTick(),ttl=reservation.policy().ttlTicks();
         if(gameTick<created)throw new IllegalArgumentException("stress game clock rollback");
         long expires=created>Long.MAX_VALUE-ttl?Long.MAX_VALUE:created+ttl;
-        var result=core.submitSealed(original,reservation.settings(),gameTick,expires);
+        var result=core.trySubmitSealed(original,reservation.settings(),gameTick,expires);
         if(core.ioFault())throw new IOException("stress commit journal fault: "+result.reason());
         var receipt=result.receipt();
         if(!verifyReceipt(original,reservation.settings(),receipt))return false;

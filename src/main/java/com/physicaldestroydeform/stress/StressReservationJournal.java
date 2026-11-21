@@ -10,6 +10,11 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.*;
 import java.util.zip.CRC32C;
+import java.util.zip.CheckedOutputStream;
+import java.util.zip.Deflater;
+import java.util.zip.DeflaterOutputStream;
+import java.util.zip.InflaterInputStream;
+import java.util.zip.Inflater;
 import static com.physicaldestroydeform.stress.StressPropagation.*;
 
 /** Durable reservation/handoff boundary. No source F calculation and no game mutation.
@@ -18,8 +23,11 @@ import static com.physicaldestroydeform.stress.StressPropagation.*;
  * CLOSED records can be compacted only after durable commit receipt reconciliation.
  */
 public final class StressReservationJournal {
-    public static final int MAX_RECORDS=8192,MAX_RECORD_BYTES=4*1024*1024;
+    public static final int MAX_RECORDS=8192,MAX_RECORD_BYTES=16*1024*1024;
     public static final long MAX_STORE_BYTES=64L*1024*1024;
+    private static final int MAX_RAW_BYTES=64*1024*1024,COMPRESSED_FRAME=-5,COMPRESS_THRESHOLD=256*1024;
+    private static final long MAX_LOGICAL_STORE_BYTES=128L*1024*1024;
+    private static final int MAX_SNAPSHOT_CELLS=7*(MAX_ROOTS+4096);
     private static final int MAGIC=0x50535452,VERSION=4;
     private static final int CLOSURE_HEADROOM=2048;
     public static final class CapacityException extends IOException {
@@ -33,7 +41,7 @@ public final class StressReservationJournal {
         }
         public Reservation {
             text(creditId);Objects.requireNonNull(policy);Objects.requireNonNull(settings);
-            if(materialGeneration<0||createdGameTick<0||seeds.isEmpty()||seeds.size()>8192)
+            if(materialGeneration<0||createdGameTick<0||seeds.isEmpty()||seeds.size()>MAX_ROOTS)
                 throw new IllegalArgumentException("invalid stress reservation");
             var sorted=new ArrayList<>(seeds);sorted.sort(Comparator.comparing(s->s.node().cell()));
             var unique=new HashSet<Cell>();double sum=0;
@@ -67,7 +75,8 @@ public final class StressReservationJournal {
         public boolean holdsOrigins(){return phase==Phase.RESERVED||"ROOTS_PENDING".equals(reason);}
         public Entry {
             Objects.requireNonNull(reservation);Objects.requireNonNull(phase);text(reason);plans=List.copyOf(plans);snapshot=Map.copyOf(snapshot);
-            if(snapshot.size()>65536)throw new IllegalArgumentException("stress snapshot cap");
+            if(snapshot.size()>Math.max(65536,7*(reservation.seeds().size()+reservation.policy().maxNodes())))
+                throw new IllegalArgumentException("stress snapshot cap");
             if(phase==Phase.RESERVED){
                 if(!plans.isEmpty()||ledger!=null)throw new IllegalArgumentException("unsealed reservation has outputs");
             }else{
@@ -98,8 +107,9 @@ public final class StressReservationJournal {
     private final StressClosedArchive archive;
     private final Map<String,Entry> entries=new LinkedHashMap<>();
     private final Map<String,Long> sizes=new HashMap<>();
+    private final Map<String,Integer> logicalSizes=new HashMap<>();
     private final Map<String,String> sourceOwners=new HashMap<>();
-    private long bytes;
+    private long bytes,logicalBytes;
     private boolean faulted;
     public StressReservationJournal(Path directory)throws IOException {
         this.directory=directory.toAbsolutePath();Files.createDirectories(this.directory);
@@ -114,7 +124,10 @@ public final class StressReservationJournal {
                 long size=Files.size(p);
                 if(size>MAX_RECORD_BYTES||size<16||entries.size()>=MAX_RECORDS||bytes+size>MAX_STORE_BYTES+(long)MAX_RECORDS*CLOSURE_HEADROOM)
                     throw new IOException("stress storage bound exceeded");
-                Entry entry=decode(Files.readAllBytes(p));String id=entry.reservation.creditId;
+                byte[] payload=Files.readAllBytes(p);int logical=logicalSize(payload);
+                if(logicalBytes+logical>MAX_LOGICAL_STORE_BYTES+(long)(entries.size()+1)*CLOSURE_HEADROOM)
+                    throw new IOException("stress decoded storage bound exceeded");
+                Entry entry=decode(payload);String id=entry.reservation.creditId;
                 if(!p.getFileName().toString().equals(filename(id)))throw new IOException("stress filename/id conflict");
                 if(archive.contains(id)){
                     if(!archive.matchesEntry(entry))throw new IOException("stress archive/active conflict");
@@ -124,10 +137,11 @@ public final class StressReservationJournal {
                     throw new IOException("stress filename/id conflict");
                 for(var origin:entry.reservation.origins)
                     if(sourceOwners.putIfAbsent(origin.applyId(),id)!=null)throw new IOException("source origin reserved twice");
-                sizes.put(id,size);bytes+=size;
+                sizes.put(id,size);bytes+=size;logicalSizes.put(id,logical);logicalBytes+=logical;
             }
         }
         if(bytes>MAX_STORE_BYTES+(long)entries.size()*CLOSURE_HEADROOM)throw new IOException("stress closure headroom exceeded");
+        if(logicalBytes>MAX_LOGICAL_STORE_BYTES+(long)entries.size()*CLOSURE_HEADROOM)throw new IOException("stress decoded closure headroom exceeded");
     }
     public synchronized boolean reserve(Reservation reservation)throws IOException {
         ensureHealthy();Entry old=entries.get(reservation.creditId);
@@ -159,7 +173,7 @@ public final class StressReservationJournal {
     /** Persist the frozen graph even before the first output, so restart cannot silently replan a different path. */
     public synchronized void snapshot(String id,Map<Cell,Probe> snapshot)throws IOException {
         ensureHealthy();var old=require(id);
-        if(old.phase!=Phase.RESERVED)return;
+        if(old.phase==Phase.CLOSED||old.ledger!=null&&old.ledger.finished())return;
         // An unchanged frozen graph is already durable. Do not encode/CRC,
         // atomically replace and fsync the same bytes on every blocked retry.
         if(old.snapshot.equals(snapshot))return;
@@ -228,7 +242,7 @@ public final class StressReservationJournal {
         try{
             archive.store(old);
             Files.delete(directory.resolve(filename(id)));forceDirectory(directory);
-            entries.remove(id);bytes-=sizes.remove(id);
+            entries.remove(id);bytes-=sizes.remove(id);logicalBytes-=logicalSizes.remove(id);
         }catch(IOException failure){faulted=true;throw failure;}
     }
     public synchronized boolean isArchived(String id){return archive.contains(id);}
@@ -238,6 +252,7 @@ public final class StressReservationJournal {
     public synchronized int activeCount(){return entries.size();}
     public synchronized int archivedCount(){return archive.size();}
     public synchronized long activeBytes(){return bytes;}
+    public synchronized long activeLogicalBytes(){return logicalBytes;}
     public synchronized Entry get(String creditId){return entries.get(creditId);}
     public synchronized List<Entry> unfinished(){return entries.values().stream().filter(e->e.phase!=Phase.CLOSED).toList();}
     public synchronized int size(){return entries.size()+archive.size();}
@@ -256,14 +271,22 @@ public final class StressReservationJournal {
     }
     private void persist(Entry entry,boolean closing)throws IOException {
         byte[] payload=encode(entry);String id=entry.reservation.creditId;
+        int logical=logicalSize(payload);
         long nextBytes=bytes-sizes.getOrDefault(id,0L)+payload.length;
+        long nextLogical=logicalBytes-logicalSizes.getOrDefault(id,0)+logical;
         long count=entries.size()+(entries.containsKey(id)?0:1);
-        if(!closing&&(payload.length>MAX_RECORD_BYTES-CLOSURE_HEADROOM||nextBytes+count*CLOSURE_HEADROOM>MAX_STORE_BYTES))
-            throw new CapacityException("stress active storage pressure");
+        if(!closing&&payload.length>MAX_RECORD_BYTES-CLOSURE_HEADROOM)
+            throw new CapacityException("stress record closure headroom");
+        if(!closing&&nextBytes+count*CLOSURE_HEADROOM>MAX_STORE_BYTES)
+            throw new CapacityException("stress active disk storage pressure");
+        if(!closing&&nextLogical+count*CLOSURE_HEADROOM>MAX_LOGICAL_STORE_BYTES)
+            throw new CapacityException("stress active decoded storage pressure");
         // Old v4 files were admitted without metadata headroom. Permit only
         // bounded closing metadata growth for them; never admit new work here.
         if(closing&&nextBytes>MAX_STORE_BYTES&&(nextBytes>MAX_STORE_BYTES+count*CLOSURE_HEADROOM||nextBytes-bytes>CLOSURE_HEADROOM))
             throw new CapacityException("stress closure storage pressure");
+        if(closing&&nextLogical>MAX_LOGICAL_STORE_BYTES&&(nextLogical>MAX_LOGICAL_STORE_BYTES+count*CLOSURE_HEADROOM||nextLogical-logicalBytes>CLOSURE_HEADROOM))
+            throw new CapacityException("stress decoded closure storage pressure");
         Path temp=null;
         try {
             temp=Files.createTempFile(directory,"pending-",".tmp");
@@ -272,8 +295,10 @@ public final class StressReservationJournal {
             }
             Files.move(temp,directory.resolve(filename(id)),StandardCopyOption.ATOMIC_MOVE,StandardCopyOption.REPLACE_EXISTING);
             forceDirectory(directory);
+            boolean fresh=!entries.containsKey(id);
             entries.put(id,entry);sizes.put(id,(long)payload.length);bytes=nextBytes;
-            for(var origin:entry.reservation.origins)sourceOwners.put(origin.applyId(),id);
+            logicalSizes.put(id,logical);logicalBytes=nextLogical;
+            if(fresh)for(var origin:entry.reservation.origins)sourceOwners.put(origin.applyId(),id);
         }catch(IOException failure){faulted=true;throw failure;}
         finally{if(temp!=null)Files.deleteIfExists(temp);}
     }
@@ -294,8 +319,13 @@ public final class StressReservationJournal {
         try{return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));}
         catch(NoSuchAlgorithmException impossible){throw new IllegalStateException(impossible);}
     }
-    static byte[] encode(Entry e)throws IOException {
-        var buffer=new ByteArrayOutputStream();try(var out=new DataOutputStream(buffer)){
+    // The canonical v4 bytes are also the archive identity. The outer v5
+    // compression frame changes storage only; legacy closed hashes must match.
+    static byte[] encodeCanonical(Entry e)throws IOException {
+        long allowed=Math.min(MAX_RAW_BYTES,4L*1024*1024+1024L*e.reservation.seeds.size()+256L*e.snapshot.size());
+        var buffer=new BoundedBuffer((int)allowed);var crc=new CRC32C();
+        var header=new DataOutputStream(buffer);header.writeInt(0);
+        try(var out=new DataOutputStream(new CheckedOutputStream(buffer,crc))){
             out.writeInt(MAGIC);out.writeInt(VERSION);out.writeUTF(REVISION);out.writeUTF(DamageModel.ALGORITHM_REVISION);
             var r=e.reservation;out.writeUTF(r.creditId);out.writeLong(r.materialGeneration);out.writeLong(r.createdGameTick);
             var p=r.policy;out.writeInt(p.maxDepth());out.writeInt(p.maxNodes());out.writeInt(p.maxNodesPerTick());out.writeDouble(p.minQ());out.writeLong(p.ttlTicks());
@@ -316,27 +346,68 @@ public final class StressReservationJournal {
                 if(item.getValue().node()!=null)writeNode(out,item.getValue().node());
             }
         }
-        byte[] data=buffer.toByteArray();CRC32C crc=new CRC32C();crc.update(data);var framed=new ByteArrayOutputStream();
-        try(var out=new DataOutputStream(framed)){out.writeInt(data.length);out.write(data);out.writeInt((int)crc.getValue());}
-        if(framed.size()>MAX_RECORD_BYTES)throw new CapacityException("stress record too large");return framed.toByteArray();
+        header.writeInt((int)crc.getValue());
+        byte[] data=buffer.bytes.toByteArray();ByteBuffer.wrap(data).putInt(data.length-8);return data;
+    }
+    private static final class BoundedBuffer extends OutputStream {
+        final ByteArrayOutputStream bytes=new ByteArrayOutputStream();
+        final int limit;
+        BoundedBuffer(int limit){this.limit=limit;}
+        private void check(int additional)throws CapacityException{
+            if(additional>limit-bytes.size())throw new CapacityException("stress decoded record too large");
+        }
+        @Override public void write(int value)throws IOException{check(1);bytes.write(value);}
+        @Override public void write(byte[] data,int off,int len)throws IOException{check(len);bytes.write(data,off,len);}
+    }
+    static byte[] encode(Entry e)throws IOException {
+        byte[] raw=encodeCanonical(e);
+        if(raw.length<COMPRESS_THRESHOLD)return raw;
+        var buffer=new BoundedBuffer(MAX_RECORD_BYTES);
+        var header=new DataOutputStream(buffer);header.writeInt(COMPRESSED_FRAME);header.writeInt(raw.length);
+        Deflater deflater=new Deflater(Deflater.BEST_SPEED);
+        try(var out=new DeflaterOutputStream(buffer,deflater,8192)){out.write(raw);}
+        finally{deflater.end();}
+        return buffer.bytes.toByteArray();
+    }
+    private static int logicalSize(byte[] data)throws IOException{
+        if(data.length<16||data.length>MAX_RECORD_BYTES)throw new IOException("invalid stress record size");
+        var header=ByteBuffer.wrap(data);
+        if(header.getInt()!=COMPRESSED_FRAME)return data.length;
+        int logical=header.getInt();
+        if(logical<16||logical>MAX_RAW_BYTES)throw new IOException("invalid stress decoded size");
+        return logical;
     }
     static Entry decode(byte[] bytes)throws IOException {
-        if(bytes.length>MAX_RECORD_BYTES||bytes.length<16)throw new IOException("invalid stress record size");
+        int logical=logicalSize(bytes);
+        if(ByteBuffer.wrap(bytes).getInt()==COMPRESSED_FRAME){
+            var source=new ByteArrayInputStream(bytes,8,bytes.length-8);
+            var inflater=new Inflater();
+            try(var in=new InflaterInputStream(source,inflater,8192)){
+                byte[] raw=in.readNBytes(logical);
+                if(raw.length!=logical||in.read()!=-1||!inflater.finished()||inflater.getRemaining()!=0||source.available()!=0)
+                    throw new IOException("stress compressed length mismatch");
+                return decodeCanonical(raw);
+            }finally{inflater.end();}
+        }
+        return decodeCanonical(bytes);
+    }
+    private static Entry decodeCanonical(byte[] bytes)throws IOException {
         try(var frame=new DataInputStream(new ByteArrayInputStream(bytes))){
-            int length=frame.readInt();if(length!=bytes.length-8)throw new IOException("truncated stress record");
-            byte[] data=frame.readNBytes(length);CRC32C crc=new CRC32C();crc.update(data);
+            int length=frame.readInt();if(length<0||length!=bytes.length-8)throw new IOException("truncated stress record");
+            CRC32C crc=new CRC32C();crc.update(bytes,4,length);
+            frame.skipNBytes(length);
             if(frame.readInt()!=(int)crc.getValue())throw new IOException("stress CRC mismatch");
-            try(var in=new DataInputStream(new ByteArrayInputStream(data))){
+            try(var in=new DataInputStream(new ByteArrayInputStream(bytes,4,length))){
                 if(in.readInt()!=MAGIC)throw new IOException("unsupported stress magic");
                 int version=in.readInt();
                 if(version<1||version>VERSION||!in.readUTF().equals(REVISION)||!in.readUTF().equals(DamageModel.ALGORITHM_REVISION))throw new IOException("unsupported stress schema/policy revision");
                 String id=in.readUTF();long generation=in.readLong(),tick=in.readLong();
                 Policy policy=new Policy(in.readInt(),in.readInt(),in.readInt(),in.readDouble(),in.readLong());
                 var settings=new DamageModel.Settings(in.readDouble(),in.readDouble(),in.readDouble(),in.readDouble(),in.readDouble(),in.readDouble());
-                int n=count(in,8192);List<Seed> seeds=new ArrayList<>();
+                int n=count(in,MAX_ROOTS);List<Seed> seeds=new ArrayList<>();
                 for(int i=0;i<n;i++){Node node=readNode(in,version);double q=in.readDouble();Direction direction=in.readBoolean()?new Direction(in.readDouble(),in.readDouble(),in.readDouble()):null;seeds.add(new Seed(node,q,direction));}
                 var origins=new ArrayList<WorldCommitCore.Intent>();
-                if(version>=2){int originCount=count(in,8192);for(int i=0;i<originCount;i++){
+                if(version>=2){int originCount=count(in,MAX_ROOTS);for(int i=0;i<originCount;i++){
                     String apply=in.readUTF();Node node=readNode(in,version);
                     origins.add(new WorldCommitCore.Intent(apply,StressCommitHandoff.keyFor(node.cell(),node.fingerprint()),node.incarnation(),in.readDouble(),node.material(),generation,in.readLong(),in.readBoolean(),node.materialRevision(),
                             version>=3?com.physicaldestroydeform.deform.MovePlan.Evidence.read(in,version>=4):null));
@@ -353,7 +424,7 @@ public final class StressReservationJournal {
                     ledger=new Ledger(reserved,absorbed,direct,plastic,unused,pending,nodes,finished,reasons);
                 }
                 Map<Cell,Probe> snapshot=new TreeMap<>();
-                if(version>=2){n=count(in,65536);for(int i=0;i<n;i++){
+                if(version>=2){n=count(in,MAX_SNAPSHOT_CELLS);for(int i=0;i<n;i++){
                     Cell cell=readCell(in);int state=in.readUnsignedByte();if(state>=State.values().length)throw new IOException("snapshot state");
                     Probe probe=new Probe(State.values()[state],state==State.SOLID.ordinal()?readNode(in,version):null);
                     if(probe.node()!=null&&!probe.node().cell().equals(cell)||snapshot.put(cell,probe)!=null)throw new IOException("snapshot cell");
