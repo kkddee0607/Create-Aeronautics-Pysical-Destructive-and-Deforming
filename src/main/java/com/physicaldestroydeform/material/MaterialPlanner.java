@@ -55,8 +55,8 @@ public final class MaterialPlanner {
             GameImpactCredit.Target target=share.target();
             MaterialProperties material=materialLookup.apply(target);
             if(material==null) {missingQ+=share.q();continue;}
-            GameImpactCredit.Owner owner=grant.id().pair().a().stableKey().equals(target.ownerKey())
-                    ?grant.id().pair().a():grant.id().pair().b();
+            GameImpactCredit.Owner owner=grant.ownerFor(target);
+            if(owner==null){missingQ+=share.q();continue;}
             SparseStateKey key=SparseStateKey.fromTarget(grant.id().pair().dimension(),owner,target);
             // The same definition-level immunity applies in World and Plot previews.
             // World gateway restrictions are evaluated separately at commit time.

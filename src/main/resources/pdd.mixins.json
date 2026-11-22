@@ -8,6 +8,7 @@
     "SableUniversalCallbackMixin",
     "SableStepSnapshotMixin",
     "WorldBlockReplacementMixin",
+    "SableAssemblyLineageMixin",
     "SableHeatMapSafetyAccessor",
     "SableHeatMapReadCacheMixin",
     "SablePlotTickWitnessMixin"

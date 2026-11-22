@@ -145,9 +145,14 @@ public final class OwnerResolver {
         }
         /** Every selected signed axis must meet an actual exterior collision-box face. */
         public boolean targetFace(String owner,BlockPos pos,Vec point,com.physicaldestroydeform.deform.MovePlan.SignedAxes axes){
+            return targetFace(owner,pos,point,axes,SableConsumerTargets.EPSILON);
+        }
+        /** Cross-owner contact cannot inherit the ordinary R2 shape halo. */
+        public boolean targetFace(String owner,BlockPos pos,Vec point,com.physicaldestroydeform.deform.MovePlan.SignedAxes axes,double epsilon){
+            if(!Double.isFinite(epsilon)||epsilon<=0||epsilon>SableConsumerTargets.EPSILON)return false;
             Cell cell=cells.get(new CellKey(owner,pos));if(cell==null||!cell.identity().verified())return false;
             double x=point.x()-pos.getX(),y=point.y()-pos.getY(),z=point.z()-pos.getZ();
-            double e=SableConsumerTargets.EPSILON;
+            double e=epsilon;
             for(AABB box:cell.boxes()){
                 if(!face(x,box.minX,box.maxX,axes.x(),e)||!face(y,box.minY,box.maxY,axes.y(),e)
                         ||!face(z,box.minZ,box.maxZ,axes.z(),e))continue;
@@ -161,6 +166,13 @@ public final class OwnerResolver {
                 }
                 if(!interior)return true;
             }
+            return false;
+        }
+        /** Exact cached shape membership for the cross-owner exterior seam check. */
+        boolean contains(String owner,BlockPos pos,Vec point,double epsilon) {
+            var cell=cells.get(new CellKey(owner,pos));
+            if(cell==null||!cell.identity().verified()||point==null||!point.finite())return false;
+            for(var box:cell.boxes())if(inside(box,point.x()-pos.getX(),point.y()-pos.getY(),point.z()-pos.getZ(),epsilon))return true;
             return false;
         }
         private static boolean face(double p,double min,double max,int sign,double e){

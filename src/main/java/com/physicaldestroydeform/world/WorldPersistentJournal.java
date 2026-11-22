@@ -111,6 +111,11 @@ public final class WorldPersistentJournal implements WorldJournal {
     @Override public synchronized List<WorldReceiptJournal.State> stateSnapshot(){
         return List.copyOf(states.values());
     }
+    /** Exact sparse bucket lookup; no global scan during native block movement. */
+    public synchronized List<WorldReceiptJournal.State> statesAtPosition(SparseStateKey key){
+        var keys=positionKeys.get(new Cell(key));
+        return keys==null?List.of():keys.stream().map(states::get).filter(Objects::nonNull).toList();
+    }
     @Override public synchronized List<WorldReceiptJournal.Receipt> uncertain(){
         return receipts.values().stream().filter(r->r.status()==WorldReceiptJournal.Status.PREPARED
                 ||r.status()==WorldReceiptJournal.Status.DEFERRED).toList();

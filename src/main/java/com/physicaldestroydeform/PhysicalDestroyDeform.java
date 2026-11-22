@@ -11,6 +11,7 @@ import com.physicaldestroydeform.diagnostics.SableContactQueue;
 import com.physicaldestroydeform.material.MaterialRegistry;
 import com.physicaldestroydeform.world.WorldCommitService;
 import com.physicaldestroydeform.world.WorldBlockMutationTracker;
+import com.physicaldestroydeform.world.NativeLineageTransfer;
 import com.physicaldestroydeform.plot.PlotCommitService;
 import com.physicaldestroydeform.plot.PlotPhysicsProbe;
 import net.neoforged.fml.common.Mod;
@@ -29,7 +30,7 @@ import org.slf4j.LoggerFactory;
 @Mod(PhysicalDestroyDeform.MOD_ID)
 public final class PhysicalDestroyDeform {
     public static final String MOD_ID = "physical_destroy_deform";
-    public static final String BUILD_VERSION = "0.6.0";
+    public static final String BUILD_VERSION = "0.6.1";
     private static final Logger LOGGER = LoggerFactory.getLogger(PhysicalDestroyDeform.class);
     private final AcceptanceReport acceptanceReport = new AcceptanceReport();
     private final RealFixRuntimeBridge bridge = new RealFixRuntimeBridge();
@@ -88,7 +89,7 @@ public final class PhysicalDestroyDeform {
             WorldBlockMutationTracker.attachPlot(null);
             LOGGER.error("[PDD-STRESS-LEDGER] phase=START status=HALTED reason=JOURNAL_INIT_FAILED mutations=OFF",unsafeStressJournal);
         }
-        LOGGER.info("[PDD-0.6.0] phase=START revision=deformFix TARGET_DIRECTION_SHARED_AUDIT bridge=READ_ONLY nativeScalar=GAME_FORCE_PROXY " +
+        LOGGER.info("[PDD-0.6.1] phase=START revision=0.6.1 TARGET_DIRECTION_SHARED_AUDIT bridge=READ_ONLY nativeScalar=GAME_FORCE_PROXY " +
                 "newNativeABI=NOT_REQUIRED customNullCallback=DISABLED faceRecovery=MULTI_SURFACE_PLUS_SPARSE_SHAPE_HALO worldMutation={} plotMutation={} ",
                 worldCommit==null?"DISABLED":"WORLD_STATIC_ONLY",plotCommit==null?"DISABLED":"SABLE_PLOT");
     }
@@ -96,6 +97,7 @@ public final class PhysicalDestroyDeform {
         if (event.getPlayer()==null) MaterialRegistry.rebuild(event.getPlayerList().getServer(), LOGGER);
     }
     private void onServerStopped(ServerStoppedEvent event) {
+        NativeLineageTransfer.expire();
         bridge.savePreview(event.getServer(), LOGGER);
         if(stress!=null){stress.stop();stress=null;}
         if(worldCommit!=null){worldCommit.stop();worldCommit=null;}
@@ -111,6 +113,7 @@ public final class PhysicalDestroyDeform {
         LOGGER.info("[PDD-0.6.0] phase=STOP state=CLEARED worldMutation=STOPPED");
     }
     private void onServerTick(ServerTickEvent.Post event) {
+        NativeLineageTransfer.expire();
         // Snapshot and native inputs are consumed exactly once on the server tick.
         // The Sable return array has already been handed back unchanged by Mixin.
         var callbacks=SableContactQueue.drain();

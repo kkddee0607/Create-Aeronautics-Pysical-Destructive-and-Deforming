@@ -6,6 +6,7 @@ import com.physicaldestroydeform.collision.ContactCreditLedger;
 import com.physicaldestroydeform.collision.GameImpactCredit;
 import org.junit.jupiter.api.Test;
 import java.util.List;
+import java.util.Map;
 import static org.junit.jupiter.api.Assertions.*;
 
 class MaterialPlannerTest {
@@ -63,5 +64,27 @@ class MaterialPlannerTest {
                 good.tick(),0,List.of(),List.of(),0,0,good.algorithmRevision());
         assertThrows(IllegalArgumentException.class,
                 ()->MaterialPlanner.plan(bad,1,fp->new MaterialProperties(10,10,10),DamageModel.Settings.defaults()));
+    }
+    @Test void chainReceiverUsesItsOwnGenerationRatherThanOriginalSide(){
+        var original=issued();
+        var owner=new GameImpactCredit.Owner("PLOT:5069c055-4ebd-415c-b205-a6715b83156e",38);
+        var receiver=new GameImpactCredit.Target(owner.stableKey(),"4,5,6","minecraft:stone");
+        var grant=new ContactCreditLedger.Grant(original.id(),original.source(),original.status(),original.tick(),40,
+                List.of(new ContactCreditLedger.Share(receiver,20)),original.b(),0,2,original.algorithmRevision(),
+                null,null,Map.of(owner.stableKey(),owner));
+        var report=MaterialPlanner.plan(grant,5,fp->new MaterialProperties(10,10,10),DamageModel.Settings.defaults());
+        assertEquals(38,report.plans().getFirst().key().ownerGeneration());
+        assertEquals(owner.stableKey().substring(5),report.plans().getFirst().key().ownerId());
+        assertEquals(40,report.accountedQ(),1e-9);
+    }
+    @Test void unprovedChainReceiverStaysUnused(){
+        var original=issued();
+        var receiver=new GameImpactCredit.Target("PLOT:5069c055-4ebd-415c-b205-a6715b83156e","4,5,6","minecraft:stone");
+        var grant=new ContactCreditLedger.Grant(original.id(),original.source(),original.status(),original.tick(),40,
+                List.of(new ContactCreditLedger.Share(receiver,20)),original.b(),0,2,original.algorithmRevision());
+        var report=MaterialPlanner.plan(grant,5,fp->new MaterialProperties(10,10,10),DamageModel.Settings.defaults());
+        assertEquals(20,report.missingMaterialQ());
+        assertEquals(40,report.accountedQ(),1e-9);
+        assertEquals(1,report.plans().size());
     }
 }

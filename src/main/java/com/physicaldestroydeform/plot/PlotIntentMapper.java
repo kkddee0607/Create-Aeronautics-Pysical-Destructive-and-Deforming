@@ -37,8 +37,7 @@ public final class PlotIntentMapper {
         for(var share:shares) {
             var target=share.target();
             var pair=grant.id().pair();
-            GameImpactCredit.Owner owner=pair.a().stableKey().equals(target.ownerKey())?pair.a()
-                    :pair.b().stableKey().equals(target.ownerKey())?pair.b():null;
+            GameImpactCredit.Owner owner=grant.ownerFor(target);
             if(owner==null){rejected+=share.q();continue;}
             SparseStateKey real=SparseStateKey.fromTarget(pair.dimension(),owner,target);
             if(!"PLOT".equals(real.ownerSpace())){world+=share.q();continue;}

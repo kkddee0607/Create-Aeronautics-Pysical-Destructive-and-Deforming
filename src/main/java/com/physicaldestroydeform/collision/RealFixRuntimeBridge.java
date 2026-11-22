@@ -384,11 +384,36 @@ public final class RealFixRuntimeBridge {
                 contactsByPair.computeIfAbsent(NativeEffectGroups.RuntimePair.of(c.idA(),c.idB()),
                         ignored->new ArrayList<>()).add(c);
             }
+            // Same-tick native resting contacts only. Never infer causality
+            // from the force peak, approximate AABB proximity or runtime ID.
+            var contactGraph=new VerifiedContactGraph(server,stamp.dimension,stamp.tick,
+                    owner->{var binding=lifecycleBinding(stamp.dimension,owner);
+                        return binding!=null&&(!binding.active()||binding.orphaned())?-1:
+                                currentGeneration(stamp.dimension,owner);});
+            var resolvedOwners=new HashMap<NativeEffectGroups.RuntimePair,RuntimeOwners>();
+            for(var group:batch.groups()) {
+                var records=contactsByPair.getOrDefault(group.runtimePair(),List.of());
+                var owners=resolveOwners(ownerIndex,stamp,group,records);
+                if(owners==null)continue;
+                resolvedOwners.put(group.runtimePair(),owners);
+                Pair pair=owners.pair();var evidence=credit.evidence(pair);var prior=tracked.get(pair);
+                if(!complete||batch.invalidRecords()>0||batch.discardedRecords()>0||batch.malformedArray()
+                        ||evidence.phase()!=Phase.ACTIVE||evidence.hasUnspentAuthorization()||prior==null)continue;
+                if(evidence.episode()==0) {
+                    // First-approach recovery is possible for an uncredited ACTIVE pair.
+                    if(prior.previousA==null||prior.previousB==null||prior.lastPositiveSeparation)continue;
+                    var currentA=box(server,pair.a().stableKey(),prior.a,stamp.dimension,worldBounds,knownWorldBlocks);
+                    var currentB=box(server,pair.b().stableKey(),prior.b,stamp.dimension,worldBounds,knownWorldBlocks);
+                    if(!Objects.equals(prior.previousA,currentA)||!Objects.equals(prior.previousB,currentB))continue;
+                }
+                int admitted=contactGraph.observe(pair,records,pre,complete);
+                if(admitted>0&&lines++<MAX_LOG_PER_TICK)log.info("[PDD-CROSS-OWNER] pair={}/{} tick={} admitted={} proof=STATIC_NATIVE_DUAL_FACE",pair.a().stableKey(),pair.b().stableKey(),stamp.tick,admitted);
+            }
             for(var group:batch.groups()) {
                 observed++;
                 if(fullTrace && lines++<MAX_LOG_PER_TICK)logObservation(log,group,batch);
                 List<NativeCollisionTelemetry.Contact> records=contactsByPair.getOrDefault(group.runtimePair(),List.of());
-                RuntimeOwners owners=resolveOwners(ownerIndex,stamp,group,records);
+                RuntimeOwners owners=resolvedOwners.get(group.runtimePair());
                 if(owners==null) {
                     missingOwner++;zero++;
                     if(!fullTrace && lines++<MAX_LOG_PER_TICK)logObservation(log,group,batch);
@@ -786,7 +811,7 @@ public final class RealFixRuntimeBridge {
                             targetMaterials::material,credit.settings(),damageSettings,
                             nativeNormal.owners(),targetDirections.hasProvenSeed()||fTrace!=null
                                     ?event->{targetDirections.trace(event);if(fTrace!=null)fTrace.accept(event);}:null,
-                            materialSnapshot::resolveFingerprint):null;
+                            materialSnapshot::resolveFingerprint,contactGraph):null;
                     long propagationNanos=System.nanoTime()-propagationStart;
                     boolean granted=grant!=null && grant.credited();
                     if(result.credited() && !granted) {
@@ -861,13 +886,18 @@ public final class RealFixRuntimeBridge {
                         credited++;
                         if(grant.propagated()) {
                             double fInput=grant.inputF(),fAccounted=grant.propagationA().assignedF()+
-                                    grant.propagationA().dampedF()+grant.propagationA().unresolvedF()+
+                                    grant.propagationA().dampedF()+grant.propagationA().contactDampedF()+grant.propagationA().unresolvedF()+
                                     grant.propagationA().audit().thresholdDiscardF()+
-                                    grant.propagationB().assignedF()+grant.propagationB().dampedF()+
+                                    grant.propagationB().assignedF()+grant.propagationB().dampedF()+grant.propagationB().contactDampedF()+
                                     grant.propagationB().unresolvedF()+
                                     grant.propagationB().audit().thresholdDiscardF();
                             double qError=grant.issuedQ()-grant.accounted();
                             double fError=fInput-fAccounted;
+                            log.info("[PDD-CONTACT-ELASTIC] credit={} contactDampedF={} revision={}",grant.id(),grant.contactDampedF(),grant.algorithmRevision());
+                            log.info("[PDD-CHAIN-LEDGER] credit={} actualOwners={} candidateF={} assignedF={} contactDampedF={} internalDampedF={} unresolvedF={} thresholdDiscardF={}",
+                                    grant.id(),java.util.stream.Stream.concat(grant.a().stream(),grant.b().stream()).map(s->s.target().ownerKey()).distinct().count(),
+                                    fInput,grant.propagationA().assignedF()+grant.propagationB().assignedF(),grant.contactDampedF(),grant.dampedF(),grant.unresolvedF(),
+                                    grant.propagationA().audit().thresholdDiscardF()+grant.propagationB().audit().thresholdDiscardF());
                             log.info("[PDD-F-INVARIANT] credit={} FInput={} FAccounted={} FError={} " +
                                             "issuedQ={} reservedA={} reservedB={} unusedQ={} QError={} " +
                                             "FStatus={} QStatus={} mutation=OFF",

@@ -4,7 +4,7 @@ plugins {
 }
 
 group = 'com.physicaldestroydeform'
-version = '0.6.0'
+version = '0.6.1'
 base { archivesName = 'physical-destroy-deform' }
 java.toolchain.languageVersion = JavaLanguageVersion.of(21)
 neoForge {
@@ -49,15 +49,13 @@ sourceSets.test.runtimeClasspath += sourceSets.main.compileClasspath
 
 tasks.named('test', Test).configure { useJUnitPlatform() }
 jar {
-    // Keep mod/save version 0.6.0; distinguish the actual release artifact.
-    archiveClassifier.set('deformFix')
     manifest {
         attributes([
             'Specification-Title': 'Physical Destruction and Deforming',
-            'Specification-Version': '0.6.0',
+            'Specification-Version': '0.6.1',
             'Implementation-Title': project.name,
             'Implementation-Version': project.version,
-            'PDD-Revision': 'deformFix'
+            'PDD-Revision': '0.6.1'
         ])
     }
 }

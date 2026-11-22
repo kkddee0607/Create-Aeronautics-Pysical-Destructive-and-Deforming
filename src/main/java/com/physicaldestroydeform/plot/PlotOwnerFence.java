@@ -71,6 +71,12 @@ public final class PlotOwnerFence {
     private void advanceLifecycle(Owner owner){
         lifecycleRevision.merge(owner,1L,Math::addExact);
     }
+    /** Exact observed native topology transfer; keep epoch and retained cells,
+     * invalidate prior physical observations without orphaning the live owner. */
+    public boolean lineageChanged(Owner owner,Stamp stamp){
+        if(!verify(owner,stamp,false))return false;
+        advanceLifecycle(owner);return true;
+    }
     public long lifecycleRevision(Owner owner){return lifecycleRevision.getOrDefault(owner,0L);}
     public Owner owner(String dimension,UUID uuid){return owners.get(new Identity(dimension,uuid));}
     public Stamp activeStamp(Owner owner){return bound.get(owner);}

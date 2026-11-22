@@ -144,6 +144,15 @@ final class SableContactRegionsTest {
         assertEquals(2,result.checksB());
         assertTrue(result.regions().stream().allMatch(r->(r.a()==null)!=(r.b()==null)));
     }
+    @Test void uniqueDirectionalFaceCanPairWithoutPromotingOtherShapeCells(){
+        var a=target(PAIR.a().stableKey(),1);var b=target(PAIR.b().stableKey(),1);
+        var result=SableContactRegions.collect(PAIR,List.of(contact(1)),
+                (record,owner,remaining)->new SableContactRegions.Check(
+                        List.of(target(owner,1),target(owner,2)),2,false,"R2","UNIQUE_FACE",target(owner,1)));
+        assertTrue(result.regions().contains(new ContactCreditLedger.Region(a,b)));
+        assertEquals(3,result.regions().size());
+        assertEquals(1,result.regions().stream().filter(r->r.a()!=null&&r.b()!=null).count());
+    }
     @Test void verificationTraceDistinguishesTargetLimitFromCellBudget() {
         var many=new ArrayList<NativeCollisionTelemetry.Contact>();
         for(int i=0;i<33;i++)many.add(contact(i));

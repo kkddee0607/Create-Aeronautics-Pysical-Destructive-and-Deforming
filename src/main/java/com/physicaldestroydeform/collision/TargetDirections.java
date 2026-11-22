@@ -151,7 +151,12 @@ public final class TargetDirections {
         if(prior!=null&&!prior.equals(value))veto(target);
     }
     public void trace(ForcePropagation.Trace event){
-        if(event instanceof ForcePropagation.Edge edge&&!original.contains(edge.child()))merge(edge.child(),get(edge.parent()));
+        if(event instanceof ForcePropagation.Edge edge&&!original.contains(edge.child())) {
+            // The receiving owner's lattice may be rotated. A propagated F
+            // direction is not precise voxel-movement authorization there.
+            if(!edge.child().ownerKey().equals(edge.parent().ownerKey()))veto(edge.child());
+            else merge(edge.child(),get(edge.parent()));
+        }
     }
     /** A positive inward axis has its contact on the low face, negative on high.
      * Oblique evidence must independently corroborate every selected axis. */

@@ -138,6 +138,19 @@ public final class NeoForgePlotGateway implements WorldCommitCore.WorldGateway,M
         BlockPos center=sub.getPlot().getCenterBlock();
         return new PlotOwnerFence.Stamp(sub.getRuntimeId(),center.getX(),center.getY(),center.getZ(),sub);
     }
+    boolean bindLineage(PlotOwnerFence.Owner owner,ServerSubLevel sub){
+        if(!isServerThread()||sub.isRemoved()||sub.getPlot()==null)return false;
+        var level=dimension(owner.dimension());
+        if(level==null||sub.getLevel()!=level)return false;
+        var container=SubLevelContainer.getContainer(level);
+        return container!=null&&container.getSubLevel(owner.uuid())==sub&&fence.bind(owner,stamp(sub),false);
+    }
+    void lineageChanged(String dimension,UUID uuid){
+        var owner=fence.owner(dimension,uuid);
+        if(owner==null)return;
+        var bound=fence.activeStamp(owner);
+        if(bound!=null&&fence.lineageChanged(owner,bound))changedTicks.put(owner,(long)server.getTickCount());
+    }
     public LifecycleBinding lifecycleBinding(String dimension,UUID uuid){
         var owner=fence.owner(dimension,uuid);
         if(owner==null)return null;
@@ -198,9 +211,10 @@ public final class NeoForgePlotGateway implements WorldCommitCore.WorldGateway,M
                     ||!sub.getUniqueId().equals(owner.uuid())||sub.getPlot()==null)return null;
             var plot=sub.getPlot();
             UUID splitParent=sub.getSplitFromSubLevel();
-            if(expectedIncarnation!=null && (splitParent!=null
+            boolean mappedSplit=splitParent!=null&&service.verifiedLineage(real.dimension(),splitParent,sub.getUniqueId());
+            if(expectedIncarnation!=null && (splitParent!=null&&!mappedSplit
                     || !expectedIncarnation.equals(service.incarnation(real,plot.getCenterBlock()))))return null;
-            if(splitParent!=null){
+            if(splitParent!=null&&!mappedSplit){
                 // Child UUID is a NEW owner; only its parent loses old sparse
                 // damage. A new child may receive fresh impact after durable
                 // parent quarantine, never inherited parent Q or damage.
@@ -261,7 +275,8 @@ public final class NeoForgePlotGateway implements WorldCommitCore.WorldGateway,M
             for(var raw:container.getAllSubLevels()) {
                 if(!(raw instanceof ServerSubLevel sub)||sub.isRemoved())continue;
                 UUID parent=sub.getSplitFromSubLevel();
-                if(parent!=null){
+                if(parent==null)service.clearLineage(dim,sub.getUniqueId());
+                if(parent!=null&&!service.verifiedLineage(dim,parent,sub.getUniqueId())){
                     var parentOwner=fence.owner(dim,parent);
                     if(parentOwner!=null&&!fence.orphaned(parentOwner))changedTicks.put(parentOwner,(long)server.getTickCount());
                     fence.orphanAncestors(dim,parent);
@@ -276,7 +291,8 @@ public final class NeoForgePlotGateway implements WorldCommitCore.WorldGateway,M
                     // after live identity and lineage are rechecked. Same UUID alone is insufficient.
                     boolean proof=candidate!=null&&candidate.container().get()==container&&candidate.sub().get()==sub
                             &&container.getSubLevel(owner.uuid())==sub&&sub.getLevel()==level
-                            &&!service.isSplitParent(dim,owner.uuid())&&parent==null;
+                            &&!service.isSplitParent(dim,owner.uuid())
+                            &&(parent==null||service.verifiedLineage(dim,parent,sub.getUniqueId()));
                     if(proof&&fence.resume(owner,stamp(sub),false)){
                         suspendedContainers.remove(owner);
                         changedTicks.put(owner,(long)server.getTickCount());

@@ -88,4 +88,16 @@ class PlotIdentityTest {
         assertTrue(fence.orphaned(owner));
         assertFalse(fence.suspended(owner));
     }
+    @Test void verifiedTransferInvalidatesObservationsWithoutOrphaningResidualOwner(){
+        var fence=new PlotOwnerFence();
+        var owner=PlotOwnerFence.Owner.of(key(ID,3));
+        var stamp=new PlotOwnerFence.Stamp(1,128,64,256,new Object());
+        assertTrue(fence.bind(owner,stamp,false));
+        assertTrue(fence.lineageChanged(owner,stamp));
+        assertTrue(fence.verify(owner,stamp,false));
+        assertFalse(fence.orphaned(owner));
+        assertEquals(1L,fence.lifecycleRevision(owner));
+        assertFalse(fence.lineageChanged(owner,new PlotOwnerFence.Stamp(1,128,64,256,new Object())));
+        assertEquals(1L,fence.lifecycleRevision(owner));
+    }
 }

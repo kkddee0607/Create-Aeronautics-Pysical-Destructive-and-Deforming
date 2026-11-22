@@ -40,6 +40,8 @@ public final class WorldCommitService {
     private final NeoForgeWorldGateway gateway;
     private final MoveRuntime movement;
     private final Set<Cell> watched=new HashSet<>(), quarantined=new HashSet<>();
+    private final Set<Cell> lineageActive=new HashSet<>();
+    private final Map<Cell,Long> lineageQuarantine=new HashMap<>();
     private final Map<Cell,Integer> pendingCells=new HashMap<>();
     private final Deque<WorldReceiptJournal.Receipt> unresolved=new ArrayDeque<>();
     private Cell ownBreak;
@@ -66,6 +68,7 @@ public final class WorldCommitService {
         }
         int historicalQuarantined=0,historicalDeferredSafe=0,historicalTrueQuarantine=0;
         for(var receipt:journal.quarantinedSnapshot()){
+            if(LineageJournal.isMarker(receipt)){restoreLineageQuarantine(receipt);continue;}
             if(movement.recorded(receipt.id()))continue;
             historicalQuarantined++;
             if(WorldPersistentJournal.isLegacyUnexecutedDeferred(receipt)){
@@ -80,6 +83,10 @@ public final class WorldCommitService {
         }
         int startupDeferred=0,startupPrepared=0,restored=0;
         for(var receipt:journal.uncertain()) {
+            if(LineageJournal.isMarker(receipt)){
+                LineageJournal.quarantine(journal,receipt.id(),server.getTickCount());
+                restoreLineageQuarantine(receipt);continue;
+            }
             if(movement.recorded(receipt.id()))continue;
             if(receipt.pending()!=null){
                 Cell cell=new Cell(receipt.key());watched.add(cell);
@@ -289,7 +296,27 @@ public final class WorldCommitService {
             if(VERBOSE)log.info("[PDD-PERSIST] phase=STORAGE {}",journal.storageStatus());
         }
     }
-    boolean isQuarantined(SparseStateKey key){return quarantined.contains(new Cell(key))||movement.fences.quarantined(key);}
+    boolean isQuarantined(SparseStateKey key){return quarantined.contains(new Cell(key))||movement.fences.quarantined(key)
+            ||lineageActive.contains(new Cell(key))||lineageQuarantine.containsKey(new Cell(key));}
+    public WorldPersistentJournal lineageJournal(){return journal;}
+    private void restoreLineageQuarantine(WorldReceiptJournal.Receipt r){
+        if(r.status()!=WorldReceiptJournal.Status.PREPARED&&r.status()!=WorldReceiptJournal.Status.PARTIAL_QUARANTINED)return;
+        var cell=new Cell(r.key());long expiry=LineageJournal.quarantineThrough(r);
+        if(LineageJournal.revision(journal,r.key())<=expiry){lineageQuarantine.merge(cell,expiry,Math::max);watched.add(cell);}
+    }
+    public boolean watchLineage(SparseStateKey key){
+        if(fault||core.ioFault()||!server.isSameThread()||isQuarantined(key)||movement.fences.held(key))return false;
+        Cell cell=new Cell(key);lineageActive.add(cell);watched.add(cell);return true;
+    }
+    public void recordLineageQuarantine(String marker){
+        var r=journal.receipt(marker);if(LineageJournal.isMarker(r))restoreLineageQuarantine(r);
+    }
+    public void finishLineage(SparseStateKey key,String marker,boolean success){
+        Cell cell=new Cell(key);lineageActive.remove(cell);
+        if(!success){var r=journal.receipt(marker);if(LineageJournal.isMarker(r))restoreLineageQuarantine(r);}
+        releaseIfIdle(cell);
+    }
+    public void lineageFault(Exception failure){fault=true;log.error("[PDD-TRANSFER] owner=WORLD status=IO_FAULT",failure);}
     boolean acquireMove(MoveTransactionJournal.BeforeImage b){
         if(isQuarantined(b.source())||isQuarantined(b.destinationBefore())||!movement.fences.acquire(b.id(),b.source(),b.destinationBefore()))return false;
         watched.add(new Cell(b.source()));watched.add(new Cell(b.destinationBefore()));return true;
@@ -321,6 +348,7 @@ public final class WorldCommitService {
     /** Retain only damaged, pending, or quarantined cells; no lifetime-long watcher leak. */
     private void releaseIfIdle(Cell cell) {
         if(!stressWatched.contains(cell) && !pendingCells.containsKey(cell) && !quarantined.contains(cell)
+                && !lineageActive.contains(cell)&&!lineageQuarantine.containsKey(cell)
                 && !journal.hasPosition(cell.dimension(),cell.x(),cell.y(),cell.z())) {
             watched.remove(cell);
             // Replacement generations persist independently of in-memory watchers.
@@ -351,6 +379,8 @@ public final class WorldCommitService {
                 releaseIfIdle(cell);return;
             }
             long revision=journal.replaceBlock(cell.dimension(),cell.x(),cell.y(),cell.z());
+            if(!lineageActive.contains(cell)&&revision>lineageQuarantine.getOrDefault(cell,Long.MAX_VALUE))
+                lineageQuarantine.remove(cell);
             // A proven replacement releases the old quarantine on the cell;
             // old ambiguous ApplyIds stay terminal in the receipt ledger.
             quarantined.remove(cell);
@@ -469,5 +499,6 @@ public final class WorldCommitService {
                 fault||core.ioFault()?"IO_FAULT":"CLEAN",core.queued(),unresolved.size(),
                 journal.size(),journal.receiptCount(),journal.bytes());
         watched.clear();quarantined.clear();pendingCells.clear();unresolved.clear();
+        lineageActive.clear();lineageQuarantine.clear();
     }
 }

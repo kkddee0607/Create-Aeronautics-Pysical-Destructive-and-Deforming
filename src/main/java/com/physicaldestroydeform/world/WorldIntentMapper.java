@@ -58,9 +58,7 @@ public final class WorldIntentMapper {
         return new Projection(out,plot,missingMat,missingInc,rejected);
     }
     private static GameImpactCredit.Owner ownerFor(ContactCreditLedger.Grant grant,GameImpactCredit.Target target) {
-        var pair=grant.id().pair();
-        return pair.a().stableKey().equals(target.ownerKey())?pair.a()
-                :pair.b().stableKey().equals(target.ownerKey())?pair.b():null;
+        return grant.ownerFor(target);
     }
     private static List<ContactCreditLedger.Share> all(ContactCreditLedger.Grant g){
         List<ContactCreditLedger.Share> result=new ArrayList<>(g.a().size()+g.b().size());

@@ -21,7 +21,10 @@ public final class SableContactRegions {
     public static final int RUNTIME_MAX_UNIQUE_CELLS_PER_SIDE=32_768;
     public enum Status { PROVED, PARTIAL, NO_VERIFIED_REGION, TOO_BROAD, SKIPPED_DUPLICATE }
     public record Check(List<GameImpactCredit.Target> targets,int inspected,boolean incomplete,
-                        String method,String detail) {
+                        String method,String detail,GameImpactCredit.Target directTarget) {
+        public Check(List<GameImpactCredit.Target> targets,int inspected,boolean incomplete,String method,String detail) {
+            this(targets,inspected,incomplete,method,detail,!incomplete&&targets.size()==1?targets.getFirst():null);
+        }
         public Check(List<GameImpactCredit.Target> targets,int inspected,boolean incomplete,String method) {
             this(targets,inspected,incomplete,method,"NONE");
         }
@@ -34,6 +37,7 @@ public final class SableContactRegions {
         public Check {
             targets=List.copyOf(targets);
             if(inspected<0 || inspected>RUNTIME_MAX_UNIQUE_CELLS_PER_SIDE)throw new IllegalArgumentException("unbounded contact audit");
+            if(directTarget!=null&&(incomplete||!targets.contains(directTarget)))throw new IllegalArgumentException("unproved direct target");
         }
     }
     @FunctionalInterface public interface Inspector {
@@ -101,8 +105,14 @@ public final class SableContactRegions {
             var key=new AuditKey(owner,point,onA?contact.frameA():contact.frameB());
             var prior=cache.get(key);
             if(prior!=null){
-                if(directions.active())observeDirection(directions,nativeBatch,contact,owner,point,witnesses.get(key));
-                return new Check(prior.targets(),0,false,prior.method(),prior.detail());
+                var direct=prior.directTarget();
+                if(directions.active()){
+                    var face=observeDirection(directions,nativeBatch,contact,owner,point,witnesses.get(key));
+                    // A new native record at the same point can have different
+                    // normals. Reuse the shape witness only, not its pairing.
+                    if(prior.targets().size()!=1)direct=face;
+                }
+                return new Check(prior.targets(),0,false,prior.method(),prior.detail(),direct);
             }
             var positions=SableConsumerTargets.cells(point);
             var found=new LinkedHashSet<GameImpactCredit.Target>();
@@ -139,10 +149,15 @@ public final class SableContactRegions {
                 result=new Check(List.of(),checked,false,"UNVERIFIED",
                         "R2_NO_SHAPE_R3_CROSS_PHASE_UNCALIBRATED");
             }
+            // Only the unambiguous original shape result may be cached as a
+            // direct target; per-record direction disambiguation is ephemeral.
+            if(uncertain)result=new Check(result.targets(),result.inspected(),result.incomplete(),result.method(),result.detail(),null);
             cache.put(key,result);
             if(directions.active()){
                 var witness=new DirectionWitness(cells,uncertain);witnesses.put(key,witness);
-                observeDirection(directions,nativeBatch,contact,owner,point,witness);
+                var face=observeDirection(directions,nativeBatch,contact,owner,point,witness);
+                if(face!=null&&result.directTarget()==null)
+                    result=new Check(result.targets(),result.inspected(),result.incomplete(),result.method(),result.detail(),face);
             }
             return result;
         }, RUNTIME_MAX_UNIQUE_CELLS_PER_SIDE);
@@ -244,13 +259,14 @@ public final class SableContactRegions {
     private record AuditKey(String owner, FrameMath.Vec point,
                             NativeCollisionTelemetry.OwnerFrame frame) {}
     private record DirectionWitness(java.util.Map<GameImpactCredit.Target,net.minecraft.core.BlockPos> cells,boolean uncertain) {}
-    private static void observeDirection(TargetDirections directions,OwnerResolver.NativeAuditBatch batch,
+    private static GameImpactCredit.Target observeDirection(TargetDirections directions,OwnerResolver.NativeAuditBatch batch,
                                          NativeCollisionTelemetry.Contact contact,String owner,FrameMath.Vec point,DirectionWitness witness){
         var axes=directions.axis(owner,contact);
         var faces=new ArrayList<GameImpactCredit.Target>();
         if(axes!=null)for(var entry:witness.cells().entrySet())
             if(batch.targetFace(owner,entry.getValue(),point,axes))faces.add(entry.getKey());
         directions.observe(witness.cells().keySet(),faces,axes,witness.uncertain());
+        return !witness.uncertain()&&faces.size()==1?faces.getFirst():null;
     }
     /** Testable no-world-evidence policy: never approve a side from a guessed owner. */
     public static Result collect(GameImpactCredit.Pair pair,
@@ -371,9 +387,11 @@ public final class SableContactRegions {
                         "both_sides_unverifiable capacity="+ContactCreditLedger.MAX_TARGETS_PER_SIDE
                                 +" incompleteA="+incompleteDetailA+" incompleteB="+incompleteDetailB);
             if(!exceededA && !exceededB && !regionCompacted) {
-                if(a.targets().size()==1 && b.targets().size()==1)
-                    regions.add(new ContactCreditLedger.Region(a.targets().get(0),b.targets().get(0)));
-                else {
+                if(a.directTarget()!=null && b.directTarget()!=null){
+                    regions.add(new ContactCreditLedger.Region(a.directTarget(),b.directTarget()));
+                    for(var target:a.targets())if(!target.equals(a.directTarget()))regions.add(new ContactCreditLedger.Region(target,null));
+                    for(var target:b.targets())if(!target.equals(b.directTarget()))regions.add(new ContactCreditLedger.Region(null,target));
+                }else {
                     for(var target:a.targets())regions.add(new ContactCreditLedger.Region(target,null));
                     for(var target:b.targets())regions.add(new ContactCreditLedger.Region(null,target));
                 }

@@ -8,6 +8,17 @@ import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
 
 class PlotIntentMapperTest {
+    @Test void thirdOwnerUsesItsOwnGenerationAndOriginalCredit(){
+        var grant=mixed();var third=new GameImpactCredit.Owner("PLOT:123e4567-e89b-12d3-a456-426614174001",9);
+        var share=new ContactCreditLedger.Share(new GameImpactCredit.Target(third.stableKey(),"12,64,12","minecraft:stone|Block{minecraft:stone}"),2);
+        var side=new java.util.ArrayList<>(grant.a());side.add(share);
+        var expanded=new ContactCreditLedger.Grant(grant.id(),grant.source(),grant.status(),grant.tick(),grant.issuedQ(),
+                side,grant.b(),0,grant.observedRegions(),grant.algorithmRevision(),null,null,java.util.Map.of(third.stableKey(),third));
+        var mapped=PlotIntentMapper.project(expanded,7,f->new MaterialProperties(50,150,10,10,false),k->"owner-incarnation");
+        assertEquals(2,mapped.plot().size());
+        assertTrue(mapped.plot().stream().anyMatch(i->PlotKeyCodec.real(i.key()).ownerGeneration()==9&&i.sealedQ()==2));
+        assertEquals(5,mapped.worldQ(),1e-9);
+    }
     private static ContactCreditLedger.Grant mixed() {
         var world=new GameImpactCredit.Owner("WORLD:minecraft:overworld",1);
         var ship=new GameImpactCredit.Owner("PLOT:123e4567-e89b-12d3-a456-426614174000",1);

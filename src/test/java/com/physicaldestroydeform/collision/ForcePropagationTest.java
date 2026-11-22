@@ -19,6 +19,67 @@ class ForcePropagationTest {
         return new GameImpactCredit.Target(owner,x+","+y+","+z,"minecraft:stone|Block{minecraft:stone}");
     }
     private static MaterialProperties material(int e) {return new MaterialProperties(40,100,20,e,false);}
+    @Test void weightedSeedsRetainIndividualContactBudget() {
+        var a=at(WORLD,0,0,0);var b=at(WORLD,10,0,0);
+        var r=ForcePropagation.planTargets(WORLD,java.util.Map.of(a,15d,b,50d),graph(Set.of()),
+                t->material(0),FORCE,DAMAGE,ForcePropagation.Orientation.unknown(),null);
+        assertEquals(65,r.inputF(),1e-9);
+        assertEquals(15,r.shares().stream().filter(s->s.target().equals(a)).findFirst().orElseThrow().allocatedF(),1e-9);
+        assertEquals(50,r.shares().stream().filter(s->s.target().equals(b)).findFirst().orElseThrow().allocatedF(),1e-9);
+    }
+    @Test void weightedSeedsRejectNonfiniteForce() {
+        assertThrows(IllegalArgumentException.class,()->ForcePropagation.planTargets(WORLD,
+                java.util.Map.of(at(WORLD,0,0,0),Double.NaN),graph(Set.of()),t->material(0),FORCE,DAMAGE,
+                ForcePropagation.Orientation.unknown(),null));
+    }
+    @Test void verifiedCrossOwnerLineConservesOriginalBudgetAndDoesNotReenter() {
+        var a=at(PLOT,0,0,0);var b=at(PLOT,1,0,0);var c=at(PLOT,2,0,0);
+        var d=at(WORLD,100,0,0);var e=at(WORLD,101,0,0);
+        var normal=new ForcePropagation.Orientation(new FrameMath.Vec(1,0,0),"TEST");
+        var ctx=new ForcePropagation.CrossOwnerContext() {
+            public java.util.Map<String,GameImpactCredit.Owner> owners(){return java.util.Map.of(PLOT,new GameImpactCredit.Owner(PLOT,1),WORLD,new GameImpactCredit.Owner(WORLD,1));}
+            public java.util.List<ForcePropagation.CrossEdge> edges(GameImpactCredit.Target from,ForcePropagation.Orientation inward){
+                return from.equals(c)?List.of(new ForcePropagation.CrossEdge(d,normal,1)):from.equals(d)?List.of(new ForcePropagation.CrossEdge(c,normal,1)):List.of();
+            }
+        };
+        var r=ForcePropagation.planTargets(PLOT,java.util.Map.of(a,100d),graph(Set.of(PLOT+":0,0,0",PLOT+":1,0,0",PLOT+":2,0,0",WORLD+":100,0,0",WORLD+":101,0,0")),t->material(0),FORCE,DAMAGE,normal,null,ctx);
+        assertEquals(List.of(50d,25d,12.5,6.25,6.25),r.shares().stream().map(ForcePropagation.Share::allocatedF).toList());
+        assertEquals(100,r.assignedF(),1e-9);
+        assertEquals(5,r.shares().stream().map(ForcePropagation.Share::target).distinct().count());
+    }
+    @Test void missingContactNeverCreatesForeignTarget(){
+        var root=at(PLOT,0,0,0);
+        var normal=new ForcePropagation.Orientation(new FrameMath.Vec(1,0,0),"TEST");
+        var ctx=new ForcePropagation.CrossOwnerContext(){
+            public java.util.Map<String,GameImpactCredit.Owner> owners(){return java.util.Map.of();}
+            public List<ForcePropagation.CrossEdge> edges(GameImpactCredit.Target from,ForcePropagation.Orientation inward){return List.of();}
+        };
+        var r=ForcePropagation.planTargets(PLOT,java.util.Map.of(root,100d),graph(Set.of(WORLD+":0,0,0")),t->material(0),FORCE,DAMAGE,normal,null,ctx);
+        assertEquals(1,r.shares().size());assertEquals(root,r.shares().getFirst().target());assertEquals(100,r.assignedF(),1e-9);
+    }
+    @Test void crossOwnerDiamondMergesEqualDepthOnlyOnce(){
+        var a=at(PLOT,0,0,0);var b=at(PLOT,0,0,1);var c=at(WORLD,50,0,0);
+        var normal=new ForcePropagation.Orientation(new FrameMath.Vec(1,0,0),"TEST");
+        var ctx=new ForcePropagation.CrossOwnerContext(){
+            public java.util.Map<String,GameImpactCredit.Owner> owners(){return java.util.Map.of(PLOT,new GameImpactCredit.Owner(PLOT,1),WORLD,new GameImpactCredit.Owner(WORLD,1));}
+            public List<ForcePropagation.CrossEdge> edges(GameImpactCredit.Target from,ForcePropagation.Orientation inward){return from.equals(a)||from.equals(b)?List.of(new ForcePropagation.CrossEdge(c,normal,1)):List.of();}
+        };
+        var r=ForcePropagation.planTargets(PLOT,java.util.Map.of(a,50d,b,50d),graph(Set.of()),t->material(0),FORCE,DAMAGE,normal,null,ctx);
+        assertEquals(3,r.shares().size());assertEquals(1,r.audit().mergedNodes());
+        assertEquals(50,r.shares().stream().filter(s->s.target().equals(c)).findFirst().orElseThrow().allocatedF(),1e-9);
+        assertEquals(100,r.assignedF(),1e-9);
+    }
+    @Test void crossBoundaryDistinguishesInternalAndContactElasticity(){
+        var a=at(PLOT,0,0,0);var b=at(WORLD,100,0,0);
+        var normal=new ForcePropagation.Orientation(new FrameMath.Vec(1,0,0),"TEST");
+        var ctx=new ForcePropagation.CrossOwnerContext(){
+            public java.util.Map<String,GameImpactCredit.Owner> owners(){return java.util.Map.of(PLOT,new GameImpactCredit.Owner(PLOT,1),WORLD,new GameImpactCredit.Owner(WORLD,1));}
+            public List<ForcePropagation.CrossEdge> edges(GameImpactCredit.Target from,ForcePropagation.Orientation inward){return from.equals(a)?List.of(new ForcePropagation.CrossEdge(b,normal,1)):List.of();}
+        };
+        var r=ForcePropagation.planTargets(PLOT,java.util.Map.of(a,100d),graph(Set.of()),t->material(t.equals(a)?100:0),FORCE,DAMAGE,normal,null,ctx);
+        assertEquals(42.5,r.dampedF(),1e-9);assertEquals(6.375,r.contactDampedF(),1e-9);
+        assertEquals(51.125,r.assignedF(),1e-9);assertEquals(100,r.assignedF()+r.dampedF()+r.contactDampedF(),1e-9);
+    }
     private static ForcePropagation.NeighborReader graph(Set<String> occupied) {
         return (from,x,y,z)->occupied.contains(from.ownerKey()+":"+x+","+y+","+z)
                 ?ForcePropagation.Probe.present(at(from.ownerKey(),x,y,z))

@@ -62,13 +62,22 @@ public final class ForcePropagation {
                          int layer, double rejectedF, String reason) implements Trace {}
     public record Audit(double thresholdDiscardF, double thresholdDiscardQ,
                         double terminalRecoveredF, int terminalNodes, int maxDepth,
-                        int paidEdges, int mergedNodes, int safetyBlockedNodes) {}
+                        int paidEdges, int mergedNodes, int safetyBlockedNodes, int crossEdges) {
+        public Audit(double thresholdDiscardF,double thresholdDiscardQ,double terminalRecoveredF,int terminalNodes,int maxDepth,int paidEdges,int mergedNodes,int safetyBlockedNodes){
+            this(thresholdDiscardF,thresholdDiscardQ,terminalRecoveredF,terminalNodes,maxDepth,paidEdges,mergedNodes,safetyBlockedNodes,0);
+        }
+    }
     public record Result(List<Share> shares, double inputF, double assignedF,
                          double dampedF, double unresolvedF, double candidateQ,
-                         double finalQ, double dampedQ, String endReason, Audit audit) {
+                         double finalQ, double dampedQ, String endReason, Audit audit, double contactDampedF) {
         public Result {
             shares = List.copyOf(shares);
             Objects.requireNonNull(audit);
+        }
+        public Result(List<Share> shares, double inputF, double assignedF, double dampedF,
+                      double unresolvedF, double candidateQ, double finalQ, double dampedQ,
+                      String endReason, Audit audit) {
+            this(shares,inputF,assignedF,dampedF,unresolvedF,candidateQ,finalQ,dampedQ,endReason,audit,0);
         }
         public Result(List<Share> shares, double inputF, double assignedF,
                       double dampedF, double unresolvedF, double candidateQ,
@@ -203,6 +212,33 @@ public final class ForcePropagation {
         public boolean verified() {return inward!=null;}
         public static Orientation unknown() {return new Orientation(null,"UNKNOWN");}
     }
+    public static final int MAX_CROSS_DEPTH=4, MAX_CROSS_EDGES=128, MAX_CROSS_OWNERS=8;
+    /** Only same-frame physically verified contacts may be supplied by the runtime. */
+    public record CrossEdge(GameImpactCredit.Target target,Orientation receiving,double projection) {
+        public CrossEdge {
+            Objects.requireNonNull(target);Objects.requireNonNull(receiving);
+            if(!receiving.verified()||!Double.isFinite(projection)||projection<=0||projection>1.0000001)
+                throw new IllegalArgumentException("unverified cross-owner edge");
+        }
+    }
+    public interface CrossOwnerContext {
+        Map<String,GameImpactCredit.Owner> owners();
+        List<CrossEdge> edges(GameImpactCredit.Target from,Orientation inward);
+        default boolean unresolved(GameImpactCredit.Target from,Orientation inward){return false;}
+        default CrossOwnerContext forSide(String root,String opposite){
+            CrossOwnerContext upstream=this;
+            return new CrossOwnerContext(){
+                public Map<String,GameImpactCredit.Owner> owners(){return upstream.owners();}
+                public List<CrossEdge> edges(GameImpactCredit.Target from,Orientation inward){
+                    return upstream.edges(from,inward).stream().filter(e->!e.target().ownerKey().equals(root)&&!e.target().ownerKey().equals(opposite)).toList();
+                }
+                public boolean unresolved(GameImpactCredit.Target from,Orientation inward){return upstream.unresolved(from,inward);}
+            };
+        }
+    }
+    private record Cell(String owner,String local) {
+        static Cell of(GameImpactCredit.Target t){return new Cell(t.ownerKey(),t.localBlock());}
+    }
     // Actual production geometry is bounded. Neither radius nor a safety cap is
     // a real block boundary, so no terminal remainder may be manufactured there.
     // No depth-based loss. A node is visited once in an acyclic BFS; only the
@@ -218,12 +254,14 @@ public final class ForcePropagation {
     private static final class Flow {
         final GameImpactCredit.Target target;
         final int x,y,z,depth,elasticity;
+        int crossDepth;
+        final Orientation direction;
         final java.util.Map<Flow,Double> parents=new java.util.HashMap<>();
         double incoming,localF,rawQ,finalQ,forwarded,damped,terminalBonus,discarded;
         int eligibleChildren,paidChildren;
         String decision="UNPROCESSED";
-        Flow(GameImpactCredit.Target t,int depth,int e) {
-            this.target=t;this.depth=depth;this.elasticity=e;
+        Flow(GameImpactCredit.Target t,int depth,int e,Orientation direction,int crossDepth) {
+            this.target=t;this.depth=depth;this.elasticity=e;this.direction=direction;this.crossDepth=crossDepth;
             String[] p=t.localBlock().split(",",-1);
             if(p.length!=3)throw new IllegalArgumentException("bad target coordinates");
             x=Integer.parseInt(p[0]);y=Integer.parseInt(p[1]);z=Integer.parseInt(p[2]);
@@ -268,31 +306,57 @@ public final class ForcePropagation {
         if(!Double.isFinite(inputF)||inputF<0)throw new IllegalArgumentException("invalid F");
         if(inputF==0||seeds.isEmpty())return new Result(List.of(),inputF,0,0,inputF,0,0,0,
                 "NO_VERIFIED_SEEDS");
-        var seen=new HashMap<String,Flow>();
+        var distinct=new HashMap<Cell,GameImpactCredit.Target>();
         for(var t:seeds) {
             if(t==null||!ownerKey.equals(t.ownerKey()))throw new IllegalArgumentException("invalid seed owner");
-            var old=seen.get(t.localBlock());
-            if(old!=null) {
-                if(!old.target.fingerprint().equals(t.fingerprint()))
-                    throw new IllegalArgumentException("conflicting seed fingerprint");
-                continue;
-            }
-            var material=Objects.requireNonNull(materials.apply(t),"missing seed material");
-            seen.put(t.localBlock(),new Flow(t,0,material.elasticityPercent()));
+            var old=distinct.putIfAbsent(Cell.of(t),t);
+            if(old!=null&&!old.equals(t))throw new IllegalArgumentException("conflicting seed fingerprint");
         }
+        var weighted=new HashMap<GameImpactCredit.Target,Double>();
+        for(var target:distinct.values())weighted.put(target,inputF/distinct.size());
+        return planTargets(ownerKey,weighted,neighbors,materials,forces,damage,direction,trace,null);
+    }
+    public static Result planTargets(String ownerKey,Map<GameImpactCredit.Target,Double> seeds,
+                              NeighborReader neighbors,Function<GameImpactCredit.Target,MaterialProperties> materials,
+                              GameImpactCredit.Settings forces,DamageModel.Settings damage,
+                              Orientation direction,java.util.function.Consumer<Trace> trace) {
+        return planTargets(ownerKey,seeds,neighbors,materials,forces,damage,direction,trace,null);
+    }
+    public static Result planTargets(String ownerKey,Map<GameImpactCredit.Target,Double> seeds,
+                              NeighborReader neighbors,Function<GameImpactCredit.Target,MaterialProperties> materials,
+                              GameImpactCredit.Settings forces,DamageModel.Settings damage,
+                              Orientation direction,java.util.function.Consumer<Trace> trace,CrossOwnerContext cross) {
+        Objects.requireNonNull(ownerKey);Objects.requireNonNull(seeds);Objects.requireNonNull(neighbors);
+        Objects.requireNonNull(materials);Objects.requireNonNull(forces);Objects.requireNonNull(damage);Objects.requireNonNull(direction);
+        var seen=new HashMap<Cell,Flow>();
+        double inputF=0;
+        for(var entry:seeds.entrySet()) {
+            var t=entry.getKey();double f=entry.getValue();
+            if(t==null||!ownerKey.equals(t.ownerKey())||!Double.isFinite(f)||f<0)
+                throw new IllegalArgumentException("invalid seed force/owner");
+            inputF+=f;
+            if(f==0)continue;
+            var material=Objects.requireNonNull(materials.apply(t),"missing seed material");
+            var flow=new Flow(t,0,material.elasticityPercent(),direction,0);flow.incoming=f;
+            if(seen.putIfAbsent(Cell.of(t),flow)!=null)throw new IllegalArgumentException("conflicting seed fingerprint");
+        }
+        if(!Double.isFinite(inputF))throw new IllegalArgumentException("invalid total seed F");
         if(seen.size()>MAX_NODES_PER_SIDE)throw new IllegalArgumentException("too many contact seeds");
         List<Flow> layer=new ArrayList<>(seen.values());
-        layer.sort(Comparator.comparing(n->n.target.localBlock()));
-        for(var node:layer)node.incoming=inputF/layer.size();
+        Comparator<Flow> order=Comparator.comparing((Flow n)->n.target.ownerKey()).thenComparing(n->n.target.localBlock());
+        layer.sort(order);
+        var owners=new HashSet<String>();owners.add(ownerKey);
+        int crossEdges=0;
         var all=new ArrayList<Flow>();
-        double assigned=0,dampedF=0,unresolved=0,discardF=0,terminalF=0;
+        double assigned=0,dampedF=0,unresolved=0,discardF=0,terminalF=0,contactDampedF=0;
         int terminalNodes=0,maxDepth=0,paidEdges=0,mergedNodes=0,blockedNodes=0;
         boolean capped=false,unknown=false,belowFloor=false;
         while(!layer.isEmpty()) {
             int depth=layer.getFirst().depth;
             maxDepth=Math.max(maxDepth,depth);
-            var nextMap=new HashMap<String,Flow>();
+            var nextMap=new HashMap<Cell,Flow>();
             var links=new HashMap<Flow,List<Flow>>();
+            var projections=new HashMap<Flow,Map<Flow,Double>>();
             var blocked=new HashMap<Flow,String>();
             // Freeze the entire level's reachable graph before calculating Q.
             for(var node:layer) {
@@ -305,33 +369,66 @@ public final class ForcePropagation {
                         x=Math.addExact(node.x,step[0]);y=Math.addExact(node.y,step[1]);
                         z=Math.addExact(node.z,step[2]);
                     }catch(ArithmeticException overflow){blocked.put(node,"COORDINATE_OVERFLOW");continue;}
-                    if(!forwardStep(direction,step))continue;
+                    if(!forwardStep(node.direction,step))continue;
                     Probe proof=Objects.requireNonNull(neighbors.read(node.target,x,y,z),"missing neighbor proof");
                     if(proof.status()==ProbeStatus.UNKNOWN){blocked.put(node,"UNKNOWN_NEIGHBOR");unknown=true;continue;}
                     if(proof.status()!=ProbeStatus.PRESENT)continue;
                     var t=proof.target();
-                    if(!ownerKey.equals(t.ownerKey())||!t.localBlock().equals(x+","+y+","+z))
+                    if(!node.target.ownerKey().equals(t.ownerKey())||!t.localBlock().equals(x+","+y+","+z))
                         throw new IllegalArgumentException("neighbor owner/coordinates mismatch");
-                    var prior=seen.get(t.localBlock());
+                    var prior=seen.get(Cell.of(t));
                     if(prior!=null){
                         if(!prior.target.fingerprint().equals(t.fingerprint()))
                             throw new IllegalArgumentException("changed visited material fingerprint");
                         continue;
                     }
-                    var child=nextMap.get(t.localBlock());
+                    var child=nextMap.get(Cell.of(t));
                     if(child==null) {
                         if(seen.size()+nextMap.size()>=MAX_NODES_PER_SIDE){
                             capped=true;blocked.put(node,"NODE_WORK_BUDGET");continue;
                         }
                         var material=materials.apply(t);
                         if(material==null){blocked.put(node,"UNKNOWN_NEIGHBOR_MATERIAL");unknown=true;continue;}
-                        child=new Flow(t,depth+1,material.elasticityPercent());
-                        nextMap.put(t.localBlock(),child);
+                        child=new Flow(t,depth+1,material.elasticityPercent(),node.direction,node.crossDepth);
+                        nextMap.put(Cell.of(t),child);
                     } else if(!child.target.fingerprint().equals(t.fingerprint()))
                         throw new IllegalArgumentException("conflicting branch fingerprint");
+                    else if(!sameOrientation(child.direction,node.direction)) {
+                        blocked.put(node,"AMBIGUOUS_INTERNAL_DIRECTION");continue;
+                    }
+                    child.crossDepth=Math.max(child.crossDepth,node.crossDepth);
                     children.add(child);
                 }
-                children.sort(Comparator.comparing(n->n.target.localBlock()));
+                if(cross!=null&&node.direction.verified()) {
+                    if(cross.unresolved(node.target,node.direction))blocked.put(node,"UNRESOLVED_CONTACT");
+                    for(var edge:cross.edges(node.target,node.direction)) {
+                        var t=edge.target();var key=Cell.of(t);
+                        if(t.ownerKey().equals(node.target.ownerKey())||!cross.owners().containsKey(t.ownerKey()))
+                            throw new IllegalArgumentException("invalid contact owner");
+                        var prior=seen.get(key);
+                        if(prior!=null){if(!prior.target.equals(t))throw new IllegalArgumentException("stale contact fingerprint");continue;}
+                        if(node.crossDepth>=MAX_CROSS_DEPTH||crossEdges>=MAX_CROSS_EDGES||
+                                (!owners.contains(t.ownerKey())&&owners.size()>=MAX_CROSS_OWNERS)||
+                                seen.size()+nextMap.size()>=MAX_NODES_PER_SIDE) {
+                            blocked.put(node,"CROSS_OWNER_CAP");continue;
+                        }
+                        var child=nextMap.get(key);
+                        if(child==null){
+                            var m=materials.apply(t);
+                            if(m==null){blocked.put(node,"UNKNOWN_CONTACT_MATERIAL");continue;}
+                            child=new Flow(t,depth+1,m.elasticityPercent(),edge.receiving(),node.crossDepth+1);
+                            nextMap.put(key,child);
+                        } else if(!child.target.equals(t)||!sameOrientation(child.direction,edge.receiving())) {
+                            blocked.put(node,"AMBIGUOUS_CONTACT_DIRECTION");continue;
+                        }
+                        child.crossDepth=Math.max(child.crossDepth,node.crossDepth+1);
+                        if(!children.contains(child)){
+                            children.add(child);projections.computeIfAbsent(node,k->new HashMap<>()).put(child,edge.projection());
+                            crossEdges++;owners.add(t.ownerKey());
+                        }
+                    }
+                }
+                children.sort(order);
             }
             for(var node:layer) {
                 if(node.incoming<MIN_PROPAGATED_F){
@@ -367,12 +464,17 @@ public final class ForcePropagation {
                 double forward=pending*DamageModel.elasticityTransmissionPercent(node.elasticity,damage);
                 node.damped=pending-forward;
                 dampedF+=node.damped;
-                double[] weights=directionWeights(direction,children,node);
+                double[] weights=directionWeights(node.direction,children,node,projections.getOrDefault(node,Map.of()));
                 double sent=0;
                 for(int i=0;i<children.size();i++) {
                     var child=children.get(i);
                     double part=i==children.size()-1?forward-sent:forward*weights[i];
                     sent+=part;
+                    if(!child.target.ownerKey().equals(node.target.ownerKey())) {
+                        // New boundary: receiver gets the opposing contact block's E attenuation.
+                        double transmitted=part*DamageModel.elasticityTransmissionPercent(node.elasticity,damage);
+                        contactDampedF+=part-transmitted;part=transmitted;
+                    }
                     // Never create an F<1 edge. Do not silently reassign it
                     // to the remaining children or invent a physical terminal.
                     if(part<MIN_PROPAGATED_F){
@@ -392,7 +494,7 @@ public final class ForcePropagation {
             // No unpaid candidate gets an entry or a phantom child Q discount.
             var next=new ArrayList<Flow>();
             for(var child:nextMap.values())if(child.incoming>=MIN_PROPAGATED_F)next.add(child);
-            next.sort(Comparator.comparing(n->n.target.localBlock()));
+            next.sort(order);
             if(trace!=null)for(var child:next)trace.accept(new Receipt(child.target,
                     child.depth,child.parents.size(),child.incoming,true));
             for(var child:next)if(child.parents.size()>1)mergedNodes++;
@@ -408,7 +510,7 @@ public final class ForcePropagation {
             }
             for(var entry:sum.entrySet())if(entry.getValue()>0)
                 entry.getKey().finalQ*=weighted.get(entry.getKey())/entry.getValue();
-            for(var child:next)seen.put(child.target.localBlock(),child);
+            for(var child:next)seen.put(Cell.of(child.target),child);
             layer=next;
         }
         var shares=new ArrayList<Share>(all.size());
@@ -424,7 +526,7 @@ public final class ForcePropagation {
                     n.localF,n.forwarded,n.damped,n.terminalBonus,n.discarded,
                     n.rawQ,n.finalQ,n.eligibleChildren,n.paidChildren,n.decision));
         }
-        double accounted=assigned+dampedF+discardF+unresolved;
+        double accounted=assigned+dampedF+contactDampedF+discardF+unresolved;
         double tolerance=1e-7*Math.max(1,inputF);
         if(!Double.isFinite(accounted)||Math.abs(accounted-inputF)>tolerance||
                 !Double.isFinite(finalQ)||Math.abs(candidateQ-finalQ-dampedQ-discardQ)>tolerance||
@@ -434,7 +536,7 @@ public final class ForcePropagation {
                 unresolved>0?"SAFETY_BOUNDARY":belowFloor?"F_BELOW_ONE":"VERIFIED_TERMINAL";
         return new Result(shares,inputF,assigned,dampedF,unresolved,candidateQ,finalQ,dampedQ,
                 end,new Audit(discardF,discardQ,terminalF,terminalNodes,maxDepth,
-                        paidEdges,mergedNodes,blockedNodes));
+                        paidEdges,mergedNodes,blockedNodes,crossEdges),contactDampedF);
     }
     /**
      * spreadFix: split the outgoing F between verified inward (70%) and tangent
@@ -443,7 +545,7 @@ public final class ForcePropagation {
      * oblique inward normal is weighted by its exact positive projection, not
      * snapped to an axis. All payments still debit ONE parent's outgoing F.
      */
-    private static double[] directionWeights(Orientation direction,List<Flow> children,Flow parent) {
+    private static double[] directionWeights(Orientation direction,List<Flow> children,Flow parent,Map<Flow,Double> projections) {
         int size=children.size();
         double[] weights=new double[size];
         if(size==0)return weights;
@@ -457,8 +559,8 @@ public final class ForcePropagation {
         int tangentCount=0;
         for(int i=0;i<size;i++) {
             var child=children.get(i);
-            double dot=(child.x-parent.x)*n.x()+(child.y-parent.y)*n.y()
-                    +(child.z-parent.z)*n.z();
+            double dot=projections.getOrDefault(child,(child.x-parent.x)*n.x()+(child.y-parent.y)*n.y()
+                    +(child.z-parent.z)*n.z());
             if(dot>GEOMETRY_EPS) {
                 inward[i]=dot;
                 totalInward+=dot;
@@ -478,6 +580,9 @@ public final class ForcePropagation {
         if(!direction.verified())return true;
         FrameMath.Vec n=direction.inward();
         return n.x()*step[0]+n.y()*step[1]+n.z()*step[2]>=-GEOMETRY_EPS;
+    }
+    private static boolean sameOrientation(Orientation a,Orientation b){
+        return !a.verified()&&!b.verified() || a.verified()&&b.verified()&&a.inward().dot(b.inward())>1-1e-8;
     }
 
     private static void add(Map<String,GameImpactCredit.Target> seen,String owner,GameImpactCredit.Target target) {

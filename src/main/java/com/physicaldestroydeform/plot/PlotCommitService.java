@@ -9,6 +9,7 @@ import com.physicaldestroydeform.state.SparseStateKey;
 import com.physicaldestroydeform.world.WorldCommitCore;
 import com.physicaldestroydeform.world.WorldPersistentJournal;
 import com.physicaldestroydeform.world.WorldReceiptJournal;
+import com.physicaldestroydeform.world.LineageJournal;
 import dev.ryanhcode.sable.api.sublevel.SubLevelContainer;
 import dev.ryanhcode.sable.sublevel.ServerSubLevel;
 import java.io.IOException;
@@ -50,6 +51,9 @@ public final class PlotCommitService {
     private final Deque<WorldReceiptJournal.Receipt> unresolved=new ArrayDeque<>();
     private final Set<PlotOwnerFence.Owner> quarantined=new HashSet<>();
     private final Set<String> knownSplitParents=new HashSet<>();
+    private final Map<String,UUID> verifiedLineage=new HashMap<>();
+    private final Set<Coordinate> lineageActive=new HashSet<>();
+    private final Map<Coordinate,Long> lineageQuarantine=new HashMap<>();
     private final Map<PlotOwnerFence.Owner,Set<Coordinate>> active=new HashMap<>();
     private final Map<UUID,Set<PlotOwnerFence.Owner>> activeOwnersByUuid=new HashMap<>();
     // Startup-only owners remain watched before Sable has loaded/bound their Plot.
@@ -77,6 +81,7 @@ public final class PlotCommitService {
         core.setRollbackHold(i->stress!=null&&stress.holdsForClockRollback(i));
         for(var state:journal.stateSnapshot())registerState(state.key());
         for(var receipt:journal.quarantinedSnapshot()){
+            if(LineageJournal.isMarker(receipt)){restoreLineageQuarantine(receipt);continue;}
             if(receipt.id().startsWith("ORPHAN:1:")) {
                 try {
                     var owner=PlotOwnerFence.Owner.of(PlotKeyCodec.real(receipt.key()));
@@ -86,6 +91,10 @@ public final class PlotCommitService {
         }
         int restored=0;
         for(var receipt:journal.uncertain()){
+            if(LineageJournal.isMarker(receipt)){
+                LineageJournal.quarantine(journal,receipt.id(),server.getTickCount());
+                restoreLineageQuarantine(receipt);continue;
+            }
             if(movement.recorded(receipt.id()))continue;
             if(receipt.pending()!=null){
                 var owner=PlotOwnerFence.Owner.of(PlotKeyCodec.real(receipt.key()));
@@ -208,6 +217,77 @@ public final class PlotCommitService {
         }
     }
     public boolean faulted(){return fault||core.ioFault();}
+    public WorldPersistentJournal lineageJournal(){return journal;}
+    public PlotOwnerFence.Owner resolveLineageOwner(ServerSubLevel sub){
+        if(faulted()||!server.isSameThread()||sub.isRemoved()||sub.getPlot()==null)return null;
+        String dimension=sub.getLevel().dimension().location().toString();UUID uuid=sub.getUniqueId();
+        var candidates=new HashSet<>(activeOwnersByUuid.getOrDefault(uuid,Set.of()));
+        candidates.addAll(restoredOwners.getOrDefault(uuid,Set.of()));
+        var bound=gateway.fence().owner(dimension,uuid);
+        if(bound!=null)candidates.add(bound);
+        candidates.removeIf(o->!o.dimension().equals(dimension));
+        if(candidates.size()>1)return null;
+        var owner=candidates.isEmpty()?new PlotOwnerFence.Owner(dimension,uuid,1):candidates.iterator().next();
+        return !isSplitParent(dimension,uuid)&&gateway.bindLineage(owner,sub)?owner:null;
+    }
+    /** Saved epochs are ambiguous: retain exact coordinate before-images, but
+     * never choose one by proximity or issue incoming state from this cell. */
+    public int quarantineUnresolvedLineage(ServerLevel level,BlockPos allocated)throws IOException{
+        var container=SubLevelContainer.getContainer(level);if(container==null)return 0;
+        var nativePlot=container.getPlot(new ChunkPos(allocated));
+        if(nativePlot==null||!(nativePlot.getSubLevel() instanceof ServerSubLevel sub))return 0;
+        String dim=level.dimension().location().toString();
+        BlockPos local=allocated.subtract(nativePlot.getCenterBlock());
+        var candidates=new HashSet<>(activeOwnersByUuid.getOrDefault(sub.getUniqueId(),Set.of()));
+        candidates.addAll(restoredOwners.getOrDefault(sub.getUniqueId(),Set.of()));
+        int count=0;
+        for(var owner:candidates){
+            if(!owner.dimension().equals(dim))continue;
+            var key=PlotKeyCodec.storage(new SparseStateKey(dim,"PLOT",owner.uuid().toString(),owner.generation(),
+                    local.getX(),local.getY(),local.getZ(),"PDD:LINEAGE_UNRESOLVED"));
+            for(var state:journal.statesAtPosition(key)){
+                String marker=LineageJournal.quarantineSource(journal,state,server.getTickCount(),"OWNER_EPOCH_UNAVAILABLE");
+                recordLineageQuarantine(marker);count++;
+            }
+        }
+        return count;
+    }
+    private void restoreLineageQuarantine(WorldReceiptJournal.Receipt r){
+        if(r.status()!=WorldReceiptJournal.Status.PREPARED&&r.status()!=WorldReceiptJournal.Status.PARTIAL_QUARANTINED)return;
+        var cell=new Coordinate(r.key());long expiry=LineageJournal.quarantineThrough(r);
+        if(LineageJournal.revision(journal,r.key())<=expiry){
+            lineageQuarantine.merge(cell,expiry,Math::max);registerState(r.key());
+        }
+    }
+    public boolean watchLineage(SparseStateKey key){
+        if(faulted()||!server.isSameThread()||isMoveQuarantined(key)||movement.fences.held(key))return false;
+        lineageActive.add(new Coordinate(key));registerState(key);return true;
+    }
+    public void recordLineageQuarantine(String marker){
+        var r=journal.receipt(marker);if(LineageJournal.isMarker(r))restoreLineageQuarantine(r);
+    }
+    public void finishLineage(SparseStateKey key,String marker,boolean success){
+        Coordinate cell=new Coordinate(key);lineageActive.remove(cell);
+        if(!success){var r=journal.receipt(marker);if(LineageJournal.isMarker(r))restoreLineageQuarantine(r);}
+        if(journal.get(key)!=null)registerState(key);
+        else if(!lineageQuarantine.containsKey(cell))unregisterState(key);
+    }
+    public void lineageFault(Exception failure){fault=true;log.error("[PDD-TRANSFER] owner=PLOT status=IO_FAULT",failure);}
+    /** Parent and child retain independent epochs. Only this native mapped move
+     * exempts that exact parent/child split marker from legacy orphan cleanup. */
+    public void confirmLineage(ServerSubLevel parent,ServerSubLevel child){
+        if(parent==null||child==null||parent==child)return;
+        String dimension=parent.getLevel().dimension().location().toString();
+        if(child.getLevel()!=parent.getLevel())return;
+        verifiedLineage.put(dimension+"|"+child.getUniqueId(),parent.getUniqueId());
+        gateway.lineageChanged(dimension,parent.getUniqueId());
+        gateway.lineageChanged(dimension,child.getUniqueId());
+        log.info("[PDD-LINEAGE] parent={} child={} proof=NATIVE_MOVE_BLOCKS",parent.getUniqueId(),child.getUniqueId());
+    }
+    public boolean verifiedLineage(String dimension,UUID parent,UUID child){
+        return parent.equals(verifiedLineage.get(dimension+"|"+child));
+    }
+    void clearLineage(String dimension,UUID child){verifiedLineage.remove(dimension+"|"+child);}
     public boolean isSplitParent(String dimension,UUID uuid){
         return knownSplitParents.contains(dimension+"|"+uuid);
     }
@@ -216,6 +296,7 @@ public final class PlotCommitService {
         quarantineOwner(dimension,uuid,"SABLE_SPLIT_FROM_PARENT");
     }
     void quarantineRemoved(String dimension,UUID uuid){
+        clearLineage(dimension,uuid);
         quarantineOwner(dimension,uuid,"SABLE_REMOVED");
     }
     private void quarantineOwner(String dimension,UUID uuid,String reason){
@@ -301,7 +382,8 @@ public final class PlotCommitService {
                 if(gateway.ownsMoveMutation(sample,before,after))continue;
                 if(movement.fences.held(sample))movement.fences.replaced(sample);
                 if(ownBreak!=null&&new Coordinate(ownBreak).equals(cell))continue;
-                if(!movement.fences.held(sample)&&!stressWatched.contains(cell)&&!journal.trackedPosition(cell.dimension(),cell.x(),cell.y(),cell.z()))continue;
+                if(!movement.fences.held(sample)&&!stressWatched.contains(cell)&&!lineageActive.contains(cell)
+                        &&!lineageQuarantine.containsKey(cell)&&!journal.trackedPosition(cell.dimension(),cell.x(),cell.y(),cell.z()))continue;
                 String oldFingerprint=com.physicaldestroydeform.material.CopycatMaterial.fingerprint(before);
                 if(before.getBlock()==after.getBlock()&&com.physicaldestroydeform.material.CopycatMaterial.isCopycat(oldFingerprint)){
                     var oldReal=new SparseStateKey(dimension,"PLOT",owner.uuid().toString(),owner.generation(),rel.getX(),rel.getY(),rel.getZ(),oldFingerprint);
@@ -310,8 +392,9 @@ public final class PlotCommitService {
                     journal.remapCopycatShape(PlotKeyCodec.storage(oldReal),PlotKeyCodec.storage(newReal),PlotIncarnation.token(newReal,center.getX(),center.getY(),center.getZ(),revision));
                     continue;
                 }
-                journal.replaceBlock(cell.dimension(),cell.x(),cell.y(),cell.z());
-                unregisterState(sample);
+                long revision=journal.replaceBlock(cell.dimension(),cell.x(),cell.y(),cell.z());
+                if(!lineageActive.contains(cell)&&revision>lineageQuarantine.getOrDefault(cell,Long.MAX_VALUE))lineageQuarantine.remove(cell);
+                if(!lineageQuarantine.containsKey(cell))unregisterState(sample);
                 log.info("[PDD-PLOT] phase=REPLACEMENT owner={} local={} " +
                                 "old={} next={} retainedDamage=INVALIDATED",owner.uuid(),rel,before,after);
             }
@@ -323,7 +406,8 @@ public final class PlotCommitService {
     }
     void beginOwnBreak(SparseStateKey virtual){ownBreak=virtual;}
     void endOwnBreak(){ownBreak=null;}
-    boolean isMoveQuarantined(SparseStateKey key){return movement.fences.quarantined(key);}
+    boolean isMoveQuarantined(SparseStateKey key){return movement.fences.quarantined(key)
+            ||lineageActive.contains(new Coordinate(key))||lineageQuarantine.containsKey(new Coordinate(key));}
     boolean acquireMove(MoveTransactionJournal.BeforeImage b){
         if(!movement.fences.acquire(b.id(),b.source(),b.destinationBefore()))return false;
         registerState(b.source());registerState(b.destinationBefore());return true;
@@ -505,6 +589,7 @@ public final class PlotCommitService {
             log.error("[PDD-PLOT] phase=STOP status=CHECKPOINT_FAILED wal=RETAINED",failed);
         }
         active.clear();activeOwnersByUuid.clear();quarantined.clear();knownSplitParents.clear();unresolved.clear();orphanCleanup.clear();orphanCleanupSet.clear();
+        verifiedLineage.clear();lineageActive.clear();lineageQuarantine.clear();
         restoredOwners.clear();
     }
 }
