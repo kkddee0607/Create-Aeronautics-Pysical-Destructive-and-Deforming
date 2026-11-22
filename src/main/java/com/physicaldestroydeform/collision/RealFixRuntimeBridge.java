@@ -174,6 +174,9 @@ public final class RealFixRuntimeBridge {
         boolean ambiguous(String owner) {var s=sides.get(owner);return s!=null&&s.size()>1;}
     }
     private record RuntimeOwners(Pair pair) { }
+    static boolean secondaryPairEligible(boolean directlyAuthorized,int ownerPairCount){
+        return !directlyAuthorized&&ownerPairCount==1;
+    }
     private static final String AMBIGUOUS_OWNER = "\u0000";
     private static final int MAX_INDEX_BODIES_PER_TICK = 16384;
     private static final class OwnerSnapshot {
@@ -335,11 +338,23 @@ public final class RealFixRuntimeBridge {
     /** Called only from ServerTickEvent.Post. Never mutate any world or native buffer. */
     public void tick(MinecraftServer server,List<RawObservation> callbacks,
                      List<NativeCollisionTelemetry.Contact> nativeEvents,
-                     List<CollisionFrame.Snapshot> pre,
+                     List<CollisionFrame.Snapshot> preInput,
                      Logger log) {
         Objects.requireNonNull(server);Objects.requireNonNull(callbacks);
-        Objects.requireNonNull(nativeEvents);Objects.requireNonNull(pre);Objects.requireNonNull(log);
+        Objects.requireNonNull(nativeEvents);Objects.requireNonNull(preInput);Objects.requireNonNull(log);
         final long now=server.getTickCount();
+        // Freeze the live dimension/server identity once at ServerTickEvent.Post.
+        // Old constructor data keeps its legacy direct-path interpretation, but
+        // no unknown capture stamp may contribute a cross-owner edge.
+        final Map<String,ContactBatchStamp> consuming=new HashMap<>();
+        for(var level:server.getAllLevels()){
+            var stamp=ContactBatchStamp.capture(level);
+            if(stamp.captureServerTick()==now)consuming.put(stamp.dimension(),stamp);
+        }
+        final List<CollisionFrame.Snapshot> pre=preInput.stream().filter(p->p!=null&&
+                (!p.runtimeStamp().known()||p.runtimeStamp().statusAgainst(consuming.get(p.dimension()))
+                        ==ContactBatchStamp.Status.CURRENT)).toList();
+        int staleNative=0;
         final boolean fullTrace=Boolean.getBoolean("pdd.diagnostics.fullTrace");
         if(plotCommit!=null)plotCommit.refreshLifecycle(now);
         final boolean complete=NativeCollisionTelemetry.dropped()==lastDropped
@@ -352,9 +367,24 @@ public final class RealFixRuntimeBridge {
         lastPreHistoryDropped=SableFrameCapture.preHistoryDropped();
         final Map<Stamp,List<NativeCollisionTelemetry.Contact>> raw=new HashMap<>();
         for(var c:nativeEvents){
+            if(c==null)continue;
+            if(c.runtimeStamp().known()){
+                var live=consuming.getOrDefault(c.dimension(),ContactBatchStamp.UNKNOWN);
+                var status=c.runtimeStamp().statusAgainst(live);
+                if(status!=ContactBatchStamp.Status.CURRENT){
+                    if(staleNative++==0)log.warn("[PDD-CROSS-OWNER-STAMP] dimension={} sourceGameTick={} liveGameTick={} sourceServerTick={} processingServerTick={} reason={}",
+                            c.dimension(),c.serverTick(),live.sourceGameTick(),c.captureServerTick(),now,status);
+                    continue;
+                }
+            }
             if(c.dimension()!=null&&c.serverTick()>=0)
                 raw.computeIfAbsent(new Stamp(c.dimension(),c.serverTick()),k->new ArrayList<>()).add(c);
         }
+        if(staleNative>0||pre.size()!=preInput.size())
+            log.warn("[PDD-CROSS-OWNER-STAMP] processingServerTick={} rejectedNative={} rejectedPre={} reason=NONCURRENT_CAPTURE",
+                    now,staleNative,preInput.size()-pre.size());
+        final Map<String,Integer> dimensionBatches=new HashMap<>();
+        raw.keySet().forEach(key->dimensionBatches.merge(key.dimension,1,Integer::sum));
         final Map<SceneKey,ObservedTargets> targetEvidence=callbackTargets(server,callbacks);
         final Map<Stamp,OwnerSnapshot> ownerIndex=ownerSnapshots(pre);
         final var massEpochs=new NativeContactMassEpoch(pre);
@@ -376,6 +406,11 @@ public final class RealFixRuntimeBridge {
                         .thenComparingLong(x->x.getKey().tick)).toList()) {
             Stamp stamp=stampEntry.getKey();
             List<NativeCollisionTelemetry.Contact> values=stampEntry.getValue();
+            final ContactBatchStamp capture=values.getFirst().runtimeStamp();
+            final ContactBatchStamp consume=consuming.getOrDefault(stamp.dimension,ContactBatchStamp.UNKNOWN);
+            final var nativeBatchStatus=dimensionBatches.getOrDefault(stamp.dimension,0)!=1
+                    ?ContactBatchStamp.Status.NATIVE_CONTRADICTORY:ContactBatchStamp.nativeStatus(capture,
+                    values.stream().map(NativeCollisionTelemetry.Contact::runtimeStamp).toList());
             double[] copied=new double[values.size()*15];
             for(int i=0;i<values.size();i++) {
                 var c=values.get(i);int o=i*15;
@@ -399,7 +434,7 @@ public final class RealFixRuntimeBridge {
             var contactGraph=new VerifiedContactGraph(server,stamp.dimension,stamp.tick,
                     owner->{var binding=lifecycleBinding(stamp.dimension,owner);
                         return binding!=null&&(!binding.active()||binding.orphaned())?-1:
-                                currentGeneration(stamp.dimension,owner);},contactHistory);
+                                currentGeneration(stamp.dimension,owner);},contactHistory,capture,consume,nativeBatchStatus);
             var resolvedOwners=new HashMap<NativeEffectGroups.RuntimePair,RuntimeOwners>();
             var ownerPairCounts=new HashMap<SceneKey,Integer>();
             var secondary=new java.util.LinkedHashMap<Pair,List<NativeCollisionTelemetry.Contact>>();
@@ -1102,7 +1137,7 @@ public final class RealFixRuntimeBridge {
             for(var candidate:secondary.entrySet()) {
                 Pair pair=candidate.getKey();
                 var scene=new SceneKey(stamp.dimension,stamp.tick,pair.a().stableKey(),pair.b().stableKey());
-                if(directAuthorized.contains(pair)||ownerPairCounts.getOrDefault(scene,0)!=1)continue;
+                if(!secondaryPairEligible(directAuthorized.contains(pair),ownerPairCounts.getOrDefault(scene,0)))continue;
                 boolean validBatch=complete&&batch.invalidRecords()==0&&batch.discardedRecords()==0&&!batch.malformedArray();
                 int admitted=contactGraph.observe(pair,candidate.getValue(),pre,validBatch);
                 if(admitted>0&&logCounts[0]++<MAX_LOG_PER_TICK)
@@ -1110,8 +1145,9 @@ public final class RealFixRuntimeBridge {
             }
             for(Runnable plan:deferredPlans)plan.run();
             if((!secondary.isEmpty()||!directAuthorized.isEmpty())&&(fullTrace||!directAuthorized.isEmpty()||now%VERF_SAMPLE_TICKS==0)&&logCounts[0]++<MAX_LOG_PER_TICK)
-                log.info("[PDD-CROSS-OWNER-AUDIT] tick={} direct={} secondary={} history={} stats={}",
-                        stamp.tick,directAuthorized.size(),secondary.size(),contactGraph.historySize(),contactGraph.stats());
+                log.info("[PDD-CROSS-OWNER-AUDIT] tick={} direct={} secondary={} history={} stats={} sourceGameTick={} liveGameTick={} sourceServerTick={} processingServerTick={} stampReason={}",
+                        stamp.tick,directAuthorized.size(),secondary.size(),contactGraph.historySize(),contactGraph.stats(),
+                        capture.sourceGameTick(),contactGraph.liveGameTick(),capture.captureServerTick(),now,contactGraph.runtimeStatus());
         }
         // Bounded state update: missing native effects NEVER imply separation.
         // Plot/Plot uses disjoint AABBs; Plot/World requires an atomic verified empty region.

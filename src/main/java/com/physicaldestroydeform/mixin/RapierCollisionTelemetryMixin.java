@@ -6,6 +6,7 @@ import net.minecraft.server.level.ServerLevel;
 import dev.ryanhcode.sable.sublevel.ServerSubLevel;
 import it.unimi.dsi.fastutil.ints.Int2ObjectMap;
 import com.physicaldestroydeform.collision.FrameMath;
+import com.physicaldestroydeform.collision.ContactBatchStamp;
 import com.physicaldestroydeform.diagnostics.NativeCollisionTelemetry.OwnerFrame;
 import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Shadow;
@@ -47,8 +48,7 @@ public abstract class RapierCollisionTelemetryMixin {
     private double[] pdd$observeNativeCollisionArray(double[] original) {
         if (NativeCollisionTelemetry.ENABLED) {
             try {
-                NativeCollisionTelemetry.capture(original,level.dimension().location().toString(),
-                        level.getGameTime(),this::pdd$nativeOwner);
+                NativeCollisionTelemetry.capture(original,ContactBatchStamp.capture(level),this::pdd$nativeOwner);
             } catch(RuntimeException observerError) {
                 // Observers must not change Sable's clearCollisions array/exception path.
                 NativeCollisionTelemetry.observerError();

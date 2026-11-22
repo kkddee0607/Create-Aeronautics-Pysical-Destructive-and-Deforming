@@ -15,10 +15,21 @@ public class NativeCollisionTelemetryTest {
         assertEquals(1,items.size());
         var c=items.getFirst();
         assertEquals(1,c.idA()); assertEquals(2,c.idB());
+        assertEquals(-1,c.captureServerTick());assertFalse(c.runtimeStamp().known());
         assertFalse(c.capSaturated());
         assertEquals(3,c.rawImpactScalar()); assertEquals(12,c.contactAZ());
         assertEquals(15,c.contactBZ());
         if (System.getProperty("pdd.debugCollisions") == null) assertTrue(NativeCollisionTelemetry.ENABLED);
+    }
+    @Test void stampedNativePollRetainsSourceClockAndIdentityThroughDrain(){
+        NativeCollisionTelemetry.drain();
+        var stamp=new com.physicaldestroydeform.collision.ContactBatchStamp(new Object(),new Object(),
+                "minecraft:overworld",720,77577);
+        double[] raw={9,-1,42,1,0,0,-1,0,0,.1,.2,.3,4,5,6};
+        NativeCollisionTelemetry.capture(raw,stamp,null);
+        var c=NativeCollisionTelemetry.drain().getFirst();
+        assertSame(stamp,c.runtimeStamp());assertEquals(720,c.captureServerTick());
+        assertEquals(77577,c.serverTick());
     }
     @Test void malformedArrayIsVisible() {
         var initial=NativeCollisionTelemetry.malformed();

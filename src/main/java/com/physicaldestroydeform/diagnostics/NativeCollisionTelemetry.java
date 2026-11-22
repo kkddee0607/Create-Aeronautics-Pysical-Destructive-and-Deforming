@@ -1,6 +1,7 @@
 package com.physicaldestroydeform.diagnostics;
 
 import com.physicaldestroydeform.collision.FrameMath;
+import com.physicaldestroydeform.collision.ContactBatchStamp;
 import java.util.UUID;
 import java.util.function.IntFunction;
 import java.util.ArrayList;
@@ -40,6 +41,14 @@ public final class NativeCollisionTelemetry {
      * A missing frame is explicit UNKNOWN, never guessed from the nearest Plot. */
     public static void capture(double[] nativeData,String dimension,long serverTick,
                                IntFunction<OwnerFrame> frameReader) {
+        capture(nativeData,dimension,serverTick,frameReader,ContactBatchStamp.UNKNOWN);
+    }
+    public static void capture(double[] nativeData,ContactBatchStamp runtimeStamp,IntFunction<OwnerFrame> frameReader){
+        if(runtimeStamp==null)runtimeStamp=ContactBatchStamp.UNKNOWN;
+        capture(nativeData,runtimeStamp.dimension(),runtimeStamp.sourceGameTick(),frameReader,runtimeStamp);
+    }
+    private static void capture(double[] nativeData,String dimension,long serverTick,
+                               IntFunction<OwnerFrame> frameReader,ContactBatchStamp runtimeStamp) {
         POLLS.incrementAndGet();
         if (nativeData == null || nativeData.length % FIELDS != 0) {
             MALFORMED.incrementAndGet();
@@ -76,7 +85,7 @@ public final class NativeCollisionTelemetry {
                     nativeData[offset+12], nativeData[offset+13], nativeData[offset+14],
                     dimension,serverTick,
                     frame(frameReader,(int)nativeData[offset]),frame(frameReader,(int)nativeData[offset+1]),
-                    n==NATIVE_EFFECT_MAX_RECORDS));
+                    n==NATIVE_EFFECT_MAX_RECORDS,runtimeStamp));
         }
     }
     private static OwnerFrame frame(IntFunction<OwnerFrame> reader,int id) {
@@ -108,7 +117,17 @@ public final class NativeCollisionTelemetry {
             double contactAX, double contactAY, double contactAZ,
             double contactBX, double contactBY, double contactBZ,
             String dimension,long serverTick,OwnerFrame frameA,OwnerFrame frameB,
-            boolean capSaturated) {
+            boolean capSaturated,ContactBatchStamp runtimeStamp) {
+        public Contact {if(runtimeStamp==null)runtimeStamp=ContactBatchStamp.UNKNOWN;}
+        public long captureServerTick(){return runtimeStamp.captureServerTick();}
+        public Contact(int idA,int idB,double rawImpactScalar,
+                       double ax,double ay,double az,double bx,double by,double bz,
+                       double contactAX,double contactAY,double contactAZ,
+                       double contactBX,double contactBY,double contactBZ,
+                       String dimension,long serverTick,OwnerFrame frameA,OwnerFrame frameB,boolean capSaturated){
+            this(idA,idB,rawImpactScalar,ax,ay,az,bx,by,bz,contactAX,contactAY,contactAZ,
+                    contactBX,contactBY,contactBZ,dimension,serverTick,frameA,frameB,capSaturated,ContactBatchStamp.UNKNOWN);
+        }
         public Contact(int idA,int idB,double rawImpactScalar,
                        double ax,double ay,double az,double bx,double by,double bz,
                        double contactAX,double contactAY,double contactAZ,

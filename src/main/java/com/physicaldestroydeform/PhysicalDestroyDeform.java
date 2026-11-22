@@ -12,6 +12,7 @@ import com.physicaldestroydeform.material.MaterialRegistry;
 import com.physicaldestroydeform.world.WorldCommitService;
 import com.physicaldestroydeform.world.WorldBlockMutationTracker;
 import com.physicaldestroydeform.world.NativeLineageTransfer;
+import com.physicaldestroydeform.world.LineageRecovery;
 import com.physicaldestroydeform.plot.PlotCommitService;
 import com.physicaldestroydeform.plot.PlotPhysicsProbe;
 import net.neoforged.fml.common.Mod;
@@ -30,7 +31,7 @@ import org.slf4j.LoggerFactory;
 @Mod(PhysicalDestroyDeform.MOD_ID)
 public final class PhysicalDestroyDeform {
     public static final String MOD_ID = "physical_destroy_deform";
-    public static final String BUILD_VERSION = "0.6.1-fix";
+    public static final String BUILD_VERSION = "0.6.1-spreadFix";
     private static final Logger LOGGER = LoggerFactory.getLogger(PhysicalDestroyDeform.class);
     private final AcceptanceReport acceptanceReport = new AcceptanceReport();
     private final RealFixRuntimeBridge bridge = new RealFixRuntimeBridge();
@@ -79,17 +80,19 @@ public final class PhysicalDestroyDeform {
             LOGGER.error("[PDD-PLOT] phase=START status=DISABLED reason=JOURNAL_INIT_FAILED " +
                     "plotMutation=OFF worldMutation=UNCHANGED",unsafePlotJournal);
         }
+        LineageRecovery.start(worldCommit,plotCommit,event.getServer());
         try {
             stress=new StressRuntime(event.getServer(),worldCommit,plotCommit,LOGGER);
         }catch(java.io.IOException|RuntimeException unsafeStressJournal){
             // Do not execute pending origins without their reservation hold/recovery contract.
             bridge.setWorldCommitService(null);bridge.setPlotCommitService(null);
+            LineageRecovery.clear();
             if(worldCommit!=null){worldCommit.stop();worldCommit=null;}
             if(plotCommit!=null){plotCommit.stop();plotCommit=null;}
             WorldBlockMutationTracker.attachPlot(null);
             LOGGER.error("[PDD-STRESS-LEDGER] phase=START status=HALTED reason=JOURNAL_INIT_FAILED mutations=OFF",unsafeStressJournal);
         }
-        LOGGER.info("[PDD-0.6.1] phase=START revision=0.6.1-fix CONTACT_ELASTIC_ALPHA04_PERSISTENT_CONTACT bridge=READ_ONLY nativeScalar=GAME_FORCE_PROXY " +
+        LOGGER.info("[PDD-0.6.1] phase=START revision=0.6.1-spreadFix CONTACT_ELASTIC_ALPHA04_PERSISTENT_CONTACT bridge=READ_ONLY nativeScalar=GAME_FORCE_PROXY " +
                 "newNativeABI=NOT_REQUIRED customNullCallback=DISABLED faceRecovery=MULTI_SURFACE_PLUS_SPARSE_SHAPE_HALO worldMutation={} plotMutation={} ",
                 worldCommit==null?"DISABLED":"WORLD_STATIC_ONLY",plotCommit==null?"DISABLED":"SABLE_PLOT");
     }
@@ -98,6 +101,7 @@ public final class PhysicalDestroyDeform {
     }
     private void onServerStopped(ServerStoppedEvent event) {
         NativeLineageTransfer.expire();
+        LineageRecovery.clear();
         bridge.savePreview(event.getServer(), LOGGER);
         if(stress!=null){stress.stop();stress=null;}
         if(worldCommit!=null){worldCommit.stop();worldCommit=null;}
@@ -114,6 +118,7 @@ public final class PhysicalDestroyDeform {
     }
     private void onServerTick(ServerTickEvent.Post event) {
         NativeLineageTransfer.expire();
+        LineageRecovery.tick(event.getServer());
         // Snapshot and native inputs are consumed exactly once on the server tick.
         // The Sable return array has already been handed back unchanged by Mixin.
         var callbacks=SableContactQueue.drain();
@@ -134,6 +139,7 @@ public final class PhysicalDestroyDeform {
             try {worldCommit.tick(event.getServer().getTickCount());}
             catch(RuntimeException commitError) {
                 LOGGER.error("[PDD-COMMIT] phase=TICK status=FAULT reason=UNEXPECTED_COMMIT_ERROR",commitError);
+                LineageRecovery.clear();
                 worldCommit.stop();worldCommit=null;bridge.setWorldCommitService(null);
             }
         }
@@ -141,6 +147,7 @@ public final class PhysicalDestroyDeform {
             try {plotCommit.tick(event.getServer().getTickCount());}
             catch(RuntimeException commitError){
                 LOGGER.error("[PDD-PLOT] phase=TICK status=FAULT reason=UNEXPECTED_COMMIT_ERROR",commitError);
+                LineageRecovery.clear();
                 WorldBlockMutationTracker.attachPlot(null);
                 plotCommit.stop();plotCommit=null;bridge.setPlotCommitService(null);
             }

@@ -61,6 +61,7 @@ public final class WorldPersistentJournal implements WorldJournal {
     private long generation,walBytes,repairedTailBytes;
     private String legacyHash="";
     private boolean staging, migrated;
+    private boolean appendUncertain;
     // The committed manifest selects the reader schema; new writes use schema 5.
     private int loadingSchema=SCHEMA;
 
@@ -304,6 +305,59 @@ public final class WorldPersistentJournal implements WorldJournal {
         clear(cell);setRevision(cell,next);
         return next;
     }
+    /** Called only after native setter proof has been durably sealed in both
+     * legs. Empty state alone is never evidence of replacement. */
+    synchronized boolean checkLineageSource(LineageJournal.Transfer t)throws IOException {
+        var key=t.source().key();var r=receipt(t.outId());
+        long rev=revision(key.dimension(),key.x(),key.y(),key.z());
+        if(t.fromRevision()<0||t.fromRevision()==Long.MAX_VALUE||r==null||!r.key().equals(key))
+            throw new IOException("LINEAGE_SOURCE_RECEIPT_CAS");
+        if(rev==t.fromRevision()+1&&!hasPosition(key.dimension(),key.x(),key.y(),key.z()))return false;
+        if(r.status()!=WorldReceiptJournal.Status.PREPARED||rev!=t.fromRevision())
+            throw new IOException("LINEAGE_SOURCE_REVISION_CAS");
+        if(!Objects.equals(get(key),t.source())||statesAtPosition(key).size()!=1)
+            throw new IOException("LINEAGE_SOURCE_STATE_CHANGED");
+        checkLineageRevisionCapacity(key,rev);
+        return true;
+    }
+    synchronized boolean checkLineageDestination(LineageJournal.Transfer t)throws IOException {
+        var key=t.destination();var r=receipt(t.inId());
+        long rev=revision(key.dimension(),key.x(),key.y(),key.z());
+        if(r==null||!r.key().equals(key)||r.status()!=WorldReceiptJournal.Status.PREPARED
+                ||t.toRevision()<0||t.toRevision()==Long.MAX_VALUE)
+            throw new IOException("LINEAGE_DESTINATION_RECEIPT_CAS");
+        if(hasPosition(key.dimension(),key.x(),key.y(),key.z())||!canStore(key))
+            throw new IOException("LINEAGE_DESTINATION_STATE_CAS");
+        if(rev==t.toRevision()+1)return false;
+        if(rev!=t.toRevision())throw new IOException("LINEAGE_DESTINATION_REVISION_CAS");
+        checkLineageRevisionCapacity(key,rev);
+        return true;
+    }
+    private void checkLineageRevisionCapacity(SparseStateKey key,long rev)throws IOException{
+        if(rev==0&&(revisions.size()>=MAX_TOTAL_REVISIONS
+                ||revisionChunks.getOrDefault(new Cell(key).chunk(),Set.of()).size()>=MAX_REVISIONS_PER_CHUNK))
+            throw new IOException("LINEAGE_REVISION_CAP");
+    }
+    synchronized void checkLineageJointCapacity(LineageJournal.Transfer t)throws IOException{
+        var a=new Cell(t.source().key());var b=new Cell(t.destination());
+        boolean addA=revision(a.dimension,a.x,a.y,a.z)==0;
+        boolean addB=revision(b.dimension,b.x,b.y,b.z)==0;
+        if(addA&&addB&&(revisions.size()>MAX_TOTAL_REVISIONS-2
+                ||a.chunk().equals(b.chunk())&&revisionChunks.getOrDefault(a.chunk(),Set.of()).size()>MAX_REVISIONS_PER_CHUNK-2))
+            throw new IOException("LINEAGE_JOINT_REVISION_CAP");
+    }
+    synchronized void retireLineageSource(LineageJournal.Transfer t)throws IOException{
+        if(!LineageJournal.isProofMarker(receipt(t.outId())))throw new IOException("LINEAGE_SOURCE_PROOF_REQUIRED");
+        if(checkLineageSource(t)){
+            var k=t.source().key();replaceBlock(k.dimension(),k.x(),k.y(),k.z());
+        }
+    }
+    synchronized void retireLineageDestination(LineageJournal.Transfer t)throws IOException{
+        if(!LineageJournal.isProofMarker(receipt(t.inId())))throw new IOException("LINEAGE_DESTINATION_PROOF_REQUIRED");
+        if(checkLineageDestination(t)){
+            var k=t.destination();replaceBlock(k.dimension(),k.x(),k.y(),k.z());
+        }
+    }
     /** Same actual Copycats block, changed shape/state, not a replacement material block.
      * Atomically rekey the sparse record without changing any damage/history quantity. */
     public synchronized void remapCopycatShape(SparseStateKey before,SparseStateKey after,String incarnation)throws IOException{
@@ -329,6 +383,7 @@ public final class WorldPersistentJournal implements WorldJournal {
     }
     /** Complete a bounded amount of snapshot work on the server thread. */
     @Override public synchronized int checkpointBatch(int maxObjects) throws IOException {
+        if(appendUncertain)throw new IOException("RECOVERY_WAL_APPEND_UNCERTAIN");
         if(maxObjects<1)throw new IllegalArgumentException("checkpoint budget must be positive");
         if(!staging){
             if(dirtyChunks.isEmpty()&&dirtyBuckets.isEmpty())return 0;
@@ -651,13 +706,14 @@ public final class WorldPersistentJournal implements WorldJournal {
         forceDirectory(root);walBytes=16;
     }
     private void append(byte[] frame)throws IOException {
+        if(appendUncertain)throw new IOException("RECOVERY_WAL_APPEND_UNCERTAIN");
         if(walBytes+frame.length>MAX_WAL_BYTES)throw new IOException("RECOVERY_WAL_CAP_EXCEEDED");
         Path path=walPath(generation);
         try(var channel=FileChannel.open(path,APPEND,WRITE)){
             if(channel.size()!=walBytes)throw new IOException("recovery WAL changed externally");
             ByteBuffer b=ByteBuffer.wrap(frame);while(b.hasRemaining())channel.write(b);
             channel.force(true);walBytes+=frame.length;
-        }
+        }catch(IOException uncertain){appendUncertain=true;throw uncertain;}
     }
     private void replayWal()throws IOException {
         Path wal=walPath(generation);

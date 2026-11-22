@@ -92,6 +92,7 @@ public final class PlotCommitService {
         int restored=0;
         for(var receipt:journal.uncertain()){
             if(LineageJournal.isMarker(receipt)){
+                if(LineageJournal.isProofMarker(receipt)){watchRecoveredLineage(receipt.key());continue;}
                 LineageJournal.quarantine(journal,receipt.id(),server.getTickCount());
                 restoreLineageQuarantine(receipt);continue;
             }
@@ -218,6 +219,13 @@ public final class PlotCommitService {
     }
     public boolean faulted(){return fault||core.ioFault();}
     public WorldPersistentJournal lineageJournal(){return journal;}
+    public void watchRecoveredLineage(SparseStateKey key){
+        lineageActive.add(new Coordinate(key));registerState(key);
+    }
+    public boolean lineageRecoveryConflict(SparseStateKey key){
+        return lineageQuarantine.containsKey(new Coordinate(key))
+                ||movement.fences.quarantined(key)||movement.fences.held(key);
+    }
     public PlotOwnerFence.Owner resolveLineageOwner(ServerSubLevel sub){
         if(faulted()||!server.isSameThread()||sub.isRemoved()||sub.getPlot()==null)return null;
         String dimension=sub.getLevel().dimension().location().toString();UUID uuid=sub.getUniqueId();
@@ -394,7 +402,7 @@ public final class PlotCommitService {
                 }
                 long revision=journal.replaceBlock(cell.dimension(),cell.x(),cell.y(),cell.z());
                 if(!lineageActive.contains(cell)&&revision>lineageQuarantine.getOrDefault(cell,Long.MAX_VALUE))lineageQuarantine.remove(cell);
-                if(!lineageQuarantine.containsKey(cell))unregisterState(sample);
+                if(!lineageActive.contains(cell)&&!lineageQuarantine.containsKey(cell))unregisterState(sample);
                 log.info("[PDD-PLOT] phase=REPLACEMENT owner={} local={} " +
                                 "old={} next={} retainedDamage=INVALIDATED",owner.uuid(),rel,before,after);
             }
@@ -440,6 +448,7 @@ public final class PlotCommitService {
         // the marker is durable, cleanup does not block the server tick unboundedly.
         for(int i=0;i<mutationCap && !orphanCleanup.isEmpty();i++){
             Coordinate c=orphanCleanup.peekFirst();
+            if(lineageActive.contains(c)){orphanCleanup.addLast(orphanCleanup.removeFirst());continue;}
             try {journal.discardAtPosition(c.dimension(),c.x(),c.y(),c.z());
                 orphanCleanup.removeFirst();orphanCleanupSet.remove(c);
             }
@@ -579,12 +588,15 @@ public final class PlotCommitService {
     public void stop(){
         gateway.stopLifecycle();
         try{
-            if(!fault&&!core.ioFault())journal.stagePendingOrder(core.pendingSnapshot());
+            if(fault||core.ioFault())log.warn("[PDD-PLOT] phase=STOP checkpointSkipped=IO_FAULT wal=RETAINED");
+            else{
+            journal.stagePendingOrder(core.pendingSnapshot());
             int n=0;
             do{journal.checkpointBatch(WorldPersistentJournal.SAVE_DIRTY_BATCH);}
             while(journal.checkpointPending()&&++n<4096);
             log.info("[PDD-PLOT] phase=STOP checkpointPending={} retained={} receipts={} pending={}",
                     journal.checkpointPending(),journal.size(),journal.receiptCount(),core.queued());
+            }
         }catch(IOException failed){
             log.error("[PDD-PLOT] phase=STOP status=CHECKPOINT_FAILED wal=RETAINED",failed);
         }

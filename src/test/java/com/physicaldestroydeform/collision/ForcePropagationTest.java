@@ -57,6 +57,24 @@ class ForcePropagationTest {
         var r=ForcePropagation.planTargets(PLOT,java.util.Map.of(root,100d),graph(Set.of(WORLD+":0,0,0")),t->material(0),FORCE,DAMAGE,normal,null,ctx);
         assertEquals(1,r.shares().size());assertEquals(root,r.shares().getFirst().target());assertEquals(100,r.assignedF(),1e-9);
     }
+    @Test void admittedPathThreeOwnersConservesF(){
+        String p2="PLOT:6069c055-4ebd-415c-b205-a6715b83156d";
+        var a=at(PLOT,0,0,0);var b=at(PLOT,1,0,0);var c=at(p2,100,0,0);
+        var d=at(p2,101,0,0);var e=at(WORLD,200,0,0);
+        var normal=new ForcePropagation.Orientation(new FrameMath.Vec(1,0,0),"TEST");
+        var ctx=new ForcePropagation.CrossOwnerContext(){
+            public java.util.Map<String,GameImpactCredit.Owner> owners(){return java.util.Map.of(
+                    PLOT,new GameImpactCredit.Owner(PLOT,1),p2,new GameImpactCredit.Owner(p2,1),WORLD,new GameImpactCredit.Owner(WORLD,1));}
+            public List<ForcePropagation.CrossEdge> edges(GameImpactCredit.Target from,ForcePropagation.Orientation inward){
+                return from.equals(b)?List.of(new ForcePropagation.CrossEdge(c,normal,1)):
+                        from.equals(d)?List.of(new ForcePropagation.CrossEdge(e,normal,1)):List.of();
+            }
+        };
+        var r=ForcePropagation.planTargets(PLOT,java.util.Map.of(a,100d),graph(Set.of(PLOT+":0,0,0",PLOT+":1,0,0",p2+":100,0,0",p2+":101,0,0",WORLD+":200,0,0")),t->material(0),FORCE,DAMAGE,normal,null,ctx);
+        assertEquals(List.of(50d,25d,12.5,6.25,6.25),r.shares().stream().map(ForcePropagation.Share::allocatedF).toList());
+        assertEquals(100,r.assignedF(),1e-9);assertEquals(2,r.audit().crossEdges());
+        assertEquals(3,r.shares().stream().map(s->s.target().ownerKey()).distinct().count());
+    }
     @Test void crossOwnerDiamondMergesEqualDepthOnlyOnce(){
         var a=at(PLOT,0,0,0);var b=at(PLOT,0,0,1);var c=at(WORLD,50,0,0);
         var normal=new ForcePropagation.Orientation(new FrameMath.Vec(1,0,0),"TEST");

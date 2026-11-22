@@ -38,6 +38,7 @@ public final class SableFrameCapture {
 
     private static Snapshot capture(SubLevelPhysicsSystem system,long epoch,Phase phase) {
         var level=system.getLevel();
+        var stamp=ContactBatchStamp.capture(level);
         ServerSubLevelContainer container=SubLevelContainer.getContainer(level);
         var bodies=new ArrayList<Body>();
         if(container!=null)for(ServerSubLevel sub:container.getAllSubLevels()) {
@@ -64,12 +65,10 @@ public final class SableFrameCapture {
             }catch(RuntimeException broken) {
                 BODY_ERRORS.increment();
                 // Malformed bodies are not silently mapped to a world block. See per-step validity gate.
-                return new Snapshot(epoch,level.getGameTime(),level.dimension().location().toString(),
-                        phase,bodies,false);
+                return new Snapshot(epoch,stamp.sourceGameTick(),stamp.dimension(),phase,bodies,false,stamp);
             }
         }
-        return new Snapshot(epoch,level.getGameTime(),level.dimension().location().toString(),
-                phase,bodies,container!=null);
+        return new Snapshot(epoch,stamp.sourceGameTick(),stamp.dimension(),phase,bodies,container!=null,stamp);
     }
     /** Event is emitted by Sable after prePhysicsTick, before solver physicsTick. */
     public static void onPre(SubLevelPhysicsSystem system) {

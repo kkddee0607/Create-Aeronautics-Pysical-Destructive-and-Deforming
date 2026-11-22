@@ -84,6 +84,7 @@ public final class WorldCommitService {
         int startupDeferred=0,startupPrepared=0,restored=0;
         for(var receipt:journal.uncertain()) {
             if(LineageJournal.isMarker(receipt)){
+                if(LineageJournal.isProofMarker(receipt)){watchRecoveredLineage(receipt.key());continue;}
                 LineageJournal.quarantine(journal,receipt.id(),server.getTickCount());
                 restoreLineageQuarantine(receipt);continue;
             }
@@ -299,6 +300,15 @@ public final class WorldCommitService {
     boolean isQuarantined(SparseStateKey key){return quarantined.contains(new Cell(key))||movement.fences.quarantined(key)
             ||lineageActive.contains(new Cell(key))||lineageQuarantine.containsKey(new Cell(key));}
     public WorldPersistentJournal lineageJournal(){return journal;}
+    public boolean lineageFaulted(){return fault||core.ioFault();}
+    boolean lineageRecoveryConflict(SparseStateKey key){
+        var cell=new Cell(key);
+        return quarantined.contains(cell)||lineageQuarantine.containsKey(cell)
+                ||movement.fences.quarantined(key)||movement.fences.held(key);
+    }
+    public void watchRecoveredLineage(SparseStateKey key){
+        var cell=new Cell(key);lineageActive.add(cell);watched.add(cell);
+    }
     private void restoreLineageQuarantine(WorldReceiptJournal.Receipt r){
         if(r.status()!=WorldReceiptJournal.Status.PREPARED&&r.status()!=WorldReceiptJournal.Status.PARTIAL_QUARANTINED)return;
         var cell=new Cell(r.key());long expiry=LineageJournal.quarantineThrough(r);
@@ -478,13 +488,16 @@ public final class WorldCommitService {
         try {
             // Shutdown attempts a complete checkpoint. An unexpected failure leaves
             // the already-fsynced old WAL recoverable, not a falsified success.
-            if(!fault&&!core.ioFault())journal.stagePendingOrder(core.pendingSnapshot());
+            if(fault||core.ioFault())log.warn("[PDD-PERSIST] phase=STOP_CHECKPOINT skipped=IO_FAULT wal=RETAINED");
+            else{
+            journal.stagePendingOrder(core.pendingSnapshot());
             int passes=0,flushed=0;
             do {
                 flushed+=journal.checkpointBatch(WorldPersistentJournal.SAVE_DIRTY_BATCH);
             }while(journal.checkpointPending() && ++passes<4096);
             log.info("[PDD-PERSIST] phase=STOP_CHECKPOINT writtenShards={} pending={} {}",
                     flushed,journal.checkpointPending(),journal.storageStatus());
+            }
         }catch(IOException failed){
             fault=true;log.error("[PDD-PERSIST] phase=STOP_CHECKPOINT status=FAILED " +
                     "recoveryWalStillDurable=true",failed);

@@ -126,6 +126,8 @@ public final class VerifiedContactGraph implements ForcePropagation.CrossOwnerCo
     private final MinecraftServer server;
     private final String dimension;
     private final long tick;
+    private final ContactBatchStamp sourceStamp,processingStamp;
+    private final ContactBatchStamp.Status nativeBatchStatus;
     private final ToLongFunction<String> currentGeneration;
     private final MaterialRegistry.Snapshot snapshot;
     private final TargetMaterials materials;
@@ -147,10 +149,19 @@ public final class VerifiedContactGraph implements ForcePropagation.CrossOwnerCo
     }
     public VerifiedContactGraph(MinecraftServer server,String dimension,long tick,
                                 ToLongFunction<String> currentGeneration,History history) {
+        this(server,dimension,tick,currentGeneration,history,ContactBatchStamp.UNKNOWN,
+                ContactBatchStamp.UNKNOWN,ContactBatchStamp.Status.UNKNOWN_STAMP);
+    }
+    public VerifiedContactGraph(MinecraftServer server,String dimension,long tick,
+                                ToLongFunction<String> currentGeneration,History history,
+                                ContactBatchStamp sourceStamp,ContactBatchStamp processingStamp,
+                                ContactBatchStamp.Status nativeBatchStatus) {
         this.server=Objects.requireNonNull(server);
         if(!server.isSameThread()||dimension==null||dimension.isBlank()||tick<0)
             throw new IllegalArgumentException("invalid server contact stamp");
         this.dimension=dimension;this.tick=tick;
+        this.sourceStamp=Objects.requireNonNull(sourceStamp);this.processingStamp=Objects.requireNonNull(processingStamp);
+        this.nativeBatchStatus=Objects.requireNonNull(nativeBatchStatus);
         this.currentGeneration=Objects.requireNonNull(currentGeneration);
         this.snapshot=MaterialRegistry.snapshot();
         this.materials=new TargetMaterials(server,dimension,snapshot);
@@ -161,6 +172,15 @@ public final class VerifiedContactGraph implements ForcePropagation.CrossOwnerCo
     private void count(String reason){stats.merge(reason,1,Integer::sum);}
     public Map<String,Integer> stats(){return Map.copyOf(stats);}
     public int historySize(){return history.size();}
+    public ContactBatchStamp.Status runtimeStatus(){
+        if(!dimension.equals(sourceStamp.dimension())||sourceStamp.sourceGameTick()!=tick)
+            return ContactBatchStamp.Status.UNKNOWN_STAMP;
+        if(nativeBatchStatus!=ContactBatchStamp.Status.CURRENT)return nativeBatchStatus;
+        var status=sourceStamp.statusAgainst(processingStamp);
+        if(status!=ContactBatchStamp.Status.CURRENT)return status;
+        return processingStamp.statusAgainst(liveStamp());
+    }
+    public long liveGameTick(){return liveStamp().sourceGameTick();}
 
     /**
      * Observe only a secondary pair which cannot mint a direct Credit in the
@@ -172,13 +192,16 @@ public final class VerifiedContactGraph implements ForcePropagation.CrossOwnerCo
         if(saturated||!complete||pair==null||!dimension.equals(pair.dimension())
                 ||!fresh(pair.a())||!fresh(pair.b())||records==null||records.isEmpty()
                 ||records.size()>MAX_FRAME_EDGES){count("INCOMPLETE_OR_STALE");return 0;}
-        if(!liveTick()){count("STALE_STAMP");return 0;}
+        var status=runtimeStatus();
+        if(status!=ContactBatchStamp.Status.CURRENT){count("STALE_STAMP_"+status);return 0;}
+        status=ContactBatchStamp.preStatus(sourceStamp,pre);
+        if(status!=ContactBatchStamp.Status.CURRENT){count(status.name());return 0;}
         try {
             int before=admitted;
             Set<Identity> observed=new HashSet<>();
             for(var record:records) {
                 try {
-                if(record==null||record.serverTick()!=tick){count("RECORD_STAMP");continue;}
+                if(record==null||record.serverTick()!=tick||!sourceStamp.sameCapture(record.runtimeStamp())){count("RECORD_STAMP");continue;}
                 NativeFrames frames=nativeFrames(pair,record,pre);
                 if(frames==null){count("FRAME_OR_NORMAL");continue;}
                 if(record.capSaturated())count("POSITIVE_CAPPED_RECORD");
@@ -206,10 +229,10 @@ public final class VerifiedContactGraph implements ForcePropagation.CrossOwnerCo
                     // endpoint pair only when each candidate has ALREADY passed
                     // positive current witness AND current shape contact.
                     var matches=candidates.stream().filter(p->history.matches(pair,
-                            p.a().identity(),p.b().identity(),tick)).toList();
+                            p.a().identity(),p.b().identity(),sourceStamp.captureServerTick())).toList();
                     if(matches.size()!=1){count("AMBIGUOUS_ENDPOINTS");continue;}
                     selected=matches.getFirst();count("HISTORY_DISAMBIGUATED_CURRENT");
-                }else count(history.matches(pair,selected.a().identity(),selected.b().identity(),tick)
+                }else count(history.matches(pair,selected.a().identity(),selected.b().identity(),sourceStamp.captureServerTick())
                         ?"HISTORY_REVALIDATED_CURRENT":"NEW_POSITIVE_CURRENT");
                 Identity identity=identity(selected);
                 observed.add(identity);admit(selected);
@@ -220,7 +243,7 @@ public final class VerifiedContactGraph implements ForcePropagation.CrossOwnerCo
             for(var id:observed){
                 var proof=proofs.get(id);
                 if(proof!=null&&!ambiguous.contains(id))
-                    history.remember(pair,proof.a().identity(),proof.b().identity(),tick);
+                    history.remember(pair,proof.a().identity(),proof.b().identity(),sourceStamp.captureServerTick());
             }
             return Math.max(0,admitted-before);
         }catch(RuntimeException|LinkageError unavailable){count("AUDIT_EXCEPTION");return 0;}
@@ -308,7 +331,7 @@ public final class VerifiedContactGraph implements ForcePropagation.CrossOwnerCo
     }
 
     @Override public Map<String,Owner> owners() {
-        if(saturated)return Map.of();
+        if(saturated||runtimeStatus()!=ContactBatchStamp.Status.CURRENT)return Map.of();
         var live=new HashMap<String,Owner>();
         owners.forEach((key,owner)->{if(fresh(owner))live.put(key,owner);});
         return Map.copyOf(live);
@@ -317,6 +340,7 @@ public final class VerifiedContactGraph implements ForcePropagation.CrossOwnerCo
     @Override public List<ForcePropagation.CrossEdge> edges(Target from,ForcePropagation.Orientation inward) {
         Lookup value=nextLookup;
         nextLookup=null;
+        if(value!=null&&!value.edges().isEmpty()&&runtimeStatus()!=ContactBatchStamp.Status.CURRENT)return List.of();
         if(value==null||!Objects.equals(from,value.from())||!Objects.equals(inward,value.inward()))
             value=lookup(from,inward);
         return value.edges();
@@ -333,7 +357,9 @@ public final class VerifiedContactGraph implements ForcePropagation.CrossOwnerCo
         var candidates=adjacency.get(fromCell);
         // Most F nodes are internal, so no extra world/BE reads for those.
         if(candidates==null||candidates.isEmpty())return new Lookup(from,inward,List.of(),false);
-        if(!server.isSameThread()||!liveTick()||MaterialRegistry.generation()!=snapshot.generation())
+        var status=runtimeStatus();
+        if(status!=ContactBatchStamp.Status.CURRENT){count("STALE_LOOKUP_"+status);return new Lookup(from,inward,List.of(),true);}
+        if(MaterialRegistry.generation()!=snapshot.generation())
             return new Lookup(from,inward,List.of(),true);
         // Live re-audit before any cross-owner use; a graph captured before
         // another queued plan must never release F to changed/removed material.
@@ -362,10 +388,11 @@ public final class VerifiedContactGraph implements ForcePropagation.CrossOwnerCo
         catch(RuntimeException unavailable){return false;}
     }
 
-    private boolean liveTick() {
+    private ContactBatchStamp liveStamp() {
+        if(!server.isSameThread())return ContactBatchStamp.UNKNOWN;
         for(var level:server.getAllLevels())if(level.dimension().location().toString().equals(dimension))
-            return level.getGameTime()==tick;
-        return false;
+            return ContactBatchStamp.capture(level);
+        return ContactBatchStamp.UNKNOWN;
     }
 
     private boolean stillLive(Endpoint endpoint,OwnerResolver.NativeAuditBatch shapes,TargetMaterials current) {

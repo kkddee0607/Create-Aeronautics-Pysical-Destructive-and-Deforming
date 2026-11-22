@@ -59,8 +59,12 @@ public final class CollisionFrame {
     }
 
     public record Snapshot(long epoch, long serverTick, String dimension, Phase phase,
-                           List<Body> bodies, boolean containerAvailable) {
-        public Snapshot { bodies=List.copyOf(bodies); }
+                           List<Body> bodies, boolean containerAvailable,ContactBatchStamp runtimeStamp) {
+        public Snapshot { bodies=List.copyOf(bodies);if(runtimeStamp==null)runtimeStamp=ContactBatchStamp.UNKNOWN; }
+        public Snapshot(long epoch,long serverTick,String dimension,Phase phase,List<Body> bodies,boolean containerAvailable){
+            this(epoch,serverTick,dimension,phase,bodies,containerAvailable,ContactBatchStamp.UNKNOWN);
+        }
+        public long captureServerTick(){return runtimeStamp.captureServerTick();}
 
         public BlockTarget resolve(int x,int y,int z) {
             if (!containerAvailable || dimension==null || dimension.isBlank())

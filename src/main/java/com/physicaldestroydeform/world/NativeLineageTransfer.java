@@ -12,6 +12,8 @@ import java.io.IOException;
 import java.util.*;
 import net.minecraft.core.BlockPos;
 import net.minecraft.nbt.CompoundTag;
+import net.minecraft.nbt.Tag;
+import net.minecraft.nbt.ListTag;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.BlockGetter;
 import net.minecraft.world.level.ChunkPos;
@@ -74,10 +76,24 @@ public final class NativeLineageTransfer {
             BlockGetter old=from.loaded(),restored=to.loaded();
             if(restored==null||!newState.equals(restored.getBlockState(to.local())))return false;
             if(old==null){
-                if(from.plot()==null||!from.plot().isRemoved())return false;
-            }else if(!old.getBlockState(from.local()).isAir())return false;
+                if(!removedSource())return false;
+            }else if(!old.getBlockState(from.local()).isAir()||old.getBlockEntity(from.local())!=null)return false;
             if(transfer==null)return true; // topology sample, not a damage transfer
             return payloadCaptured&&Objects.equals(nbt,nbt(restored,to.local(),to.physical().level(),newState));
+        }
+        boolean removedSource(){
+            if(from.plot()==null||!from.plot().isRemoved())return false;
+            var container=SubLevelContainer.getContainer(from.physical().level());
+            if(container==null)return false;
+            var current=container.getSubLevel(from.owner().uuid());
+            // Exact still-registered object marked removed will be processed as
+            // REMOVED by Sable. UNLOADED retains its grid occupancy.
+            return current==from.plot()||current==null&&emptyPlotSlot(container,from.center());
+        }
+        LineageJournal.Proof proof(){
+            BlockPos center=from.center()==null?BlockPos.ZERO:from.center();
+            return new LineageJournal.Proof(sourceCleared,destinationWritten,!invalid,true,true,removedSource(),
+                    center.getX(),center.getY(),center.getZ(),payloadDigest(nbt));
         }
     }
     private static final class Context {
@@ -88,7 +104,7 @@ public final class NativeLineageTransfer {
         final Map<ServerSubLevel,PlotOwnerFence.Owner> owners=new IdentityHashMap<>();
         final Map<Physical,Witness> sources=new HashMap<>(),destinations=new HashMap<>();
         final Set<OwnerPair> sampled=new HashSet<>();
-        int prepared,overCap,unresolved;boolean unsafe,disabled;
+        int prepared,overCap,unresolved;boolean unsafe,disabled,ioUncertain;
         Context(WorldCommitService world,PlotCommitService plot,ServerLevel level,int cap,AssemblyTransform transform,Iterable<BlockPos> blocks){
             this.world=world;this.plot=plot;this.level=level;this.tick=level.getServer().getTickCount();this.cap=cap;
             this.transform=transform;this.blocks=blocks;
@@ -104,10 +120,11 @@ public final class NativeLineageTransfer {
         String incarnation(Location l,SparseStateKey k){
             return l.plot()==null?world.incarnation(k.dimension(),l.local(),k.fingerprint()):plot.incarnation(PlotKeyCodec.real(k),l.center());
         }
-        void fault(Exception cause){unsafe=true;world.lineageFault(cause);plot.lineageFault(cause);}
+        void fault(Exception cause){unsafe=true;if(cause instanceof IOException)ioUncertain=true;world.lineageFault(cause);plot.lineageFault(cause);}
         void quarantine(Location source,WorldReceiptJournal.State before,String reason){
             if(before==null)return;
             unresolved++;
+            if(ioUncertain)return;
             try{
                 String marker=LineageJournal.quarantineSource(journal(source),before,tick,reason);
                 if(source.plot()==null)world.recordLineageQuarantine(marker);else plot.recordLineageQuarantine(marker);
@@ -127,7 +144,7 @@ public final class NativeLineageTransfer {
             return new Location(physical,sub,owner,allocated.subtract(center),center.immutable());
         }
     }
-    private static CompoundTag nbt(BlockGetter reader,BlockPos local,ServerLevel level,BlockState state){
+    static CompoundTag nbt(BlockGetter reader,BlockPos local,ServerLevel level,BlockState state){
         var be=reader.getBlockEntity(local);
         if(be==null){
             if(state.hasBlockEntity())throw new IllegalStateException("LINEAGE_BE_UNAVAILABLE");
@@ -135,6 +152,35 @@ public final class NativeLineageTransfer {
         }
         var data=be.saveWithFullMetadata(level.registryAccess()).copy();
         data.remove("x");data.remove("y");data.remove("z");return data;
+    }
+    static String payloadDigest(CompoundTag tag){
+        if(tag==null)return LineageJournal.digest("NO_BE");
+        var canonical=new StringBuilder("BE:");
+        canonicalTag(tag,canonical);
+        return LineageJournal.digest(canonical.toString());
+    }
+    private static void canonicalTag(Tag tag,StringBuilder out){
+        out.append(tag.getId()).append(':');
+        if(tag instanceof CompoundTag compound){
+            var keys=new TreeSet<>(compound.getAllKeys());
+            out.append(keys.size()).append('{');
+            for(String key:keys){out.append(key.length()).append(':').append(key);canonicalTag(compound.get(key),out);}
+            out.append('}');
+        }else if(tag instanceof ListTag list){
+            out.append(list.size()).append('[');
+            for(Tag element:list)canonicalTag(element,out);
+            out.append(']');
+        }else{
+            String value=tag.toString();out.append(value.length()).append(':').append(value);
+        }
+    }
+    static boolean emptyPlotSlot(SubLevelContainer container,BlockPos center){
+        var chunk=new ChunkPos(center);
+        if(!container.inBounds(chunk))return false;
+        var origin=container.getOrigin();
+        int x=(chunk.x>>container.getLogPlotSize())-origin.x;
+        int z=(chunk.z>>container.getLogPlotSize())-origin.y;
+        return !container.getOccupancy().get(container.getIndex(x,z));
     }
     /** The native position and state transform calls below are each evaluated
      * exactly once by the mixin; no additional iterable scan or block rotation. */
@@ -149,11 +195,21 @@ public final class NativeLineageTransfer {
     }
     public static void mapping(BlockPos from,BlockPos to){
         Context c=active();if(c==null||c.disabled)return;
+        invalidateOuter(c,new Physical(c.level,from));invalidateOuter(c,new Physical(c.level,to));
         c.pendingFrom=from.immutable();c.pendingTo=to.immutable();c.pendingWitness=null;
+    }
+    private static void invalidateOuter(Context current,Physical position){
+        for(var c:ACTIVE.get()){
+            if(c==current||c.disabled)continue;
+            var source=c.sources.get(position);var target=c.destinations.get(position);
+            if(source!=null)source.invalid=true;
+            if(target!=null)target.invalid=true;
+            if(c.level==position.level()&&(position.allocated().equals(c.pendingFrom)||position.allocated().equals(c.pendingTo)))c.unsafe=true;
+        }
     }
     public static void states(BlockState old,BlockState rotated){
         Context c=active();
-        if(c==null||c.disabled||c.pendingFrom==null||c.pendingTo==null)return;
+        if(c==null||c.disabled||c.ioUncertain||c.pendingFrom==null||c.pendingTo==null)return;
         var pos=c.pendingFrom;var dest=c.pendingTo;c.pendingFrom=null;c.pendingTo=null;
         try{
                 var a=c.locate(c.level,pos);
@@ -250,6 +306,7 @@ public final class NativeLineageTransfer {
     public static void observe(Level level,BlockPos pos,BlockState before,BlockState after){
         var c=active();if(c==null||c.disabled||!(level instanceof ServerLevel server))return;
         var k=new Physical(server,pos);
+        invalidateOuter(c,k);
         var a=c.sources.get(k);if(a!=null)a.source(before,after);
         var b=c.destinations.get(k);if(b!=null)b.destination(before,after);
     }
@@ -269,30 +326,44 @@ public final class NativeLineageTransfer {
         if(c.disabled)return;
         Set<OwnerPair> proved=new HashSet<>();
         for(var w:c.sources.values()){
-            boolean success=false;
+            boolean success=false,defer=c.ioUncertain;
             try{
                 boolean verified=normalReturn&&!c.unsafe&&w.proved();
                 if(verified&&w.from.plot()!=null&&w.to.plot()!=null)proved.add(new OwnerPair(w.from.plot(),w.to.plot()));
                 if(w.transfer!=null&&verified){
-                    LineageJournal.finish(w.transfer,c.journal(w.from),c.journal(w.to),
-                            c.incarnation(w.to,w.transfer.destination()),c.tick);
+                    long gameTick=c.level.getServer().overworld().getGameTime();
+                    var sealed=LineageJournal.seal(w.transfer,c.journal(w.from),c.journal(w.to),
+                            c.incarnation(w.to,w.transfer.destination()),w.proof(),gameTick);
+                    LineageJournal.finishSealed(sealed,c.journal(w.from),c.journal(w.to),gameTick);
                     success=true;
                 }
+                else if(w.transfer!=null)LOG.warn("[PDD-TRANSFER] id={} reason=NATIVE_PROOF_INCOMPLETE sourceSetter={} destinationSetter={} invalid={} payloadCaptured={}",
+                        w.transfer.id(),w.sourceCleared,w.destinationWritten,w.invalid,w.payloadCaptured);
             }catch(IOException|RuntimeException|LinkageError failure){
-                LOG.warn("[PDD-TRANSFER] action=QUARANTINE reason={}",failure.toString());
+                var t=w.transfer;
+                defer=t!=null&&failure instanceof IOException&&!(failure.getMessage()!=null&&failure.getMessage().startsWith("LINEAGE_"));
+                if(defer)c.fault(new IOException("LINEAGE_DURABLE_PROOF_RECOVERY_REQUIRED",failure));
+                if(t==null)LOG.warn("[PDD-TRANSFER] action={} reason={}",defer?"DEFER_RECOVERY":"QUARANTINE",failure.toString());
+                else{
+                    var sj=c.journal(w.from);var dj=c.journal(w.to);var old=t.source().key();var target=t.destination();
+                    LOG.warn("[PDD-TRANSFER] id={} action={} reason={} expectedSourceRevision={} observedSourceRevision={} expectedDestinationRevision={} observedDestinationRevision={} sourceSparse={} destinationSparse={} sourceSetter={} destinationSetter={}",
+                            t.id(),defer?"DEFER_RECOVERY":"QUARANTINE",failure.toString(),t.fromRevision()+1,LineageJournal.revision(sj,old),
+                            t.toRevision()+1,LineageJournal.revision(dj,target),sj.hasPosition(old.dimension(),old.x(),old.y(),old.z()),
+                            dj.hasPosition(target.dimension(),target.x(),target.y(),target.z()),w.sourceCleared,w.destinationWritten);
+                }
             }finally{
                 var t=w.transfer;
                 if(t!=null){
-                    if(!success)try{
+                    if(!success&&!defer)try{
                         LineageJournal.quarantine(c.journal(w.from),t.outId(),c.tick);
                         LineageJournal.quarantine(c.journal(w.to),t.inId(),c.tick);
                     }catch(IOException|RuntimeException unsafe){c.fault(unsafe);}
-                    try{
+                    if(!defer)try{
                         c.release(w.from,t.source().key(),t.outId(),success);
                         c.release(w.to,t.destination(),t.inId(),success);
                     }catch(RuntimeException unsafe){c.fault(unsafe);}
                     LOG.info("[PDD-TRANSFER] id={} result={} from={} to={} damage={} remainder={} deformation={}",
-                            t.id(),success?"APPLIED":"QUARANTINED",t.source().key(),t.destination(),
+                            t.id(),success?"APPLIED":defer?"RECOVERY_PENDING":"QUARANTINED",t.source().key(),t.destination(),
                             t.source().damage(),t.source().remainder(),t.source().deformation());
                 }
             }
