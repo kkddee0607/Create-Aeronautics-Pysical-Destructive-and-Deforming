@@ -21,7 +21,11 @@ public final class SableContactRegions {
     public static final int RUNTIME_MAX_UNIQUE_CELLS_PER_SIDE=32_768;
     public enum Status { PROVED, PARTIAL, NO_VERIFIED_REGION, TOO_BROAD, SKIPPED_DUPLICATE }
     public record Check(List<GameImpactCredit.Target> targets,int inspected,boolean incomplete,
-                        String method,String detail,GameImpactCredit.Target directTarget) {
+                        String method,String detail,GameImpactCredit.Target directTarget,boolean completeCandidates) {
+        public Check(List<GameImpactCredit.Target> targets,int inspected,boolean incomplete,String method,String detail,GameImpactCredit.Target directTarget) {
+            this(targets,inspected,incomplete,method,detail,directTarget,!incomplete&&!targets.isEmpty()
+                    &&targets.size()<=SableConsumerTargets.MAX_CANDIDATES);
+        }
         public Check(List<GameImpactCredit.Target> targets,int inspected,boolean incomplete,String method,String detail) {
             this(targets,inspected,incomplete,method,detail,!incomplete&&targets.size()==1?targets.getFirst():null);
         }
@@ -38,6 +42,14 @@ public final class SableContactRegions {
             targets=List.copyOf(targets);
             if(inspected<0 || inspected>RUNTIME_MAX_UNIQUE_CELLS_PER_SIDE)throw new IllegalArgumentException("unbounded contact audit");
             if(directTarget!=null&&(incomplete||!targets.contains(directTarget)))throw new IllegalArgumentException("unproved direct target");
+            if(completeCandidates&&(incomplete||targets.isEmpty()||targets.size()>SableConsumerTargets.MAX_CANDIDATES))
+                throw new IllegalArgumentException("invalid candidate coverage");
+        }
+        /** Only an exhaustive same-record native target search can prove all
+         * possible opposing E, even when the exact collider cell is ambiguous. */
+        List<GameImpactCredit.Target> opposingCandidates(){
+            if(directTarget!=null)return List.of(directTarget);
+            return completeCandidates?targets:List.of();
         }
     }
     @FunctionalInterface public interface Inspector {
@@ -112,7 +124,7 @@ public final class SableContactRegions {
                     // normals. Reuse the shape witness only, not its pairing.
                     if(prior.targets().size()!=1)direct=face;
                 }
-                return new Check(prior.targets(),0,false,prior.method(),prior.detail(),direct);
+                return new Check(prior.targets(),0,false,prior.method(),prior.detail(),direct,prior.completeCandidates());
             }
             var positions=SableConsumerTargets.cells(point);
             var found=new LinkedHashSet<GameImpactCredit.Target>();
@@ -151,13 +163,13 @@ public final class SableContactRegions {
             }
             // Only the unambiguous original shape result may be cached as a
             // direct target; per-record direction disambiguation is ephemeral.
-            if(uncertain)result=new Check(result.targets(),result.inspected(),result.incomplete(),result.method(),result.detail(),null);
+            if(uncertain)result=new Check(result.targets(),result.inspected(),result.incomplete(),result.method(),result.detail(),null,false);
             cache.put(key,result);
             if(directions.active()){
                 var witness=new DirectionWitness(cells,uncertain);witnesses.put(key,witness);
                 var face=observeDirection(directions,nativeBatch,contact,owner,point,witness);
                 if(face!=null&&result.directTarget()==null)
-                    result=new Check(result.targets(),result.inspected(),result.incomplete(),result.method(),result.detail(),face);
+                    result=new Check(result.targets(),result.inspected(),result.incomplete(),result.method(),result.detail(),face,result.completeCandidates());
             }
             return result;
         }, RUNTIME_MAX_UNIQUE_CELLS_PER_SIDE);
@@ -165,6 +177,7 @@ public final class SableContactRegions {
         // block targets, not only one rectangle from four corner witnesses.
         // The original native pair/tick keeps exactly ONE shared F/Q envelope.
         int expandedA=0, expandedB=0, attemptedA=0, attemptedB=0;
+        int pairedPatchA=0,pairedPatchB=0;
         int shapeChecksA=0, shapeChecksB=0;
         String patchStatus="NOT_ELIGIBLE";
         // One owner may be incomplete while the opposite source-local owner
@@ -172,6 +185,7 @@ public final class SableContactRegions {
         if(collected.verified()) {
             var joined=new LinkedHashSet<>(collected.regions());
             String[] owners={pair.a().stableKey(),pair.b().stableKey()};
+            var pairedSurfaces=new ContactFacePatch.Result[2];
             StringBuilder descriptions=new StringBuilder();
             for(int side=0;side<2;side++) {
                 final String owner=owners[side];
@@ -214,6 +228,7 @@ public final class SableContactRegions {
                 int size=originals.size()+patch.added().size();
                 if(!exceeded[0] && size<=ContactCreditLedger.MAX_TARGETS_PER_SIDE
                         && joined.size()+patch.added().size()<=ContactCreditLedger.MAX_REGIONS) {
+                    pairedSurfaces[side]=patch;
                     for(var target:patch.added()){
                         joined.add(side==0?new ContactCreditLedger.Region(target,null):new ContactCreditLedger.Region(null,target));
                         if(directions.active())directions.patch(target,patch.planarInterior().contains(target)&&patchFaces.contains(target)?patchAxis:null);
@@ -225,6 +240,46 @@ public final class SableContactRegions {
                         .append(exceeded[0]?"SHAPE_BUDGET":size>ContactCreditLedger.MAX_TARGETS_PER_SIDE
                                 ?"TARGET_BUDGET":patch.reason())
                         .append(" tested=").append(patch.attempted());
+            }
+            // Material-only patch proof: a strict repaired source point may
+            // obtain the opposing E only from an independently verified
+            // opposite surface at the SAME coherent native frame mapping.
+            // This never invents a cross-owner force edge, target or budget.
+            if(pairedSurfaces[0]!=null&&pairedSurfaces[1]!=null&&
+                    (!pairedSurfaces[0].interiorPoints().isEmpty()||!pairedSurfaces[1].interiorPoints().isEmpty())){
+                var frames=directions.patchFrames();
+                if(frames!=null){
+                    var seedA=new java.util.HashSet<GameImpactCredit.Target>();
+                    var seedB=new java.util.HashSet<GameImpactCredit.Target>();
+                    for(var r:joined){if(r.a()!=null)seedA.add(r.a());if(r.b()!=null)seedB.add(r.b());}
+                    var patchesRemaining=new int[]{RUNTIME_MAX_UNIQUE_CELLS_PER_SIDE-collected.checksA()-shapeChecksA,
+                            RUNTIME_MAX_UNIQUE_CELLS_PER_SIDE-collected.checksB()-shapeChecksB};
+                    int initialA=patchesRemaining[0],initialB=patchesRemaining[1];
+                    for(int side=0;side<2;side++){
+                        boolean onA=side==0;
+                        var ownOffset=ownerOffsets.get(owners[side]);var otherOffset=ownerOffsets.get(owners[1-side]);
+                        if(ownOffset==null||otherOffset==null)continue;
+                        var own=pairedSurfaces[side];var other=pairedSurfaces[1-side];
+                        var ordered=new ArrayList<>(own.interiorPoints().entrySet());
+                        ordered.sort(java.util.Comparator.comparing(e->e.getKey().localBlock()));
+                        for(var entry:ordered){
+                            var relative=entry.getValue();var source=offset(relative,ownOffset,1);
+                            var opposite=frames.opposite(source,onA);
+                            if(!other.covers(offset(opposite,otherOffset,-1)))continue;
+                            var self=uniquePatchTarget(nativeBatch,owners[side],source,frames.axis(onA),patchesRemaining,side);
+                            if(!entry.getKey().equals(self))continue;
+                            var target=uniquePatchTarget(nativeBatch,owners[1-side],opposite,frames.axis(!onA),patchesRemaining,1-side);
+                            if(target==null||!(onA?seedB:seedA).contains(target))continue;
+                            var previous=onA?new ContactCreditLedger.Region(self,null):new ContactCreditLedger.Region(null,self);
+                            if(joined.remove(previous)){
+                                joined.add(onA?new ContactCreditLedger.Region(self,null,List.of(target))
+                                        :new ContactCreditLedger.Region(null,self,List.of(target)));
+                                if(onA)pairedPatchA++;else pairedPatchB++;
+                            }
+                        }
+                    }
+                    shapeChecksA+=initialA-patchesRemaining[0];shapeChecksB+=initialB-patchesRemaining[1];
+                }
             }
             patchStatus=descriptions.toString();
             collected=new Result(new ArrayList<>(joined),
@@ -253,8 +308,39 @@ public final class SableContactRegions {
                         +" facePatchTotalTargetsA="+(t.verifiedTargetsA()+expandedA)
                         +" facePatchTotalTargetsB="+(t.verifiedTargetsB()+expandedB)
                         +" facePatchAttemptedA="+attemptedA+" facePatchAttemptedB="+attemptedB);
+        t2=new Trace(t2.failure(),t2.sourceIndex(),t2.processedRecords(),t2.remainingA(),t2.remainingB(),
+                t2.requestedA(),t2.requestedB(),t2.verifiedTargetsA(),t2.verifiedTargetsB(),t2.regionCount(),t2.rejectedContacts(),
+                t2.detail()+" patchMaterialPairedA="+pairedPatchA+" patchMaterialPairedB="+pairedPatchB+
+                        " exactPairs="+collected.regions().stream().filter(r->r.a()!=null&&r.b()!=null).count()+
+                        " candidateSets="+collected.regions().stream().filter(r->!r.opposingCandidates().isEmpty()).count()+
+                        " unpaired="+collected.regions().stream().filter(r->(r.a()==null||r.b()==null)&&r.opposingCandidates().isEmpty()).count());
         return new Result(collected.regions(),collected.status(),collected.checksA(),collected.checksB(),
                 collected.rejected(),collected.methodA(),collected.methodB(),t2);
+    }
+    private static FrameMath.Vec offset(FrameMath.Vec p,net.minecraft.core.BlockPos d,int sign){
+        return p.plus(new FrameMath.Vec(sign*(double)d.getX(),sign*(double)d.getY(),sign*(double)d.getZ()));
+    }
+    private static GameImpactCredit.Target uniquePatchTarget(OwnerResolver.NativeAuditBatch batch,String owner,
+            FrameMath.Vec point,com.physicaldestroydeform.deform.MovePlan.SignedAxes axis,int[] remaining,int side){
+        var candidates=SableConsumerTargets.cells(point);
+        GameImpactCredit.Target target=null;
+        for(var pos:candidates){
+            if(!batch.cached(owner,pos)&&remaining[side]<=0)return null;
+            var sample=batch.inspect(owner,pos,point);if(sample.newCell())remaining[side]--;
+            var evidence=sample.result();
+            if(!evidence.verified()){
+                if(!java.util.Set.of("CACHED_SHAPE_POINT_MISS","BLOCK_MISSING_OR_AIR","PLOT_SHAPE_EMPTY","WORLD_SHAPE_EMPTY").contains(evidence.detail()))return null;
+                continue;
+            }
+            if(!batch.targetFace(owner,pos,point,axis,ContactFacePatch.PAIR_EPS))continue;
+            if(target!=null)return null;
+            var key=evidence.key();target=new GameImpactCredit.Target(owner,key.x()+","+key.y()+","+key.z(),key.fingerprint());
+        }
+        if(target!=null){
+            var outside=point.plus(new FrameMath.Vec(-axis.x(),-axis.y(),-axis.z()).times(ContactFacePatch.PAIR_EPS*4));
+            for(var pos:candidates)if(batch.contains(owner,pos,outside,ContactFacePatch.PAIR_EPS/4))return null;
+        }
+        return target;
     }
     private record AuditKey(String owner, FrameMath.Vec point,
                             NativeCollisionTelemetry.OwnerFrame frame) {}
@@ -389,11 +475,11 @@ public final class SableContactRegions {
             if(!exceededA && !exceededB && !regionCompacted) {
                 if(a.directTarget()!=null && b.directTarget()!=null){
                     regions.add(new ContactCreditLedger.Region(a.directTarget(),b.directTarget()));
-                    for(var target:a.targets())if(!target.equals(a.directTarget()))regions.add(new ContactCreditLedger.Region(target,null));
-                    for(var target:b.targets())if(!target.equals(b.directTarget()))regions.add(new ContactCreditLedger.Region(null,target));
+                    for(var target:a.targets())if(!target.equals(a.directTarget()))regions.add(new ContactCreditLedger.Region(target,null,b.opposingCandidates()));
+                    for(var target:b.targets())if(!target.equals(b.directTarget()))regions.add(new ContactCreditLedger.Region(null,target,a.opposingCandidates()));
                 }else {
-                    for(var target:a.targets())regions.add(new ContactCreditLedger.Region(target,null));
-                    for(var target:b.targets())regions.add(new ContactCreditLedger.Region(null,target));
+                    for(var target:a.targets())regions.add(new ContactCreditLedger.Region(target,null,b.opposingCandidates()));
+                    for(var target:b.targets())regions.add(new ContactCreditLedger.Region(null,target,a.opposingCandidates()));
                 }
             }
             if(a.targets().isEmpty()&&b.targets().isEmpty())skipped++;

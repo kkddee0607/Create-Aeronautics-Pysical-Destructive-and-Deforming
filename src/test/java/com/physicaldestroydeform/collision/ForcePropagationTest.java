@@ -77,8 +77,8 @@ class ForcePropagationTest {
             public List<ForcePropagation.CrossEdge> edges(GameImpactCredit.Target from,ForcePropagation.Orientation inward){return from.equals(a)?List.of(new ForcePropagation.CrossEdge(b,normal,1)):List.of();}
         };
         var r=ForcePropagation.planTargets(PLOT,java.util.Map.of(a,100d),graph(Set.of()),t->material(t.equals(a)?100:0),FORCE,DAMAGE,normal,null,ctx);
-        assertEquals(42.5,r.dampedF(),1e-9);assertEquals(6.375,r.contactDampedF(),1e-9);
-        assertEquals(51.125,r.assignedF(),1e-9);assertEquals(100,r.assignedF()+r.dampedF()+r.contactDampedF(),1e-9);
+        assertEquals(42.5,r.dampedF(),1e-9);assertEquals(2.55,r.contactDampedF(),1e-9);
+        assertEquals(54.95,r.assignedF(),1e-9);assertEquals(100,r.assignedF()+r.dampedF()+r.contactDampedF(),1e-9);
     }
     private static ForcePropagation.NeighborReader graph(Set<String> occupied) {
         return (from,x,y,z)->occupied.contains(from.ownerKey()+":"+x+","+y+","+z)

@@ -143,6 +143,14 @@ final class SableContactRegionsTest {
         assertEquals(2,result.checksA());
         assertEquals(2,result.checksB());
         assertTrue(result.regions().stream().allMatch(r->(r.a()==null)!=(r.b()==null)));
+        assertTrue(result.regions().stream().allMatch(r->r.opposingCandidates().size()==2));
+    }
+    @Test void incompleteCandidateCoverageCannotAuthorizeConsensus(){
+        var result=SableContactRegions.collect(PAIR,List.of(contact(1)),
+                (e,owner,remaining)->new SableContactRegions.Check(
+                        List.of(target(owner,1),target(owner,2)),2,false,"R2","UNKNOWN_CELL",null,false));
+        assertEquals(4,result.regions().size());
+        assertTrue(result.regions().stream().allMatch(r->r.opposingCandidates().isEmpty()));
     }
     @Test void uniqueDirectionalFaceCanPairWithoutPromotingOtherShapeCells(){
         var a=target(PAIR.a().stableKey(),1);var b=target(PAIR.b().stableKey(),1);
@@ -152,6 +160,8 @@ final class SableContactRegionsTest {
         assertTrue(result.regions().contains(new ContactCreditLedger.Region(a,b)));
         assertEquals(3,result.regions().size());
         assertEquals(1,result.regions().stream().filter(r->r.a()!=null&&r.b()!=null).count());
+        assertTrue(result.regions().contains(new ContactCreditLedger.Region(target(PAIR.a().stableKey(),2),null,List.of(b))));
+        assertTrue(result.regions().contains(new ContactCreditLedger.Region(null,target(PAIR.b().stableKey(),2),List.of(a))));
     }
     @Test void verificationTraceDistinguishesTargetLimitFromCellBudget() {
         var many=new ArrayList<NativeCollisionTelemetry.Contact>();

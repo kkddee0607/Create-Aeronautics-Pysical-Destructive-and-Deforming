@@ -1,10 +1,10 @@
-# PDD 0.6.1 — Physical Destructive and Deforming
+# PDD 0.6.1 fix — Physical Destructive and Deforming
 
 Minecraft 1.21.1 · Java 21 · NeoForge 21.1.228 · Sable 2.0.6 · Create 6.0.10 · Aeronautics 1.3.2. 선택 호환: Copycats+ 3.0.11.
 
 [통합설계서 1.0.9](.github/workflows/PDD-1.0.9-Integrated-Design-Specification.md) · [0.6.0 릴리스 검증](docs/verification/PDD-0.6.0-Release-Verification.md)
 
-[0.6.1 검증 및 인게임 절차](docs/verification/PDD-0.6.1.md). 기준 SHA `5ceeca289b3e6d5a66b88b95338b39e0ba7235c7`. 기존 월드를 백업한 뒤 `physical-destroy-deform-0.6.1.jar` 하나만 사용한다. 기존 0.6.0 데이터 디렉터리는 유지한다.
+[0.6.1 fix 검증 및 인게임 절차](docs/verification/PDD-0.6.1-Fix.md). 기준 SHA `1d9408600334fdba3013106f11dca75074621404`. 기존 월드를 백업한 뒤 `physical-destroy-deform-0.6.1-fix.jar` 하나만 사용한다. 기존 데이터 디렉터리는 유지한다.
 
 [0.6.0 BuildFix: CI 실패 원인 및 회귀 검증](docs/verification/PDD-0.6.0-BuildFix.md) — 파괴 한도 및 좌표별 공기 상태를 정확히 검증하도록 테스트를 수정. 게임 런타임·물성 수치·버전은 변경하지 않음.
 
@@ -27,8 +27,8 @@ Minecraft 1.21.1 · Java 21 · NeoForge 21.1.228 · Sable 2.0.6 · Create 6.0.10
 - 블록별 접촉·부호 증거와 원래 F/층, 파괴 우선 K(D) 이동 판정, 역층 순서, 최대 2축 1칸 이동; 두 위치 CAS, 원본 setter, 손상/변형 이력 이전, 이후 Plot HeatMap 완료 확인.
 - 확인된 이동 차단 시 원래 plastic Q 내에서만 추가 손상·파괴, shortfall 및 unused Q 기록, 불확실한 중단은 재실행하지 않고 격리.
 - Copycats+ 단일/다중 재질과 형상 보정 T, 재질 revision 및 기존 손상 보존, 안전한 장식 BE의 NBT 이전, 기존 드롭 계약. 기능성/미확인 BE는 VETO.
-- 실제 양측 접촉 블록의 탄성으로 최초 F를 감쇠하고 단일 원장에 차감한다. 대응 재질이 불확실한 F는 unresolved로 닫는다.
-- 동일 물리 프레임의 검증된 정지 압축 접촉만 별도 owner 전파 간선으로 사용한다. 독립 후속 충돌과의 인과관계가 불명확하면 교차 전파하지 않는다.
+- 실제 양측 접촉 블록의 탄성 감쇠 강도는 기존 곡선의 40%이며 단일 원장에 차감한다. 완전하게 입증된 후보 집합의 E가 일치할 때만 대응 재질로 사용할 수 있다. 불확실한 F는 unresolved로 닫는다.
+- 동일 물리 프레임의 검증된 지속 압축 접촉을 별도 owner 전파 간선으로 사용한다. 독립 충돌로 승인된 경계 및 인과관계가 불명확한 경계는 제외한다. 접촉 이력은 현재의 물리·형상 증거를 대신하지 않는다.
 
 ## 적용 및 검증
 

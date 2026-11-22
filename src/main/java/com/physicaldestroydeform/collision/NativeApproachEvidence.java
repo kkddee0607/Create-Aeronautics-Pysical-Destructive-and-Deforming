@@ -12,6 +12,23 @@ public final class NativeApproachEvidence {
     private static final double MIN_CLOSING_SPEED = 0.15;
     private NativeApproachEvidence() {}
 
+    /** A previously resting contact must not mint an independent credit just
+     * because a preceding solver substep imparted closing velocity. */
+    public static boolean independentlyApproaching(GameImpactCredit.Pair pair,
+            List<CollisionFrame.Snapshot> snapshots,NativeEffectDirection.Result normals,long tick) {
+        if(snapshots==null)return false;
+        CollisionFrame.Snapshot first=null;
+        var epochs=new java.util.HashSet<Long>();
+        for(var frame:snapshots) {
+            if(frame==null||frame.phase()!=CollisionFrame.Phase.PRE_SOLVER
+                    ||frame.serverTick()!=tick||!pair.dimension().equals(frame.dimension()))continue;
+            if(frame.epoch()<0||!epochs.add(frame.epoch()))return false;
+            if(first==null||frame.epoch()<first.epoch())first=frame;
+        }
+        return first!=null&&approaching(pair,List.of(first),normals,tick)
+                &&approaching(pair,snapshots,normals,tick);
+    }
+
     public static boolean approaching(GameImpactCredit.Pair pair,
                                       List<CollisionFrame.Snapshot> snapshots,
                                       NativeEffectDirection.Result normals,long tick) {

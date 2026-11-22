@@ -68,6 +68,10 @@ class ContactFacePatchTest {
         assertEquals(21,patch.attempted());
         assertTrue(patch.planarInterior().contains(target(2,2)));
         assertFalse(patch.planarInterior().contains(target(0,2)));
+        assertEquals(new FrameMath.Vec(2.5,65,2.5),patch.interiorPoints().get(target(2,2)));
+        assertTrue(patch.covers(new FrameMath.Vec(2.5,65,2.5)));
+        assertFalse(patch.covers(new FrameMath.Vec(.5,65,2.5)),"polygon edge alone is not strict coverage");
+        assertFalse(patch.covers(new FrameMath.Vec(2.5,65.001,2.5)),"nearby plane is not the same surface");
         assertTrue(visited.contains("2,2"));
         var all=new HashSet<>(onlyFour);all.addAll(patch.added());
         assertEquals(25,all.size());
@@ -105,6 +109,7 @@ class ContactFacePatchTest {
             return c[0].equals(c[2]);
         }),"A diagonal native contact may recover a line, never a whole rectangle");
         assertTrue(result.planarInterior().isEmpty());
+        assertFalse(result.covers(new FrameMath.Vec(2.5,65,2.5)));
     }
     @Test void damagePatchMayGroupNearbyPlanesButMovementEvidenceMustBeCoplanar() {
         var records=new ArrayList<NativeCollisionTelemetry.Contact>();
@@ -115,6 +120,29 @@ class ContactFacePatchTest {
                 (pos,point)->target(pos.getX(),pos.getZ()));
         assertEquals(9,result.added().size());
         assertTrue(result.planarInterior().isEmpty());
+    }
+    @Test void dualPatchMappingRequiresCoherentStableNativeFrameAndOpposingNormal(){
+        var id=java.util.UUID.fromString("12345678-1234-1234-1234-123456789abc");
+        var pair=GameImpactCredit.Pair.canonical("test",DIM,new GameImpactCredit.Owner("PLOT:"+id,1),new GameImpactCredit.Owner(OWNER,1));
+        var zero=new FrameMath.Vec(0,0,0);
+        var pose=new FrameMath.Pose(zero,zero,new FrameMath.Vec(1,1,1),0,0,0,1);
+        var ownerFrame=new NativeCollisionTelemetry.OwnerFrame(id,pose);
+        var records=new ArrayList<NativeCollisionTelemetry.Contact>();
+        for(int x:new int[]{0,4})for(int z:new int[]{0,4})records.add(new NativeCollisionTelemetry.Contact(7,-1,100,
+                0,-1,0,0,1,0,x+.5,65,z+.5,x+.5,65,z+.5,DIM,5,ownerFrame,null));
+        var body=new CollisionFrame.Body(id,0,15,0,15,pose,zero,zero,zero,true,null,7);
+        var pre=new CollisionFrame.Snapshot(1,5,DIM,CollisionFrame.Phase.PRE_SOLVER,List.of(body),true);
+        var frames=TargetDirections.forEvent(pair,records,List.of(pre),5,true).patchFrames();
+        assertNotNull(frames);
+        var point=new FrameMath.Vec(2.5,65,2.5);
+        assertEquals(point,frames.opposite(point,true));
+        var moving=new CollisionFrame.Body(id,0,15,0,15,pose,new FrameMath.Vec(1,0,0),zero,zero,true,null,7);
+        var movingPre=new CollisionFrame.Snapshot(1,5,DIM,CollisionFrame.Phase.PRE_SOLVER,List.of(moving),true);
+        assertNotNull(TargetDirections.forEvent(pair,records,List.of(movingPre),5,true).patchFrames());
+        var displacedPose=new FrameMath.Pose(new FrameMath.Vec(.1,0,0),zero,new FrameMath.Vec(1,1,1),0,0,0,1);
+        var displaced=new CollisionFrame.Body(id,0,15,0,15,displacedPose,zero,zero,zero,true,null,7);
+        var displacedPre=new CollisionFrame.Snapshot(1,5,DIM,CollisionFrame.Phase.PRE_SOLVER,List.of(displaced),true);
+        assertNull(TargetDirections.forEvent(pair,records,List.of(displacedPre),5,true).patchFrames());
     }
     @Test void onlyIndividuallyProvenFaceBlocksReceiveRecoveredTargets() {
         var four=List.of(target(0,0),target(0,4),target(4,0),target(4,4));

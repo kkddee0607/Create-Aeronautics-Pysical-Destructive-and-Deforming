@@ -8,6 +8,8 @@ public final class DamageModel {
     public static final double DIRECT_SHARE = 0.60;
     public static final double PLASTIC_SHARE = 0.15;
     public static final double STRESS_SHARE = 0.25;
+    /** 0.6.1 fix: only the opposing-contact F debit uses this calibration. */
+    public static final double CONTACT_ELASTICITY_ALPHA = 0.4;
     private DamageModel() {}
 
     public record Settings(double minHardnessFactor, double hardnessExponent,
@@ -64,6 +66,9 @@ public final class DamageModel {
         if(percent<0 || percent>100)throw new IllegalArgumentException("invalid E percent");
         return cfg.minElasticFactor()+(1-cfg.minElasticFactor())
                 * Math.pow(1-percent/100.0,cfg.elasticExponent());
+    }
+    public static double contactElasticityTransmissionPercent(int percent,Settings cfg) {
+        return 1-CONTACT_ELASTICITY_ALPHA*(1-elasticityTransmissionPercent(percent,cfg));
     }
     /** Only the block's own final DAMAGE is capped by this retention curve.
      * The already-accounted local Q and parent/child F/Q propagation are unchanged.

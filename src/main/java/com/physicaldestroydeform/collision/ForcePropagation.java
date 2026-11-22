@@ -472,7 +472,7 @@ public final class ForcePropagation {
                     sent+=part;
                     if(!child.target.ownerKey().equals(node.target.ownerKey())) {
                         // New boundary: receiver gets the opposing contact block's E attenuation.
-                        double transmitted=part*DamageModel.elasticityTransmissionPercent(node.elasticity,damage);
+                        double transmitted=part*DamageModel.contactElasticityTransmissionPercent(node.elasticity,damage);
                         contactDampedF+=part-transmitted;part=transmitted;
                     }
                     // Never create an F<1 edge. Do not silently reassign it

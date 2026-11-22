@@ -61,16 +61,16 @@ class ContactElasticityTest {
     @Test void oneElasticBodyProtectsOpposingBodyNotItsOwnInitialF(){
         var grant=direct(100,0);
         assertEquals(100,f(grant.propagationA(),A),1e-8);
-        assertEquals(15,f(grant.propagationB(),B),1e-8);
-        assertEquals(85,grant.contactDampedF(),1e-8);
+        assertEquals(66,f(grant.propagationB(),B),1e-8);
+        assertEquals(34,grant.contactDampedF(),1e-8);
     }
     @Test void bothElasticBodiesDebitInitialFExactlyOnce(){
         var grant=direct(100,100);
-        assertEquals(15,f(grant.propagationA(),A),1e-8);
-        assertEquals(15,f(grant.propagationB(),B),1e-8);
-        assertEquals(170,grant.contactDampedF(),1e-8);
+        assertEquals(66,f(grant.propagationA(),A),1e-8);
+        assertEquals(66,f(grant.propagationB(),B),1e-8);
+        assertEquals(68,grant.contactDampedF(),1e-8);
         var half=direct(50,50);
-        assertEquals(100*DamageModel.elasticityTransmissionPercent(50,DAMAGE),f(half.propagationA(),A),1e-8);
+        assertEquals(100*DamageModel.contactElasticityTransmissionPercent(50,DAMAGE),f(half.propagationA(),A),1e-8);
     }
     @Test void multipleMaterialsAndDuplicateContactRespectDistinctPerTargetShares(){
         var c1=new ContactCreditLedger.Region(A,B);
@@ -79,10 +79,10 @@ class ContactElasticityTest {
         var grant=issue(ledger,List.of(c1,c1,c2),t->material(t.equals(B1)?100:0));
         assertTrue(grant.credited());
         assertLedger(grant);
-        assertEquals(57.5,f(grant.propagationA(),A),1e-8);
+        assertEquals(83,f(grant.propagationA(),A),1e-8);
         assertEquals(50,f(grant.propagationB(),B),1e-8);
         assertEquals(50,f(grant.propagationB(),B1),1e-8);
-        assertEquals(42.5,grant.contactDampedF(),1e-8);
+        assertEquals(17,grant.contactDampedF(),1e-8);
         assertEquals(ContactCreditLedger.Status.DUPLICATE_CAUSE,issue(ledger,List.of(c1,c2),t->material(0)).status());
     }
     @Test void unpairedBlockNeverSuppliesOpposingElasticity(){
@@ -113,6 +113,43 @@ class ContactElasticityTest {
         assertEquals(50,f(grant.propagationA(),A),1e-8);
         assertEquals(50,grant.propagationA().unresolvedF(),1e-8);
         assertEquals(100,f(grant.propagationB(),B),1e-8);
+    }
+    @Test void completeUniformCandidateSetsRecoverAmbiguousContactWithoutGuessingIdentity(){
+        var grant=issue(new ContactCreditLedger(),List.of(
+                new ContactCreditLedger.Region(A,null,List.of(B,B1)),
+                new ContactCreditLedger.Region(null,B,List.of(A)),
+                new ContactCreditLedger.Region(null,B1,List.of(A))),
+                t->material(t.ownerKey().equals(B.ownerKey())?100:0));
+        assertTrue(grant.credited());assertLedger(grant);
+        assertEquals(66,f(grant.propagationA(),A),1e-8);
+        assertEquals(50,f(grant.propagationB(),B),1e-8);
+        assertEquals(50,f(grant.propagationB(),B1),1e-8);
+        assertEquals(0,grant.unresolvedF(),1e-8);
+    }
+    @Test void conflictingOrMissingCandidateMaterialNeverGuessesAnElasticity(){
+        var regions=List.of(new ContactCreditLedger.Region(A,null,List.of(B,B1)),
+                new ContactCreditLedger.Region(null,B,List.of(A)),
+                new ContactCreditLedger.Region(null,B1,List.of(A)));
+        for(var unknown:List.of(false,true)){
+            var grant=issue(new ContactCreditLedger(),regions,t->t.equals(B1)?unknown?null:material(100):material(0));
+            assertTrue(grant.credited());assertLedger(grant);
+            assertEquals(100,grant.propagationA().unresolvedF(),1e-8);
+            assertEquals(0,f(grant.propagationA(),A),1e-8);
+        }
+    }
+    @Test void repeatedEquivalentDirectAndCandidateEvidenceDoesNotSplitExtraShares(){
+        var grant=issue(new ContactCreditLedger(),List.of(new ContactCreditLedger.Region(A,B),
+                new ContactCreditLedger.Region(A,null,List.of(B)),new ContactCreditLedger.Region(A,B1)),
+                t->material(t.equals(B1)?100:0));
+        assertTrue(grant.credited());assertLedger(grant);
+        assertEquals(83,f(grant.propagationA(),A),1e-8);
+    }
+    @Test void candidateIdentityMustBelongToVerifiedOppositeOwnerAndSeedCoverage(){
+        var ledger=new ContactCreditLedger();
+        var grant=issue(ledger,List.of(new ContactCreditLedger.Region(A,null,List.of(B1)),
+                new ContactCreditLedger.Region(null,B)),t->material(0));
+        assertEquals(ContactCreditLedger.Status.INVALID_TARGET_SET,grant.status());
+        assertEquals(0,ledger.size());
     }
     @Test void nonfiniteInitialBudgetRejectedWithoutCredit(){
         var good=decision();

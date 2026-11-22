@@ -22,6 +22,14 @@ class DamageModelTest {
         assertEquals(100,DamageModel.neighborStress(100,new MaterialProperties(0,0,0)));
         assertEquals(15,DamageModel.neighborStress(100,new MaterialProperties(0,0,100)),1e-9);
     }
+    @Test void opposingContactUsesFortyPercentOfOriginalElasticReductionOnly(){
+        var cfg=DamageModel.Settings.defaults();
+        assertEquals(1,DamageModel.contactElasticityTransmissionPercent(0,cfg),1e-12);
+        assertEquals(.66,DamageModel.contactElasticityTransmissionPercent(100,cfg),1e-12);
+        assertEquals(.15,DamageModel.elasticityTransmissionPercent(100,cfg),1e-12);
+        for(int e=0;e<=100;e++)assertEquals(.6+.4*DamageModel.elasticityTransmissionPercent(e,cfg),
+                DamageModel.contactElasticityTransmissionPercent(e,cfg),1e-12);
+    }
     @Test void energyPrototypeRejectsUncalibratedScale() {
         assertThrows(IllegalArgumentException.class,
                 ()->DamageModel.baseDamageFromEnergy(new ImpactSample(1,1,1),0));

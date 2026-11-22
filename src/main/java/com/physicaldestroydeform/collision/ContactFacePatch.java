@@ -6,6 +6,8 @@ import java.util.Collection;
 import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.HashMap;
 import java.util.Objects;
 import java.util.Set;
 import java.util.function.BiFunction;
@@ -33,13 +35,25 @@ final class ContactFacePatch {
     // corner-only game seed without extrapolating an arbitrary full face.
     private static final double SPARSE_HALO = 1.01;
     private static final double GRID_EPS = 1e-6;
+    static final double PAIR_EPS = 1e-5;
 
     record Result(List<GameImpactCredit.Target> added, int attempted, String reason,
-                  Set<GameImpactCredit.Target> planarInterior) {
-        Result { added = List.copyOf(added); planarInterior=Set.copyOf(planarInterior); }
-        Result(List<GameImpactCredit.Target> added,int attempted,String reason){this(added,attempted,reason,Set.of());}
+                  Set<GameImpactCredit.Target> planarInterior,
+                  Map<GameImpactCredit.Target,FrameMath.Vec> interiorPoints,List<Footprint> footprints) {
+        Result { added = List.copyOf(added); planarInterior=Set.copyOf(planarInterior);
+            interiorPoints=Map.copyOf(interiorPoints);footprints=List.copyOf(footprints); }
+        Result(List<GameImpactCredit.Target> added,int attempted,String reason){this(added,attempted,reason,Set.of(),Map.of(),List.of());}
+        /** A second owner must have independently reconstructed a coplanar strict
+         * polygon through this point; approximate hull edges and halo cannot pair. */
+        boolean covers(FrameMath.Vec point){return point!=null&&point.finite()&&footprints.stream().anyMatch(f->f.covers(point));}
     }
     private record Point(double u, double v) {}
+    record Footprint(int axis,double plane,List<Point> hull){
+        boolean covers(FrameMath.Vec p){
+            double[] v={p.x(),p.y(),p.z()};
+            return Math.abs(v[axis]-plane)<=PAIR_EPS&&strictlyWithinPolygon(hull,v[(axis+1)%3],v[(axis+2)%3]);
+        }
+    }
     private record Witness(double[] normal,double plane,Point point,int axis,boolean axisAligned) {}
     private static final class Plane {
         final Witness first;
@@ -109,6 +123,8 @@ final class ContactFacePatch {
         Set<String> seen=new HashSet<>(original);
         var added=new ArrayList<GameImpactCredit.Target>();
         var planarInterior=new HashSet<GameImpactCredit.Target>();
+        var interiorPoints=new HashMap<GameImpactCredit.Target,FrameMath.Vec>();
+        var footprints=new ArrayList<Footprint>();
         int attempted=0,faces=0,insufficient=0,limited=0,sparse=0;
         for(var group:planes) {
             var points=group.points;
@@ -159,6 +175,7 @@ final class ContactFacePatch {
             }
             if(!anchored){insufficient++;continue;}
             int faceStart=added.size();
+            boolean pairable=group.first.axisAligned()&&group.maxPlane-group.minPlane<=PAIR_EPS&&hull.size()>=3;
             boolean faceOverBudget=false;
             outer:for(int a=u0;a<=u1;a++) {
                 // Convex hull edges intersected with one grid-column band.
@@ -188,6 +205,7 @@ final class ContactFacePatch {
                         if(group.first.axisAligned()
                                 && group.maxPlane-group.minPlane<=SableConsumerTargets.EPSILON
                                 && strictlyWithinPolygon(hull,cu,cv))planarInterior.add(found);
+                        if(pairable&&strictlyWithinPolygon(hull,cu,cv))interiorPoints.put(found,new FrameMath.Vec(p[0],p[1],p[2]));
                     }
                 }
             }
@@ -196,18 +214,19 @@ final class ContactFacePatch {
                 // recovered. Roll back its new identities, keep earlier
                 // complete faces and report the work budget explicitly.
                 for(int i=added.size()-1;i>=faceStart;i--){
-                    var removed=added.remove(i);seen.remove(removed.localBlock());planarInterior.remove(removed);
+                    var removed=added.remove(i);seen.remove(removed.localBlock());planarInterior.remove(removed);interiorPoints.remove(removed);
                 }
                 limited++;
             } else {
                 faces++;
                 if(localHalo)sparse++;
+                if(pairable)footprints.add(new Footprint(axis,plane,List.copyOf(hull)));
             }
         }
         if(faces==0)return new Result(List.of(),attempted,
                 limited>0?"PATCH_BUDGET":normalsMissing?"NO_VALID_NORMAL":"NO_PROVEN_SURFACE");
         return new Result(added,attempted,"SHAPE_VERIFIED_SURFACES faces="+faces+
-                " sparseLocalHalos="+sparse+" limited="+limited+" unsupported="+insufficient,planarInterior);
+                " sparseLocalHalos="+sparse+" limited="+limited+" unsupported="+insufficient,planarInterior,interiorPoints,footprints);
     }
 
     /** Conservative column-band bound: never removes a cell that could

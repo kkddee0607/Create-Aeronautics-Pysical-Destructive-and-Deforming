@@ -16,9 +16,12 @@ final class NativeApproachEvidenceTest {
     private static final Pose POSE=new Pose(new Vec(0,0,0),new Vec(0,0,0),
             new Vec(1,1,1),0,0,0,1);
     private static CollisionFrame.Snapshot frame(long tick,double vx) {
+        return frame(1,tick,vx);
+    }
+    private static CollisionFrame.Snapshot frame(long epoch,long tick,double vx) {
         var body=new CollisionFrame.Body(PLOT,0,10,0,10,POSE,new Vec(vx,0,0),
                 new Vec(0,0,0),new Vec(0,0,0),true);
-        return new CollisionFrame.Snapshot(1,tick,DIM,CollisionFrame.Phase.PRE_SOLVER,
+        return new CollisionFrame.Snapshot(epoch,tick,DIM,CollisionFrame.Phase.PRE_SOLVER,
                 List.of(body),true);
     }
     private static NativeEffectDirection.Result normal() {
@@ -42,5 +45,17 @@ final class NativeApproachEvidenceTest {
         assertFalse(NativeApproachEvidence.approaching(PAIR,List.of(frame(7,3),frame(7,-3)),normal(),7));
         assertFalse(NativeApproachEvidence.approaching(PAIR,List.of(frame(7,3)),
                 NativeEffectDirection.unknown("NOT_PROVED"),7));
+    }
+    @Test void existingContactDoesNotMintIndependentCreditFromLaterOnlyClosing() {
+        assertFalse(NativeApproachEvidence.independentlyApproaching(PAIR,
+                List.of(frame(1,7,0),frame(2,7,3)),normal(),7));
+        assertTrue(NativeApproachEvidence.independentlyApproaching(PAIR,
+                List.of(frame(2,7,0),frame(1,7,3)),normal(),7));
+    }
+    @Test void independentApproachRequiresUniquePreEpochAndNoContradiction() {
+        assertFalse(NativeApproachEvidence.independentlyApproaching(PAIR,
+                List.of(frame(1,7,3),frame(1,7,3)),normal(),7));
+        assertFalse(NativeApproachEvidence.independentlyApproaching(PAIR,
+                List.of(frame(1,7,3),frame(2,7,-3)),normal(),7));
     }
 }

@@ -111,4 +111,82 @@ class VerifiedContactGraphTest {
         assertNull(VerifiedContactGraph.geometry(PAIR,
                 contact(IDENTITY,p,new Vec(1.0001,.5,.5),X,X.times(-1),false),pre));
     }
+    @Test void currentPositiveCappedWitnessCanBeRevalidatedWithoutStationarity(){
+        var p=new Vec(1,.5,.5);
+        var c=contact(IDENTITY,p,p,X,X.times(-1),true);
+        // Velocity is evidence of motion, but actual witness geometry is still
+        // valid at every retained pre frame and the effect consumer.
+        assertNotNull(VerifiedContactGraph.revalidateGeometry(PAIR,c,
+                List.of(frame(31,IDENTITY,X,ZERO),frame(32,IDENTITY,X,ZERO))));
+        assertNull(VerifiedContactGraph.geometry(PAIR,c,List.of(frame(31,IDENTITY,X,ZERO))));
+    }
+    @Test void movingPairMustStillHaveContactAtEveryFeasiblePreFrame(){
+        var p=new Vec(1,.5,.5);
+        var c=contact(IDENTITY,p,p,X,X.times(-1),true);
+        var separated=new Pose(new Vec(-.1,0,0),ZERO,UNIT,0,0,0,1);
+        assertNull(VerifiedContactGraph.revalidateGeometry(PAIR,c,
+                List.of(frame(31,separated,X,ZERO),frame(32,IDENTITY,X,ZERO))));
+        var penetrated=new Pose(new Vec(.01,0,0),ZERO,UNIT,0,0,0,1);
+        assertNotNull(VerifiedContactGraph.revalidateGeometry(PAIR,c,
+                List.of(frame(31,penetrated,X,ZERO),frame(32,IDENTITY,X,ZERO))));
+    }
+    @Test void exactCubeProofRejectsClearanceDespiteBoundingOverlapAlongOtherAxes(){
+        var a=new Vec(0,0,0);var b=new Vec(1,0,0);
+        assertTrue(VerifiedContactGraph.cubesTouch(IDENTITY,a,IDENTITY,b,X));
+        assertFalse(VerifiedContactGraph.cubesTouch(IDENTITY,a,
+                new Pose(new Vec(.0001,0,0),ZERO,UNIT,0,0,0,1),b,X));
+        assertFalse(VerifiedContactGraph.cubesTouch(IDENTITY,a,
+                new Pose(new Vec(0,1.1,0),ZERO,UNIT,0,0,0,1),b,X));
+        // Deep interpenetration is not acceptable face-contact evidence.
+        assertFalse(VerifiedContactGraph.cubesTouch(IDENTITY,a,IDENTITY,new Vec(.5,0,0),X));
+        // Both world-axis projections overlap slightly, but a rotated cube
+        // has a genuine separating axis. AABB checks alone would accept it.
+        var rotated=new Pose(new Vec(.5+1.207,.5+1.1,.5),new Vec(.5,.5,.5),UNIT,
+                0,0,Math.sin(Math.PI/8),Math.cos(Math.PI/8));
+        assertFalse(VerifiedContactGraph.cubesTouch(IDENTITY,a,rotated,a,X));
+    }
+    @Test void historyIsExactPairAndGenerationBoundedByTtl(){
+        var history=new VerifiedContactGraph.History();
+        var ta=new GameImpactCredit.Target(PLOT.stableKey(),"0,0,0","a");
+        var tb=new GameImpactCredit.Target(WORLD.stableKey(),"1,0,0","b");
+        var m=new com.physicaldestroydeform.material.CopycatMaterial.Resolved(
+                new com.physicaldestroydeform.MaterialProperties(100,20,30),"",false);
+        var a=new VerifiedContactGraph.EndIdentity(ta,-1,0,0,m);
+        var b=new VerifiedContactGraph.EndIdentity(tb,1,0,0,m);
+        history.remember(PAIR,a,b,10);
+        assertTrue(history.hasRecent(PAIR,10));
+        assertTrue(history.matches(PAIR,a,b,11));
+        assertTrue(history.matches(PAIR,b,a,11));
+        assertFalse(history.matches(PAIR,new VerifiedContactGraph.EndIdentity(ta,1,0,0,m),b,11));
+        var changed=new GameImpactCredit.Target(PLOT.stableKey(),"0,0,0","changed");
+        assertFalse(history.matches(PAIR,new VerifiedContactGraph.EndIdentity(changed,-1,0,0,m),b,11));
+        var changedMaterial=new com.physicaldestroydeform.material.CopycatMaterial.Resolved(
+                new com.physicaldestroydeform.MaterialProperties(100,20,30),"new-revision",false);
+        assertFalse(history.matches(PAIR,new VerifiedContactGraph.EndIdentity(ta,-1,0,0,changedMaterial),b,11));
+        var next=new GameImpactCredit.Pair(PAIR.runId(),DIM,
+                new GameImpactCredit.Owner(PLOT.stableKey(),PLOT.generation()+1),WORLD);
+        assertFalse(history.hasRecent(next,11));
+        assertFalse(history.hasRecent(PAIR,10+VerifiedContactGraph.History.TTL+1));
+        history.remember(PAIR,a,b,100);
+        history.invalidateOwner(PLOT.stableKey());
+        assertFalse(history.hasRecent(PAIR,100));
+    }
+    @Test void boundedHistoryCannotActAsCurrentProofAndSeparationInvalidatesPair(){
+        var history=new VerifiedContactGraph.History();
+        var ta=new GameImpactCredit.Target(PLOT.stableKey(),"0,0,0","a");
+        var m=new com.physicaldestroydeform.material.CopycatMaterial.Resolved(
+                new com.physicaldestroydeform.MaterialProperties(100,20,30),"",false);
+        var a=new VerifiedContactGraph.EndIdentity(ta,-1,0,0,m);
+        for(int i=0;i<VerifiedContactGraph.History.CAP+10;i++){
+            var tb=new GameImpactCredit.Target(WORLD.stableKey(),i+",0,0","b");
+            history.remember(PAIR,a,new VerifiedContactGraph.EndIdentity(tb,1,0,0,m),100);
+        }
+        assertEquals(VerifiedContactGraph.History.CAP,history.size());
+        assertTrue(history.hasRecent(PAIR,100));
+        // A history match is not a substitute for an actual current record.
+        assertNull(VerifiedContactGraph.revalidateGeometry(PAIR,null,List.of(frame(31,IDENTITY,ZERO,ZERO))));
+        history.invalidatePair(PAIR);
+        assertFalse(history.hasRecent(PAIR,100));
+        assertEquals(0,history.size());
+    }
 }

@@ -28,6 +28,7 @@ public final class TargetDirections {
     private List<Contact> contacts=List.of();
     private long tick,epoch=-1;
     private String gate="NO_EVENT";
+    private String patchPairGate="NOT_ATTEMPTED";
     private int acceptedDirect,acceptedPatch,unknownWitnesses,faceMiss,faceAmbiguous,incompleteWitnesses;
 
     /** Same event and owner/shape snapshot as the real target audit. No new world reads. */
@@ -83,6 +84,58 @@ public final class TargetDirections {
         }
         return common;
     }
+    /** Patch correspondence needs a stricter proof than owner-local damage
+     * propagation. Every native record must have one stable dual pose and
+     * coherent lateral mapping across all captured pre-solver epochs. */
+    record PatchFrames(FrameMath.Pose a,FrameMath.Pose b,FrameMath.Vec delta,
+                       MovePlan.SignedAxes inwardA,MovePlan.SignedAxes inwardB) {
+        FrameMath.Vec opposite(FrameMath.Vec allocated,boolean onA){
+            return onA?b.toLocalPoint(a.toWorldPoint(allocated).plus(delta))
+                    :a.toLocalPoint(b.toWorldPoint(allocated).minus(delta));
+        }
+        MovePlan.SignedAxes axis(boolean onA){return onA?inwardA:inwardB;}
+    }
+    PatchFrames patchFrames(){
+        if(!active()){patchPairGate="INACTIVE";return null;}
+        // Conservative separate budget for dual-frame patch proof. Native
+        // candidate consensus remains available even if this extra work is held.
+        long cost=0;
+        for(var f:pre)if(f.phase()==CollisionFrame.Phase.PRE_SOLVER&&f.serverTick()==tick&&pair.dimension().equals(f.dimension()))
+            cost+=2L*Math.max(1,f.bodies().size());
+        if(Math.max(1,cost)>8L*SableContactRegions.RUNTIME_MAX_UNIQUE_CELLS_PER_SIDE/Math.max(1,contacts.size())){
+            patchPairGate="FRAME_WORK_BUDGET";return null;
+        }
+        PatchFrames common=null;
+        try{
+            for(var c:contacts){
+                // An exactly revalidated current-record witness need not be
+                // stationary: all captured pre/effect frames must agree on
+                // each source point, and both strict non-collinear polygons
+                // later establish the common tangential mapping.
+                var g=VerifiedContactGraph.revalidateGeometry(pair,c,pre);
+                if(g==null){patchPairGate="FRAME_REVALIDATION_REJECTED";return null;}
+                boolean nativeA=SableConsumerTargets.sourceSide(pair.a().stableKey(),c,pair.dimension())==1;
+                var an=nativeA?g.outwardA():g.outwardB();var bn=nativeA?g.outwardB():g.outwardA();
+                var aa=patchAxis(an,g.firstEpoch());var ba=patchAxis(bn,g.firstEpoch());
+                if(aa==null||ba==null){patchPairGate="NONAXIAL_DUAL_WITNESS";return null;}
+                var next=new PatchFrames(nativeA?g.aPose():g.bPose(),nativeA?g.bPose():g.aPose(),
+                        nativeA?g.worldB().minus(g.worldA()):g.worldA().minus(g.worldB()),aa,ba);
+                if(common!=null&&(!common.a().equals(next.a())||!common.b().equals(next.b())
+                        ||!common.inwardA().equals(next.inwardA())||!common.inwardB().equals(next.inwardB())
+                        ||common.delta().minus(next.delta()).squareLength()>ContactFacePatch.PAIR_EPS*ContactFacePatch.PAIR_EPS)){
+                    patchPairGate="MAPPING_INCOHERENT";return null;
+                }
+                if(common==null)common=next;
+            }
+        }catch(RuntimeException unavailable){patchPairGate="FRAME_PROOF_ERROR";return null;}
+        patchPairGate=common==null?"NO_WITNESSES":"FRAME_VERIFIED";
+        return common;
+    }
+    private static MovePlan.SignedAxes patchAxis(FrameMath.Vec outward,long epoch){
+        var a=MovePlan.quantizeDirection(-outward.x(),-outward.y(),-outward.z(),true,epoch);
+        return Math.abs(a.x())+Math.abs(a.y())+Math.abs(a.z())==1
+                &&Math.abs(outward.dot(new FrameMath.Vec(a.x(),a.y(),a.z())))>=1-ContactFacePatch.PAIR_EPS?a:null;
+    }
     void observe(Collection<GameImpactCredit.Target> touched,Collection<GameImpactCredit.Target> faces,
                  MovePlan.SignedAxes axes,boolean incomplete){
         original.addAll(touched);
@@ -113,7 +166,7 @@ public final class TargetDirections {
                 " unknownWitnesses="+unknownWitnesses+" faceMiss="+faceMiss+" faceAmbiguous="+faceAmbiguous+
                 " incompleteWitnesses="+incompleteWitnesses+" normalRecords="+reasons+
                 " uniqueNormalProofs="+normalProofs.size()+" ambiguous="+ambiguous.size()+
-                " unresolvedFaceCandidates="+unresolvedFaces.size()+" authorized="+sealed.size();
+                " unresolvedFaceCandidates="+unresolvedFaces.size()+" authorized="+sealed.size()+" patchPairGate="+patchPairGate;
     }
     public void bind(ContactCreditLedger.Grant grant){
         bind(grant,null,null);

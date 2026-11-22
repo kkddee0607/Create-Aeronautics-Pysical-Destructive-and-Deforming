@@ -21,7 +21,8 @@ import java.util.function.Function;
  */
 public final class ContactCreditLedger {
     public static final String LEGACY_ALGORITHM_REVISION = "PDD-IDS-1.0.7/0.4.1-spreadFix-MULTIFACE-70-30";
-    public static final String ALGORITHM_REVISION = "PDD-IDS-1.0.9/0.6.1-CONTACT-ELASTIC-CHAIN";
+    public static final String PREVIOUS_ALGORITHM_REVISION = "PDD-IDS-1.0.9/0.6.1-CONTACT-ELASTIC-CHAIN";
+    public static final String ALGORITHM_REVISION = "PDD-IDS-1.0.9/0.6.1fix-CONTACT-CONSENSUS-ALPHA04";
     // Bounded but large enough for a 100x100 fully verified planar contact patch.
     public static final int MAX_TARGETS_PER_SIDE = 16_384;
     public static final int MAX_REGIONS = 2 * MAX_TARGETS_PER_SIDE;
@@ -37,10 +38,18 @@ public final class ContactCreditLedger {
             if (episodeGeneration <= 0) throw new IllegalArgumentException("invalid episode generation");
         }
     }
-    /** One verified source-region observation. Null on one side means unverified. */
-    public record Region(GameImpactCredit.Target a, GameImpactCredit.Target b) {
+    /** One source observation. A singleton may retain its exhaustive opposite
+     * candidate set without claiming an exact block correspondence. */
+    public record Region(GameImpactCredit.Target a, GameImpactCredit.Target b,
+                         List<GameImpactCredit.Target> opposingCandidates) {
+        public Region(GameImpactCredit.Target a,GameImpactCredit.Target b){this(a,b,List.of());}
         public Region {
             if (a == null && b == null) throw new IllegalArgumentException("empty contact region");
+            Objects.requireNonNull(opposingCandidates);
+            if(opposingCandidates.size()>SableConsumerTargets.MAX_CANDIDATES||
+                    a!=null&&b!=null&&!opposingCandidates.isEmpty())throw new IllegalArgumentException("invalid opposite evidence");
+            var ordered=new java.util.TreeSet<>(CONTACT_ORDER);ordered.addAll(opposingCandidates);
+            opposingCandidates=List.copyOf(ordered);
         }
     }
     public record Share(GameImpactCredit.Target target, double q) {
@@ -160,6 +169,11 @@ public final class ContactCreditLedger {
             }
         }
         if(a.size()>MAX_TARGETS_PER_SIDE || b.size()>MAX_TARGETS_PER_SIDE || a.isEmpty()&&b.isEmpty())
+            return empty(id,source,Status.INVALID_TARGET_SET,decision.tick(),evidence.size());
+        // Candidates are never new seeds. They must already be verified on
+        // the opposite side with the same owner, coordinates and fingerprint.
+        for(var region:evidence)if(!region.opposingCandidates().isEmpty()
+                && !(region.a()!=null?b:a).containsAll(region.opposingCandidates()))
             return empty(id,source,Status.INVALID_TARGET_SET,decision.tick(),evidence.size());
 
         var partsA=split(a,decision.allocation().sideA());
@@ -365,40 +379,42 @@ public final class ContactCreditLedger {
         };
     }
 
-    /** Preserve each side's original equal-F allocation per unique seed. Within
-     * a seed, distinct opposite native contacts share that seed's budget equally.
-     * A repeated witness cannot increase a pair's weight or debit the same
-     * share twice. No material is inferred from a singleton or other block. */
+    /** Preserve the equal-F allocation per unique seed. Exact opposite targets
+     * and exhaustive native candidate sets share a seed budget; identical
+     * evidence coverage is deduplicated. A candidate set proves E only when
+     * every possible material is resolved and has the same E. */
     private static ForcePropagation.Result contactPlan(String owner,List<GameImpactCredit.Target> seeds,double sideF,
              List<Region> evidence,boolean onA,ForcePropagation.NeighborReader neighbors,
              Function<GameImpactCredit.Target,MaterialProperties> materials,GameImpactCredit.Settings forces,
              DamageModel.Settings damage,ForcePropagation.Orientation direction,
              java.util.function.Consumer<ForcePropagation.Trace> trace,ForcePropagation.CrossOwnerContext crossOwner) {
         if(!Double.isFinite(sideF)||sideF<0)throw new IllegalArgumentException("invalid contact F");
-        var opponents=new HashMap<GameImpactCredit.Target,Set<GameImpactCredit.Target>>();
-        var unpaired=new HashSet<GameImpactCredit.Target>();
+        var opponents=new HashMap<GameImpactCredit.Target,Set<List<GameImpactCredit.Target>>>();
         for(var region:evidence){
             var self=onA?region.a():region.b();var other=onA?region.b():region.a();
             if(self==null)continue;
-            if(other==null){unpaired.add(self);continue;}
-            opponents.computeIfAbsent(self,k->new HashSet<>()).add(other);
+            opponents.computeIfAbsent(self,k->new HashSet<>()).add(other==null?region.opposingCandidates():List.of(other));
         }
         var effective=new HashMap<GameImpactCredit.Target,Double>();
         double contactDamped=0,unresolved=seeds.isEmpty()?sideF:0,forwardF=0;
         double split=seeds.isEmpty()?0:sideF/seeds.size();
+        int exact=0,consensus=0,withheld=0,missingMaterial=0,mixedMaterial=0,unproved=0;
         for(var seed:seeds){
             var candidates=opponents.get(seed);
-            if(candidates==null||candidates.isEmpty()||materials.apply(seed)==null){
-                unresolved+=split;continue;
+            if(candidates==null||candidates.isEmpty()){
+                unresolved+=split;withheld++;unproved++;continue;
             }
-            var ordered=new ArrayList<>(candidates);ordered.sort(CONTACT_ORDER);
-            double part=split/(ordered.size()+(unpaired.contains(seed)?1:0));
-            if(unpaired.contains(seed))unresolved+=part;
+            if(materials.apply(seed)==null){
+                unresolved+=split;withheld++;missingMaterial++;continue;
+            }
+            var ordered=new ArrayList<>(candidates);ordered.sort(ContactCreditLedger::compareCandidateSets);
+            double part=split/ordered.size();
             double received=0;
-            for(var other:ordered){
-                var opposite=materials.apply(other);
-                if(opposite==null){unresolved+=part;continue;}
-                double retained=part*DamageModel.elasticityTransmission(opposite,damage);
+            for(var possible:ordered){
+                int e=consensusElasticity(possible,materials);
+                if(e<0){unresolved+=part;withheld++;if(e==-2)missingMaterial++;else if(e==-3)mixedMaterial++;else unproved++;continue;}
+                if(possible.size()==1)exact++;else consensus++;
+                double retained=part*DamageModel.contactElasticityTransmissionPercent(e,damage);
                 received+=retained;
                 contactDamped+=part-retained;
             }
@@ -410,8 +426,27 @@ public final class ContactCreditLedger {
         var plan=ForcePropagation.planTargets(owner,effective,neighbors,materials,forces,damage,direction,trace,crossOwner);
         if(Math.abs(plan.inputF()-forwardF)>tolerance)throw new IllegalStateException("seed F budget mismatch");
         return new ForcePropagation.Result(plan.shares(),sideF,plan.assignedF(),plan.dampedF(),
-                plan.unresolvedF()+unresolved,plan.candidateQ(),plan.finalQ(),plan.dampedQ(),plan.endReason(),plan.audit(),
+                plan.unresolvedF()+unresolved,plan.candidateQ(),plan.finalQ(),plan.dampedQ(),
+                plan.endReason()+" CONTACT_EXACT="+exact+" CONTACT_CONSENSUS="+consensus+" CONTACT_WITHHELD="+withheld+
+                        " CONTACT_UNPROVED="+unproved+" CONTACT_MISSING_MATERIAL="+missingMaterial+" CONTACT_MIXED_E="+mixedMaterial,plan.audit(),
                 plan.contactDampedF()+contactDamped);
+    }
+    private static int consensusElasticity(List<GameImpactCredit.Target> possible,
+            Function<GameImpactCredit.Target,MaterialProperties> materials){
+        int e=-1;
+        for(var target:possible){
+            var material=materials.apply(target);
+            if(material==null)return -2;
+            if(e>=0&&e!=material.elasticityPercent())return -3;
+            e=material.elasticityPercent();
+        }
+        return e;
+    }
+    private static int compareCandidateSets(List<GameImpactCredit.Target> a,List<GameImpactCredit.Target> b){
+        for(int i=0;i<Math.min(a.size(),b.size());i++){
+            int c=CONTACT_ORDER.compare(a.get(i),b.get(i));if(c!=0)return c;
+        }
+        return Integer.compare(a.size(),b.size());
     }
     private static List<Share> seal(ForcePropagation.Result plan,double sideQcap) {
         double factor=plan.finalQ()>sideQcap && plan.finalQ()>0?
