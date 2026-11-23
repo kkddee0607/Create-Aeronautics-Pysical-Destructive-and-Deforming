@@ -421,6 +421,7 @@ public final class RealFixRuntimeBridge {
         // accepted only when every matching snapshot maps to the same stable pair.
         final int[] logCounts={0,0};
         final int[] fTraceLines={0};
+        final int[] contactBudgetAuditLines={0};
         // Clearance is safety-critical. R4 is diagnostic-only: separate
         // bounded budgets prevent R4 from starving positive separation proof.
         int[] remainingClearanceChecks={RealFixBoundaryCandidates.MAX_PER_TICK};
@@ -997,6 +998,14 @@ public final class RealFixRuntimeBridge {
                                     grant.propagationA().audit().crossEdges()+grant.propagationB().audit().crossEdges(),
                                     fInput,grant.propagationA().assignedF()+grant.propagationB().assignedF(),grant.contactDampedF(),grant.dampedF(),grant.unresolvedF(),
                                     grant.propagationA().audit().thresholdDiscardF()+grant.propagationB().audit().thresholdDiscardF());
+                            // Audit only large unresolved budgets. Evidence never authorizes new F here.
+                            if(fInput>0 && grant.unresolvedF()/fInput>=0.10 && contactBudgetAuditLines[0]++<4)
+                                log.warn("[PDD-CONTACT-BUDGET] credit={} unresolvedRatio={} unresolvedF={} " +
+                                                "reasonA={} reasonB={} nativeCap={} regionStatus={} " +
+                                                "policy=WITHHOLD_UNPROVED mutation=OFF",
+                                        grant.id(),grant.unresolvedF()/fInput,grant.unresolvedF(),
+                                        grant.propagationA().endReason(),grant.propagationB().endReason(),
+                                        saturatedPoll,regions.status());
                             log.info("[PDD-F-INVARIANT] credit={} FInput={} FAccounted={} FError={} " +
                                             "issuedQ={} reservedA={} reservedB={} unusedQ={} QError={} " +
                                             "FStatus={} QStatus={} mutation=OFF",
@@ -1160,15 +1169,24 @@ public final class RealFixRuntimeBridge {
                             stamp.dimension,stamp.tick,unsupported.getClass().getSimpleName());
                 }
             }
+            int positiveCrossPairs=0,positiveCrossEdges=0,crossDetailedEmitted=0;
             for(var candidate:secondary.entrySet()) {
                 Pair pair=candidate.getKey();
                 var scene=new SceneKey(stamp.dimension,stamp.tick,pair.a().stableKey(),pair.b().stableKey());
                 if(!secondaryPairEligible(directAuthorized.contains(pair),ownerPairCounts.getOrDefault(scene,0)))continue;
                 boolean validBatch=complete&&batch.invalidRecords()==0&&batch.discardedRecords()==0&&!batch.malformedArray();
                 int admitted=contactGraph.observe(pair,candidate.getValue(),pre,validBatch);
-                if(admitted>0&&logCounts[0]++<MAX_LOG_PER_TICK)
-                    log.info("[PDD-CROSS-OWNER] pair={}/{} tick={} admitted={} proof=FINAL_DUPLICATE_CURRENT_NATIVE",pair.a().stableKey(),pair.b().stableKey(),stamp.tick,admitted);
+                if(admitted>0){
+                    positiveCrossPairs++;positiveCrossEdges+=admitted;
+                    if((fullTrace||crossDetailedEmitted<2)&&logCounts[0]++<MAX_LOG_PER_TICK){
+                        log.info("[PDD-CROSS-OWNER] pair={}/{} tick={} admitted={} proof=FINAL_DUPLICATE_CURRENT_NATIVE",pair.a().stableKey(),pair.b().stableKey(),stamp.tick,admitted);
+                        crossDetailedEmitted++;
+                    }
+                }
             }
+            if(positiveCrossPairs>crossDetailedEmitted&&!fullTrace)
+                log.info("[PDD-CROSS-OWNER-SUMMARY] tick={} positivePairs={} admittedTotal={} detailedLogged={} suppressedPairs={} proof=CURRENT_NATIVE",
+                        stamp.tick,positiveCrossPairs,positiveCrossEdges,crossDetailedEmitted,positiveCrossPairs-crossDetailedEmitted);
             for(Runnable plan:deferredPlans)plan.run();
             if((!secondary.isEmpty()||!directAuthorized.isEmpty())&&(fullTrace||!directAuthorized.isEmpty()||now%VERF_SAMPLE_TICKS==0)&&logCounts[0]++<MAX_LOG_PER_TICK)
                 log.info("[PDD-CROSS-OWNER-AUDIT] tick={} direct={} secondary={} history={} stats={} sourceGameTick={} liveGameTick={} sourceServerTick={} processingServerTick={} stampReason={}",

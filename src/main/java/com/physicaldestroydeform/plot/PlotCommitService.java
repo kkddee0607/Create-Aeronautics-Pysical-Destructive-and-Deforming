@@ -220,6 +220,7 @@ public final class PlotCommitService {
     public boolean faulted(){return fault||core.ioFault();}
     public WorldPersistentJournal lineageJournal(){return journal;}
     public String storagePerformance(){return journal.storageStatus();}
+    public String ioPerformance(){return journal.ioPerformance();}
     public void watchRecoveredLineage(SparseStateKey key){
         lineageActive.add(new Coordinate(key));registerState(key);
     }

@@ -43,6 +43,7 @@ public final class WorldPersistentJournal implements WorldJournal {
             v=Integer.compare(y,b.y);return v!=0?v:Integer.compare(z,b.z);}
     }
     private final Path root,manifestPath,legacyPath;
+    private final JournalIoMetrics io=new JournalIoMetrics();
     private final Map<SparseStateKey,WorldReceiptJournal.State> states=new HashMap<>();
     /** Compact index: no cold ApplyId Strings, only offsets, record CRCs and sorted
      * SHA-256 candidate keys. A matching candidate always reads the complete ID. */
@@ -99,6 +100,7 @@ public final class WorldPersistentJournal implements WorldJournal {
         recoveredUncertain.addAll(uncertainReceipts.keySet());
     }
     public synchronized boolean migrated(){return migrated;}
+    public synchronized String ioPerformance(){return io.summary();}
     /** Recovered crash-time incomplete WAL bytes, excluding complete CRC-invalid frames. */
     public synchronized long repairedTailBytes(){return repairedTailBytes;}
     public synchronized boolean receiptLookupFaulted(){return receiptReadFault!=null;}
@@ -132,6 +134,7 @@ public final class WorldPersistentJournal implements WorldJournal {
         long candidate=candidateKey(hash,0),prefix=candidate>>32;
         int i=Arrays.binarySearch(shard.candidates(),candidate);if(i<0)i=-i-1;
         if(i==shard.count()||shard.candidates()[i]>>32!=prefix)return null;
+        long readStarted=System.nanoTime();
         try(var f=new RandomAccessFile(checkedFile(shard.relative()).toFile(),"r")){
             int bodyLength=shard.offsets()[shard.count()];
             if(f.length()!=20L+bodyLength||f.readInt()!=DISK_MAGIC||f.readInt()!=shard.schema()
@@ -152,7 +155,7 @@ public final class WorldPersistentJournal implements WorldJournal {
         }catch(IOException|IllegalArgumentException failure){
             receiptReadFault=failure instanceof IOException io?io:new IOException("invalid cold receipt record",failure);
             throw receiptReadFault;
-        }
+        }finally{io.record(JournalIoMetrics.Phase.COLD_RECEIPT_READ,System.nanoTime()-readStarted);}
     }
     // Conservative weighted budget includes key, receipt, map entry and worst-case
     // UTF-16 backing arrays; precise JVM object layout is implementation-dependent.
@@ -469,6 +472,8 @@ public final class WorldPersistentJournal implements WorldJournal {
     }
     /** Complete a bounded amount of snapshot work on the server thread. */
     @Override public synchronized int checkpointBatch(int maxObjects) throws IOException {
+        long checkpointStarted=System.nanoTime();
+        try{
         if(appendUncertain)throw new IOException("RECOVERY_WAL_APPEND_UNCERTAIN");
         checkReceiptReadHealth();
         if(maxObjects<1)throw new IllegalArgumentException("checkpoint budget must be positive");
@@ -511,6 +516,7 @@ public final class WorldPersistentJournal implements WorldJournal {
         }
         if(dirtyChunks.isEmpty()&&dirtyBuckets.isEmpty())publish();
         return done;
+        }finally{io.record(JournalIoMetrics.Phase.CHECKPOINT,System.nanoTime()-checkpointStarted);}
     }
     @Override public synchronized boolean checkpointPending(){return staging;}
     public synchronized boolean checkpointNeeded(){
@@ -744,6 +750,8 @@ public final class WorldPersistentJournal implements WorldJournal {
         receiptCount+=shard.count();receiptBucketCounts[expected]=shard.count();
     }
     private ReceiptShard indexReceiptBody(int expected,String relative,int schema,byte[] body,boolean restoreActive)throws IOException {
+        long indexStarted=System.nanoTime();
+        try{
         try(var in=new DataInputStream(new ByteArrayInputStream(body))){
             int actual=in.readUnsignedByte();if(actual!=expected)throw new IOException("receipt bucket mismatch");
             int count=in.readInt();
@@ -772,6 +780,7 @@ public final class WorldPersistentJournal implements WorldJournal {
             offsets[count]=body.length;Arrays.sort(candidates);
             return new ReceiptShard(relative,schema,crc(body),offsets,crcs,candidates);
         }catch(IllegalArgumentException failure){throw new IOException("invalid receipt snapshot",failure);}
+        }finally{io.record(JournalIoMetrics.Phase.RECEIPT_INDEX,System.nanoTime()-indexStarted);}
     }
     private byte[] chunkBytes(ChunkKey key)throws IOException {
         ByteArrayOutputStream bytes=new ByteArrayOutputStream();
@@ -786,6 +795,8 @@ public final class WorldPersistentJournal implements WorldJournal {
         return bytes.toByteArray();
     }
     private byte[] receiptBytes(int id)throws IOException {
+        long encodeStarted=System.nanoTime();
+        try{
         ByteArrayOutputStream bytes=new ByteArrayOutputStream();
         try(var out=new DataOutputStream(bytes)){
             out.writeByte(id);
@@ -821,8 +832,11 @@ public final class WorldPersistentJournal implements WorldJournal {
         }
         if(bytes.size()>MAX_BLOB_BYTES)throw new IOException("receipt shard size cap exceeded");
         return bytes.toByteArray();
+        }finally{io.record(JournalIoMetrics.Phase.RECEIPT_ENCODE,System.nanoTime()-encodeStarted);}
     }
     private void publish()throws IOException {
+        long publishStarted=System.nanoTime();
+        try{
         long next=generation+1;
         createWal(next); // durable empty WAL BEFORE referencing it in manifest
         writeManifest(next,stagedChunks,stagedBuckets); // atomic publish: previous WAL+objects remain valid until now
@@ -840,6 +854,7 @@ public final class WorldPersistentJournal implements WorldJournal {
         for(var e:previousBuckets.entrySet())if(!Objects.equals(e.getValue(),currentBuckets.get(e.getKey())))
             deleteBestEffort(root.resolve(e.getValue()));
         deleteBestEffort(walPath(oldGeneration));
+        }finally{io.record(JournalIoMetrics.Phase.PUBLISH,System.nanoTime()-publishStarted);}
     }
     private static void deleteBestEffort(Path file){try{Files.deleteIfExists(file);}catch(IOException ignored){/* orphan is safe */}}
     private void writeManifest(long gen,Map<ChunkKey,String> chunks,Map<Integer,String> buckets)throws IOException {
@@ -862,23 +877,30 @@ public final class WorldPersistentJournal implements WorldJournal {
     }
     private Path walPath(long gen){return root.resolve("recovery-"+gen+".wal");}
     private void createWal(long gen)throws IOException {
+        long createStarted=System.nanoTime();
+        try{
         ByteBuffer b=ByteBuffer.allocate(16).putInt(WAL_MAGIC).putInt(SCHEMA).putLong(gen);b.flip();
         Path path=walPath(gen);Files.createDirectories(path.getParent());
         try(var channel=FileChannel.open(path,CREATE,TRUNCATE_EXISTING,WRITE)){
             while(b.hasRemaining())channel.write(b);channel.force(true);
         }
         forceDirectory(root);walBytes=16;
+        }finally{io.record(JournalIoMetrics.Phase.WAL_CREATE,System.nanoTime()-createStarted);}
     }
     private void append(byte[] frame)throws IOException {
         if(appendUncertain)throw new IOException("RECOVERY_WAL_APPEND_UNCERTAIN");
         checkReceiptReadHealth();
         if(walBytes+frame.length>MAX_WAL_BYTES)throw new IOException("RECOVERY_WAL_CAP_EXCEEDED");
         Path path=walPath(generation);
+        long appendStarted=System.nanoTime();
         try(var channel=FileChannel.open(path,APPEND,WRITE)){
             if(channel.size()!=walBytes)throw new IOException("recovery WAL changed externally");
             ByteBuffer b=ByteBuffer.wrap(frame);while(b.hasRemaining())channel.write(b);
-            channel.force(true);walBytes+=frame.length;
+            long forceStarted=System.nanoTime();
+            try{channel.force(true);}finally{io.record(JournalIoMetrics.Phase.WAL_FORCE,System.nanoTime()-forceStarted);}
+            walBytes+=frame.length;
         }catch(IOException uncertain){appendUncertain=true;throw uncertain;}
+        finally{io.record(JournalIoMetrics.Phase.WAL_APPEND,System.nanoTime()-appendStarted);}
     }
     private void replayWal()throws IOException {
         Path wal=walPath(generation);
@@ -941,18 +963,27 @@ public final class WorldPersistentJournal implements WorldJournal {
         if(!file.startsWith(root)||file.equals(root))throw new IOException("unsafe persisted path");
         return file;
     }
-    private static void writeDurable(Path path,byte[] bytes)throws IOException {
-        Files.createDirectories(path.getParent());
-        try(var ch=FileChannel.open(path,CREATE,TRUNCATE_EXISTING,WRITE)){
-            ByteBuffer b=ByteBuffer.wrap(bytes);while(b.hasRemaining())ch.write(b);ch.force(true);
-        }
-        forceDirectory(path.getParent());
+    private void writeDurable(Path path,byte[] bytes)throws IOException {
+        long started=System.nanoTime();
+        try{
+            Files.createDirectories(path.getParent());
+            try(var ch=FileChannel.open(path,CREATE,TRUNCATE_EXISTING,WRITE)){
+                ByteBuffer b=ByteBuffer.wrap(bytes);while(b.hasRemaining())ch.write(b);
+                long forceStarted=System.nanoTime();
+                try{ch.force(true);}
+                finally{io.record(JournalIoMetrics.Phase.FILE_FORCE,System.nanoTime()-forceStarted);}
+            }
+            forceDirectory(path.getParent());
+        }finally{io.record(JournalIoMetrics.Phase.DURABLE_WRITE,System.nanoTime()-started);}
     }
-    private static void forceDirectory(Path directory)throws IOException {
-        try(var ch=FileChannel.open(directory,READ)){ch.force(true);}
-        catch(AccessDeniedException|UnsupportedOperationException unsupported){
-            // Windows cannot open a directory FileChannel; file fsync and atomic move still apply.
-        }
+    private void forceDirectory(Path directory)throws IOException {
+        long started=System.nanoTime();
+        try{
+            try(var ch=FileChannel.open(directory,READ)){ch.force(true);}
+            catch(AccessDeniedException|UnsupportedOperationException unsupported){
+                // Windows cannot open a directory FileChannel; file fsync and atomic move still apply.
+            }
+        }finally{io.record(JournalIoMetrics.Phase.DIRECTORY_FORCE,System.nanoTime()-started);}
     }
     private interface Writer{void write(DataOutputStream out)throws IOException;}
     private static byte[] frame(Writer writer)throws IOException {
