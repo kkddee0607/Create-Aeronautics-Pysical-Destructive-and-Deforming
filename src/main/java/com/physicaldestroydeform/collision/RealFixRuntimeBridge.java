@@ -1,6 +1,7 @@
 package com.physicaldestroydeform.collision;
 
 import com.physicaldestroydeform.diagnostics.NativeCollisionTelemetry;
+import com.physicaldestroydeform.diagnostics.DiagnosticMode;
 import com.physicaldestroydeform.diagnostics.TraceBudget;
 import com.physicaldestroydeform.material.MaterialRegistry;
 import com.physicaldestroydeform.material.PreviewDamageLedger;
@@ -56,7 +57,7 @@ public final class RealFixRuntimeBridge {
             Integer.getInteger("pdd.verf.maxLogPerTick",1024)));
     // Diagnostic-only trace, capped independently from collision evidence logs.
     private static final boolean F_TRACE_ENABLED=Boolean.parseBoolean(
-            System.getProperty("pdd.f.trace.enabled","false"));
+            System.getProperty("pdd.f.trace.enabled",Boolean.toString(DiagnosticMode.trace())));
     // Verification release: a radius-3.5 Plot previously lost 193/289 F
     // receipts. Keep explicit operator caps for high-traffic production use.
     private static final int MAX_F_TRACE_PER_TICK=Math.max(256,Math.min(16384,
@@ -70,6 +71,9 @@ public final class RealFixRuntimeBridge {
     // Verification-build-only instrumentation; never changes credit, owner or Q logic.
     private static final boolean VERF_ENABLED=Boolean.parseBoolean(
             System.getProperty("pdd.verf.enabled","true"));
+    private static final boolean DETAIL_ENABLED=DiagnosticMode.debug()||Boolean.getBoolean("pdd.verf.enabled");
+    private static final boolean NORMAL_SAMPLES_ENABLED=DETAIL_ENABLED
+            ||System.getProperty("pdd.normal.samples.maxPerCredit")!=null;
     private static final long VERF_SAMPLE_TICKS=Math.max(20L,
             Long.getLong("pdd.verf.sampleTicks",100L));
     private String runId=UUID.randomUUID().toString();
@@ -157,13 +161,21 @@ public final class RealFixRuntimeBridge {
         String lastClearanceStatus="";
         long lastClearanceStatusTick=-1;
     }
-    private static final class Generation {
+    static final class Generation {
         int runtimeId;
         long number=1;
         boolean present=true;
-        long lastSeen=-1;
+        private long absentSince=-1;
         long lifecycleRevision=-1;
         Generation(int runtimeId){this.runtimeId=runtimeId;}
+        void setPresent(boolean live,long serverTick) {
+            if(live)absentSince=-1;
+            else if(present||absentSince<0)absentSince=serverTick;
+            present=live;
+        }
+        boolean idleExpired(long serverTick) {
+            return !present&&absentSince>=0&&trackedIdleExpired(serverTick,absentSince);
+        }
     }
     private record Stamp(String dimension,long tick) { }
     private record SceneKey(String dimension,long tick,String lowOwner,String highOwner) { }
@@ -212,7 +224,10 @@ public final class RealFixRuntimeBridge {
         credit.clear();regionLedger.clear();worldClearance.clear();tracked.clear();generations.clear();
         contactHistory.clear();
         runId=UUID.randomUUID().toString();
-        lastDropped=lastMalformed=lastCallbackDropped=lastPreHistoryDropped=0;
+        refreshDropBaseline();
+        credited=observed=zero=missingOwner=ambiguousOwners=missingTarget=0;
+        r2Verified=r2Rejected=r3Verified=prearmed=r1Fallback=0;
+        multiGroupCredits=multiRegions=ledgerRejected=multiTooBroad=0;
         repeatedDiagnosticGroupsSuppressed=0;
         r2Audits=r2SkippedDuplicate=r2ShapeChecks=0;
         clearanceCalls=clearanceCellReads=clearanceElapsedNanos=clearanceProved=0;
@@ -228,8 +243,18 @@ public final class RealFixRuntimeBridge {
         previewPolicyId=null;
     }
 
+    private void refreshDropBaseline() {
+        lastDropped=NativeCollisionTelemetry.dropped();
+        lastMalformed=NativeCollisionTelemetry.malformed();
+        lastCallbackDropped=com.physicaldestroydeform.diagnostics.SableContactQueue.dropped();
+        lastPreHistoryDropped=SableFrameCapture.preHistoryDropped();
+    }
+
     /** Diagnostic snapshot ONLY. No connection to real World/Plot damage persistence. */
     public void loadPreview(MinecraftServer server,Logger log) {
+        // Counters are JVM-wide; captures from the stopped server are not losses
+        // in this new session. Runtime stamps independently reject old evidence.
+        refreshDropBaseline();
         var q=credit.settings();
         log.info("[PDD-POLICY] revision={} forceEnter={} forceFloor={} forceGain={} maxGroupQ={} maxGameF={} " +
                         "damageGain={} directShare={} plasticShare={} stressShare={} fixedPointScale={} " +
@@ -355,7 +380,8 @@ public final class RealFixRuntimeBridge {
                 (!p.runtimeStamp().known()||p.runtimeStamp().statusAgainst(consuming.get(p.dimension()))
                         ==ContactBatchStamp.Status.CURRENT)).toList();
         int staleNative=0;
-        final boolean fullTrace=Boolean.getBoolean("pdd.diagnostics.fullTrace");
+        final boolean fullTrace=Boolean.parseBoolean(System.getProperty("pdd.diagnostics.fullTrace",
+                Boolean.toString(DiagnosticMode.debug())));
         if(plotCommit!=null)plotCommit.refreshLifecycle(now);
         final boolean complete=NativeCollisionTelemetry.dropped()==lastDropped
                 && NativeCollisionTelemetry.malformed()==lastMalformed
@@ -388,8 +414,8 @@ public final class RealFixRuntimeBridge {
         final Map<SceneKey,ObservedTargets> targetEvidence=callbackTargets(server,callbacks);
         final Map<Stamp,OwnerSnapshot> ownerIndex=ownerSnapshots(pre);
         final var massEpochs=new NativeContactMassEpoch(pre);
-        final Map<String,Map<String,Box>> worldBounds=readServerBounds(server);
-        invalidateUnloadedOwners(worldBounds);
+        final Map<String,Map<String,LivePlot>> worldBounds=readServerBounds(server);
+        invalidateUnloadedOwners(worldBounds,now);
         final Map<String,Box> knownWorldBlocks=new HashMap<>();
         // Pre-solver snapshots may be from multiple substeps. A runtime pair is
         // accepted only when every matching snapshot maps to the same stable pair.
@@ -442,7 +468,7 @@ public final class RealFixRuntimeBridge {
             var deferredPlans=new ArrayList<Runnable>();
             for(var group:batch.groups()) {
                 var records=contactsByPair.getOrDefault(group.runtimePair(),List.of());
-                var owners=resolveOwners(ownerIndex,stamp,group,records);
+                var owners=resolveOwners(ownerIndex,stamp,group,records,now,worldBounds.getOrDefault(stamp.dimension(),Map.of()));
                 if(owners==null)continue;
                 resolvedOwners.put(group.runtimePair(),owners);
                 Pair pair=owners.pair();
@@ -549,7 +575,7 @@ public final class RealFixRuntimeBridge {
                                     "checkedA={} checkedB={} regions={} status={} mutation=OFF",
                             pair.a().stableKey(),pair.b().stableKey(),r2Nanos,records.size(),
                             regions.checksA(),regions.checksB(),regions.regions().size(),regions.status());
-                    if(regions.trace().detail().contains("facePatchAddedA="))
+                    if(DETAIL_ENABLED&&regions.trace().detail().contains("facePatchAddedA="))
                         log.info("[PDD-CONTACT-PATCH] pair={}/{} nativeTick={} " +
                                         "originalRecords={} verifiedRegions={} audit={} mutation=OFF",
                                 pair.a().stableKey(),pair.b().stableKey(),stamp.tick,
@@ -646,8 +672,8 @@ public final class RealFixRuntimeBridge {
                 // Diagnostic-only, sampled per pair/rejection cause so resting
                 // contact cannot flood a small server's log every physics tick.
                 var trace=regions.trace();
-                String regionSignature=regions.status()+":"+trace.failure();
-                if(VERF_ENABLED && regions.status()!=SableContactRegions.Status.PROVED
+                String regionSignature=DETAIL_ENABLED?regions.status()+":"+trace.failure():"";
+                if(DETAIL_ENABLED && VERF_ENABLED && regions.status()!=SableContactRegions.Status.PROVED
                         && ( !regionSignature.equals(t.lastVerfRegion)
                         || now-t.lastVerfRegionTick>=VERF_SAMPLE_TICKS)) {
                     log.info("[PDD-VERF-REGION] nativeTick={} serverTick={} pair={}/{} bodyIds={}/{} " +
@@ -677,7 +703,7 @@ public final class RealFixRuntimeBridge {
                 // Sample witness separation independent of whether R2 approved.
                 // Effect-phase projected points may span different substeps;
                 // never turn this diagnostic into a hard contact gate.
-                if(VERF_ENABLED && auditEligible && (t.lastPlotRogWitnessTick<0 || now-t.lastPlotRogWitnessTick>=VERF_SAMPLE_TICKS)) {
+                if(DETAIL_ENABLED && VERF_ENABLED && auditEligible && (t.lastPlotRogWitnessTick<0 || now-t.lastPlotRogWitnessTick>=VERF_SAMPLE_TICKS)) {
                     for(int i=0;i<records.size();i++) {
                         var contact=records.get(i);
                         var wd=SableConsumerTargets.witnessDiagnostic(contact);
@@ -702,14 +728,14 @@ public final class RealFixRuntimeBridge {
                     logNativeTarget(log,stamp,pair,methodA,methodB,regions,r1a!=null,r1b!=null,saturatedPoll);
                 // R4 shadow audit. This only describes plausible loaded world
                 // blocks; WITHOUT in-game ground truth it can never mint credit.
-                if(auditEligible && pair.a().stableKey().startsWith("WORLD:") && a==null) {
+                if(DETAIL_ENABLED && auditEligible && pair.a().stableKey().startsWith("WORLD:") && a==null) {
                     int before=remainingR4Checks[0];
                     R4Probe probe=probeWorldR4(server,stamp.dimension,sweptB,records,remainingR4Checks);
                     if(logCounts[0]++<MAX_LOG_PER_TICK)log.info("[PDD-TARGET] source=R4_SWEPT_PROVISIONAL dimension={} tick={} worldCandidate={} credited=false",stamp.dimension,stamp.tick,probe.status());
                     if(!probe.status().startsWith("PROVISIONAL_ONLY"))
                         logVerfR4(log,t,now,stamp.tick,pair,probe,records.size(),before,remainingR4Checks[0],sweptB);
                 }
-                if(auditEligible && pair.b().stableKey().startsWith("WORLD:") && b==null) {
+                if(DETAIL_ENABLED && auditEligible && pair.b().stableKey().startsWith("WORLD:") && b==null) {
                     int before=remainingR4Checks[0];
                     R4Probe probe=probeWorldR4(server,stamp.dimension,sweptA,records,remainingR4Checks);
                     if(logCounts[0]++<MAX_LOG_PER_TICK)log.info("[PDD-TARGET] source=R4_SWEPT_PROVISIONAL dimension={} tick={} worldCandidate={} credited=false",stamp.dimension,stamp.tick,probe.status());
@@ -747,7 +773,7 @@ public final class RealFixRuntimeBridge {
                     if(!showGroup)repeatedDiagnosticGroupsSuppressed++;
                     if(!fullTrace && showGroup) {
                         if(logCounts[0]++<MAX_LOG_PER_TICK)logObservation(log,group,batch);
-                        if(logCounts[0]++<MAX_LOG_PER_TICK)
+                        if(DETAIL_ENABLED&&logCounts[0]++<MAX_LOG_PER_TICK)
                             logNativeTarget(log,stamp,pair,methodA,methodB,regions,r1a!=null,r1b!=null,saturatedPoll);
                     }
                     // A large force is diagnostic evidence, not permission to
@@ -781,8 +807,8 @@ public final class RealFixRuntimeBridge {
                                 pair.a().stableKey(),pair.b().stableKey(),group.forcePeak(),
                                 result.peakForce(),result.issuedQ());
                     var gapAfter=credit.evidence(pair);
-                    String fsmSignature=result.reason()+":"+gapBefore.phase()+":"+gapAfter.phase();
-                    if(VERF_ENABLED && (result.credited() || gapBefore.phase()!=gapAfter.phase()
+                    String fsmSignature=DETAIL_ENABLED?result.reason()+":"+gapBefore.phase()+":"+gapAfter.phase():"";
+                    if(DETAIL_ENABLED && VERF_ENABLED && (result.credited() || gapBefore.phase()!=gapAfter.phase()
                             || !fsmSignature.equals(t.lastVerfFsm) || now-t.lastVerfFsmTick>=VERF_SAMPLE_TICKS)) {
                         log.info("[PDD-VERF-FSM] nativeTick={} serverTick={} bodyIds={}/{} pair={}/{} " +
                                 "stateBefore={} stateAfter={} stateTickBefore={} stateTickAfter={} " +
@@ -883,7 +909,7 @@ public final class RealFixRuntimeBridge {
                             targetMaterials::material,credit.settings(),damageSettings,
                             nativeNormal.owners(),targetDirections.hasProvenSeed()||fTrace!=null
                                     ?event->{targetDirections.trace(event);if(fTrace!=null)fTrace.accept(event);}:null,
-                            materialSnapshot::resolveFingerprint,contactGraph):null;
+                            materialSnapshot::resolveFingerprint,contactGraph.planContext()):null;
                     long propagationNanos=System.nanoTime()-propagationStart;
                     boolean granted=grant!=null && grant.credited();
                     if(result.credited() && !granted) {
@@ -899,7 +925,7 @@ public final class RealFixRuntimeBridge {
                     }
                     if(granted) {
                         targetDirections.bind(grant,credit.settings(),targetMaterials::material);
-                        log.info("[PDD-DEFORM-EVIDENCE] credit={} {}",grant.id(),targetDirections.summary());
+                        if(DETAIL_ENABLED)log.info("[PDD-DEFORM-EVIDENCE] credit={} {}",grant.id(),targetDirections.summary());
                         t.lastCreditedPeak=currentPeak;
                         t.quietForceFrames=0;
                         t.lastCreditedTick=now;
@@ -930,7 +956,7 @@ public final class RealFixRuntimeBridge {
                                 grant.id(),traceCounts[0],traceCounts[1],traceCounts[3],traceCounts[4],
                                 traceCounts[2],traceCounts[0]+traceCounts[1]+traceCounts[3]+traceCounts[4]-traceCounts[2],
                                 MAX_F_TRACE_PER_TICK,MAX_F_TRACE_PER_CREDIT);
-                        if(VERF_ENABLED)log.info("[PDD-NATIVE-NORMAL] credit={} status={} " +
+                        if(DETAIL_ENABLED&&VERF_ENABLED)log.info("[PDD-NATIVE-NORMAL] credit={} status={} " +
                                         "reason={} records={} meanResultant={} minimumAlignment={} " +
                                         "meanPolicy=UNIT_NORMAL_EQUAL_RECORD_WEIGHT ownerVectors={} nativeCapSampled={} effectPhase=true " +
                                         "exactSolverContact=false deformationAuthorized=false mutation=OFF",
@@ -938,7 +964,7 @@ public final class RealFixRuntimeBridge {
                                 nativeNormal.reason(),nativeNormal.corroboratedRecords(),
                                 nativeNormal.meanResultant(),nativeNormal.minimumAlignment(),nativeNormal.owners(),
                                 saturatedPoll);
-                        if(VERF_ENABLED&&massSafe!=null) {
+                        if(NORMAL_SAMPLES_ENABLED&&VERF_ENABLED&&massSafe!=null) {
                             int shown=0;
                             for(var sample:massSafe.contacts()) {
                                 if(shown++>=MAX_NATIVE_NORMAL_SAMPLES)break;
@@ -1009,7 +1035,7 @@ public final class RealFixRuntimeBridge {
                                         side.audit().mergedNodes(),side.audit().safetyBlockedNodes(),
                                         side.audit().maxDepth(),side.endReason(),side.shares().size());
                                 int shownNodes=0;
-                                for(var node:side.shares())if(shownNodes++<4 && logCounts[0]++<MAX_LOG_PER_TICK)log.info(
+                                if(DETAIL_ENABLED)for(var node:side.shares())if(shownNodes++<4 && logCounts[0]++<MAX_LOG_PER_TICK)log.info(
                                         "[PDD-F-PROPAGATION] credit={} owner={} layer={} local={} F={} " +
                                         "candidateQ={} finalQ={} E={} mutation=OFF",
                                         grant.id(),owner,node.layer(),node.target().localBlock(),
@@ -1053,7 +1079,7 @@ public final class RealFixRuntimeBridge {
                         boolean fVectorValid=nativeNormal.owners().size()==2;
                         if(fVectorValid)directionApproved++;
                         else directionUnknown++;
-                        if(VERF_ENABLED)log.info("[PDD-DIRECTION] credit={} status={} reason={} " +
+                        if(DETAIL_ENABLED&&VERF_ENABLED)log.info("[PDD-DIRECTION] credit={} status={} reason={} " +
                                 "fVectorStatus={} fVectorReason={} gridAxisStatus={} " +
                                 "auditedPreFrames={} witnesses={} exactContact=false " +
                                 "deformationAuthorized=false mutation=OFF",
@@ -1094,8 +1120,8 @@ public final class RealFixRuntimeBridge {
                                 stamp.dimension,stamp.tick,grant.id().episodeGeneration(),grant.source(),grant.status(),
                                 grant.observedRegions(),regions.checksA(),regions.checksB(),regions.rejected(),
                                 grant.issuedQ(),grant.allocatedA(),grant.allocatedB(),grant.unused(),
-                                grant.a().size(),grant.b().size(),TraceBudget.sample(grant.a(),fullTrace?32:4),TraceBudget.sample(grant.b(),fullTrace?32:4),pair.a().generation(),pair.b().generation(),saturatedPoll);
-                    if(showGroup && logCounts[0]++<MAX_LOG_PER_TICK) log.info("[PDD-TARGET] dimension={} tick={} ownerA={} ownerAGeneration={} ownerB={} ownerBGeneration={} targetA={} fingerprintA={} targetB={} fingerprintB={} frameMethodA={} frameMethodB={} shapeAudit={} quality={} reason={} approachByAabb={} armedFromGap={} recentGap={} worldMutation=OFF",
+                                grant.a().size(),grant.b().size(),DETAIL_ENABLED?TraceBudget.sample(grant.a(),fullTrace?32:4):List.of(),DETAIL_ENABLED?TraceBudget.sample(grant.b(),fullTrace?32:4):List.of(),pair.a().generation(),pair.b().generation(),saturatedPoll);
+                    if(DETAIL_ENABLED && showGroup && logCounts[0]++<MAX_LOG_PER_TICK) log.info("[PDD-TARGET] dimension={} tick={} ownerA={} ownerAGeneration={} ownerB={} ownerBGeneration={} targetA={} fingerprintA={} targetB={} fingerprintB={} frameMethodA={} frameMethodB={} shapeAudit={} quality={} reason={} approachByAabb={} armedFromGap={} recentGap={} worldMutation=OFF",
                             stamp.dimension,stamp.tick,pair.a().stableKey(),pair.a().generation(),pair.b().stableKey(),pair.b().generation(),
                             a==null?"UNVERIFIED":a.localBlock(),a==null?"UNVERIFIED":a.fingerprint(),
                             b==null?"UNVERIFIED":b.localBlock(),b==null?"UNVERIFIED":b.fingerprint(),
@@ -1200,8 +1226,13 @@ public final class RealFixRuntimeBridge {
             credit.prune(now);
             regionLedger.prune(now);
             worldClearance.prune(now);
-            generations.entrySet().removeIf(e->!e.getValue().present
-                    && e.getValue().lastSeen>=0 && now-e.getValue().lastSeen>600);
+            // All owner-dependent evidence was invalidated when the owner
+            // disappeared. Only ephemeral runtime tombstones are removed;
+            // the PlotOwnerFence remains authoritative for persisted owners.
+            int beforeGenerationPrune=generations.size();
+            generations.entrySet().removeIf(e->e.getValue().idleExpired(now));
+            log.info("[PDD-CACHE-PERF] generationEntries={} retiredGenerations={}",
+                    generations.size(),beforeGenerationPrune-generations.size());
             // A pre-contact ARMED pair is processed every tick, but has never
             // had a contact. Expiring on lastSeen (-1) discards its verified
             // clearance/AABB evidence while GameImpactCredit stays ARMED.
@@ -1351,7 +1382,8 @@ public final class RealFixRuntimeBridge {
      * AABB proximity. Pre-history is a cross-check when complete, not a substitute. */
     private RuntimeOwners resolveOwners(Map<Stamp,OwnerSnapshot> ownerIndex,Stamp stamp,
                                          NativeEffectGroups.Group group,
-                                         List<NativeCollisionTelemetry.Contact> contacts) {
+                                         List<NativeCollisionTelemetry.Contact> contacts,long now,
+                                         Map<String,LivePlot> livePlots) {
         if(contacts.isEmpty())return null;
         String low=null,high=null;
         int idLo=group.runtimePair().lowId(),idHi=group.runtimePair().highId();
@@ -1373,9 +1405,14 @@ public final class RealFixRuntimeBridge {
         }
         var lowBinding=lifecycleBinding(stamp.dimension(),low);
         var highBinding=lifecycleBinding(stamp.dimension(),high);
-        if(!validLifecycleFrame(lowBinding,idLo,stamp.tick())||!validLifecycleFrame(highBinding,idHi,stamp.tick()))return null;
-        Owner a=new Owner(low,generation(stamp.dimension(),low,idLo,stamp.tick(),lowBinding));
-        Owner b=new Owner(high,generation(stamp.dimension(),high,idHi,stamp.tick(),highBinding));
+        // Lifecycle bindings are stamped with server ticks, not dimension age.
+        // Known runtime stamps have already passed the CURRENT batch gate.
+        boolean stamped=contacts.getFirst().runtimeStamp().known();
+        long observedTick=stamped?contacts.getFirst().captureServerTick():stamp.tick();
+        if(!validLifecycleFrame(lowBinding,idLo,observedTick)||!validLifecycleFrame(highBinding,idHi,observedTick))return null;
+        if(stamped&&(!runtimeMatches(livePlots.get(low),idLo)||!runtimeMatches(livePlots.get(high),idHi)))return null;
+        Owner a=new Owner(low,generation(stamp.dimension(),low,idLo,now,lowBinding));
+        Owner b=new Owner(high,generation(stamp.dimension(),high,idHi,now,highBinding));
         return new RuntimeOwners(Pair.canonical(runId,stamp.dimension(),a,b));
     }
     private static String sourceOwner(String dimension,int id,
@@ -1399,7 +1436,7 @@ public final class RealFixRuntimeBridge {
         // damage from future live source observations is not globally disabled.
         return binding.orphaned()||(binding.active()&&binding.runtimeId()==runtimeId);
     }
-    private long generation(String dimension,String owner,int runtimeId,long observedTick,
+    private long generation(String dimension,String owner,int runtimeId,long now,
                             NeoForgePlotGateway.LifecycleBinding binding) {
         if(owner.startsWith("WORLD:"))return 1;
         String key=dimension+"|"+owner;
@@ -1408,7 +1445,7 @@ public final class RealFixRuntimeBridge {
             if(g.number!=binding.generation()||g.runtimeId!=runtimeId||!g.present
                     ||lifecycleChanged(g,binding))invalidateOwner(owner);
             g.number=binding.generation();g.lifecycleRevision=binding.revision();
-            g.runtimeId=runtimeId;g.present=true;g.lastSeen=observedTick;
+            g.runtimeId=runtimeId;g.setPresent(true,now);
             return g.number;
         }
         if(g.runtimeId!=runtimeId || !g.present){
@@ -1418,8 +1455,7 @@ public final class RealFixRuntimeBridge {
             if(g.present)g.number++;
             invalidateOwner(owner);
         }
-        g.present=true;
-        g.lastSeen=observedTick;
+        g.setPresent(true,now);
         return g.number;
     }
     /** Unload/split invalidates every old target/episode, even if the native
@@ -1427,13 +1463,14 @@ public final class RealFixRuntimeBridge {
     private static boolean lifecycleChanged(Generation g,NeoForgePlotGateway.LifecycleBinding binding){
         return g.lifecycleRevision<0?binding.revision()>0:g.lifecycleRevision!=binding.revision();
     }
-    private void invalidateUnloadedOwners(Map<String,Map<String,Box>> bounds) {
+    private void invalidateUnloadedOwners(Map<String,Map<String,LivePlot>> bounds,long now) {
         for(var entry:generations.entrySet()) {
             String key=entry.getKey();int separator=key.indexOf('|');
             if(separator<0)continue;
             String dim=key.substring(0,separator),owner=key.substring(separator+1);
             Generation g=entry.getValue();
-            boolean live=bounds.getOrDefault(dim,Map.of()).containsKey(owner);
+            LivePlot loadedPlot=bounds.getOrDefault(dim,Map.of()).get(owner);
+            boolean live=loadedPlot!=null;
             var binding=lifecycleBinding(dim,owner);
             if(binding!=null&&!binding.orphaned()){
                 boolean loaded=live&&binding.active();
@@ -1441,20 +1478,26 @@ public final class RealFixRuntimeBridge {
                         ||(g.present&&!loaded)||(loaded&&g.runtimeId!=binding.runtimeId()))invalidateOwner(owner);
                 g.number=binding.generation();g.lifecycleRevision=binding.revision();
                 if(loaded)g.runtimeId=binding.runtimeId();
-                g.present=loaded;
+                g.setPresent(loaded,now);
                 continue;
             }
             if(binding!=null&&lifecycleChanged(g,binding)){
                 g.lifecycleRevision=binding.revision();g.number++;
                 invalidateOwner(owner);
-                g.present=live;continue;
+                if(live)g.runtimeId=loadedPlot.runtimeId();
+                g.setPresent(live,now);continue;
             }
             if(live) {
-                g.present=true;
+                if(g.runtimeId!=loadedPlot.runtimeId()) {
+                    if(g.present)g.number++;
+                    invalidateOwner(owner);
+                    g.runtimeId=loadedPlot.runtimeId();
+                }
+                g.setPresent(true,now);
                 continue;
             }
             if(g.present){
-                g.present=false;
+                g.setPresent(false,now);
                 g.number++;
                 invalidateOwner(owner);
             }
@@ -1469,18 +1512,22 @@ public final class RealFixRuntimeBridge {
         credit.invalidateOwner(owner);
         regionLedger.invalidateOwner(owner);
     }
-    private static Map<String,Map<String,Box>> readServerBounds(MinecraftServer server) {
-        Map<String,Map<String,Box>> result=new HashMap<>();
+    private record LivePlot(Box bounds,int runtimeId) { }
+    private static boolean runtimeMatches(LivePlot plot,int runtimeId) {
+        return plot==null||plot.runtimeId()==runtimeId;
+    }
+    private static Map<String,Map<String,LivePlot>> readServerBounds(MinecraftServer server) {
+        Map<String,Map<String,LivePlot>> result=new HashMap<>();
         for(ServerLevel level:server.getAllLevels()) {
             var container=SubLevelContainer.getContainer(level);
             if(container==null)continue;
-            Map<String,Box> boxes=new HashMap<>();
+            Map<String,LivePlot> boxes=new HashMap<>();
             for(ServerSubLevel sub:container.getAllSubLevels()){
                 if(sub==null||sub.isRemoved()||sub.getUniqueId()==null)continue;
                 try {
                     var b=sub.boundingBox();
-                    if(b!=null) boxes.put("PLOT:"+sub.getUniqueId(),new Box(
-                            b.minX(),b.minY(),b.minZ(),b.maxX(),b.maxY(),b.maxZ()));
+                    if(b!=null) boxes.put("PLOT:"+sub.getUniqueId(),new LivePlot(new Box(
+                            b.minX(),b.minY(),b.minZ(),b.maxX(),b.maxY(),b.maxZ()),sub.getRuntimeId()));
                 } catch(RuntimeException invalid) { /* fail closed */ }
             }
             result.put(level.dimension().location().toString(),boxes);
@@ -1489,7 +1536,7 @@ public final class RealFixRuntimeBridge {
     }
     /** Fair, budgeted precontact clearance. Never loads a chunk or guesses a collider. */
     private void prearmIndependentPairs(MinecraftServer server,long now,
-                                       Map<String,Map<String,Box>> bounds,Set<Pair> contacted,
+                                       Map<String,Map<String,LivePlot>> bounds,Set<Pair> contacted,
                                        int[] remaining,int[] confirmationRemaining,Logger log) {
         int attempted=0;
         for(var dimEntry:bounds.entrySet()) {
@@ -1499,23 +1546,27 @@ public final class RealFixRuntimeBridge {
             // Rotate work order so a busy/large ship cannot starve later plots.
             if(!entries.isEmpty()) java.util.Collections.rotate(entries,(int)(now%entries.size()));
             for(int i=0;i<entries.size() && attempted<128;i++) {
-                var first=entries.get(i);Box firstBox=first.getValue();
+                var first=entries.get(i);Box firstBox=first.getValue().bounds();
                 if(firstBox==null)continue;
                 for(int j=i+1;j<entries.size() && attempted<128;j++) {
-                    var second=entries.get(j);Box secondBox=second.getValue();
+                    var second=entries.get(j);Box secondBox=second.getValue().bounds();
                     if(secondBox==null)continue;
                     attempted++;
                     if(firstBox.separatedFrom(secondBox)) {
+                        long genA=prearmGeneration(dim,first.getKey(),first.getValue(),now);
+                        long genB=prearmGeneration(dim,second.getKey(),second.getValue(),now);
+                        if(genA<=0||genB<=0)continue;
                         Pair pair=Pair.canonical(runId,dim,
-                                new Owner(first.getKey(),currentGeneration(dim,first.getKey())),
-                                new Owner(second.getKey(),currentGeneration(dim,second.getKey())));
+                                new Owner(first.getKey(),genA),new Owner(second.getKey(),genB));
                         seedSeparation(pair,now,contacted,first.getKey(),firstBox,secondBox,log);
                     }
                 }
                 if(attempted>=128)break;
                 attempted++;
+                long gen=prearmGeneration(dim,first.getKey(),first.getValue(),now);
+                if(gen<=0)continue;
                 Pair worldPair=Pair.canonical(runId,dim,new Owner("WORLD:"+dim,1),
-                        new Owner(first.getKey(),currentGeneration(dim,first.getKey())));
+                        new Owner(first.getKey(),gen));
                 if(!contacted.contains(worldPair) && credit.phase(worldPair)!=Phase.ARMED &&
                         (tracked.get(worldPair)==null || tracked.get(worldPair).lastProcessed!=now)) {
                     var clearance=inspectWorldClearance(server,worldPair,firstBox,now,remaining,confirmationRemaining);
@@ -1526,6 +1577,14 @@ public final class RealFixRuntimeBridge {
                 }
             }
         }
+    }
+    /** Register precontact-only owners too. Otherwise their cached clearance and
+     * ARMED episodes have no generation entry for unload invalidation. */
+    private long prearmGeneration(String dim,String owner,LivePlot plot,long now) {
+        if(plot.runtimeId()<0)return -1;
+        var binding=lifecycleBinding(dim,owner);
+        if(binding!=null&&!binding.orphaned()&&(!binding.active()||binding.runtimeId()!=plot.runtimeId()))return -1;
+        return generation(dim,owner,plot.runtimeId(),now,binding);
     }
     private long currentGeneration(String dimension,String owner) {
         var binding=lifecycleBinding(dimension,owner);
@@ -1610,7 +1669,7 @@ public final class RealFixRuntimeBridge {
     }
     private static void logClearance(Logger log,Tracked tracked,long now,Pair pair,
                                       WorldClearanceVerifier.Result result) {
-        if(tracked==null || result==null || !VERF_ENABLED)return;
+        if(tracked==null || result==null || !VERF_ENABLED || !DETAIL_ENABLED)return;
         String signature=result.status()+":"+result.reason();
         if(!signature.equals(tracked.lastClearanceStatus)
                 || now-tracked.lastClearanceStatusTick>=VERF_SAMPLE_TICKS) {
@@ -1699,8 +1758,11 @@ public final class RealFixRuntimeBridge {
     }
 
     private static Box box(MinecraftServer server,String owner,Target target,String dimension,
-                           Map<String,Map<String,Box>> plotBounds,Map<String,Box> worldBlocks) {
-        if(owner.startsWith("PLOT:"))return plotBounds.getOrDefault(dimension,Map.of()).get(owner);
+                           Map<String,Map<String,LivePlot>> plotBounds,Map<String,Box> worldBlocks) {
+        if(owner.startsWith("PLOT:")) {
+            LivePlot plot=plotBounds.getOrDefault(dimension,Map.of()).get(owner);
+            return plot==null?null:plot.bounds();
+        }
         if(target==null)return null;
         String cacheKey=owner+"|"+target.localBlock()+"|"+target.fingerprint();
         if(worldBlocks.containsKey(cacheKey))return worldBlocks.get(cacheKey);

@@ -12,6 +12,8 @@ import org.joml.Vector3d;
 import java.util.ArrayList;
 import java.util.Map;
 import java.util.List;
+import java.util.Collections;
+import java.util.WeakHashMap;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.LongAdder;
@@ -23,7 +25,9 @@ import static com.physicaldestroydeform.collision.FrameMath.*;
 /** Sable 2.0.6 bridge. No mutable world access or engine mutation from callbacks. */
 public final class SableFrameCapture {
     private static final Map<SubLevelPhysicsSystem,Snapshot> ACTIVE=new ConcurrentHashMap<>();
-    private static final Map<SubLevelPhysicsSystem,Snapshot> LAST_POST=new ConcurrentHashMap<>();
+    // POST snapshots have no production consumer. Never keep a snapshot (and its
+    // server/level stamp) reachable from a process-global map after the callback.
+    private static final Map<SubLevelPhysicsSystem,Boolean> LAST_POST=Collections.synchronizedMap(new WeakHashMap<>());
     // All pre-solver substeps for each server tick. Native post-tick effect
     // records do not identify their originating substep; do not guess one.
     private static final int PRE_HISTORY_LIMIT = 4096;
@@ -89,7 +93,10 @@ public final class SableFrameCapture {
         if(previous==null) POST_WITHOUT_PRE.increment();
         long epoch=previous==null?EPOCH.incrementAndGet():previous.epoch();
         try {
-            LAST_POST.put(system,capture(system,epoch,Phase.POST_SOLVER));
+            // PRE is authoritative. Keep full POST audit available on demand,
+            // but do not walk every Plot twice per substep in normal mode.
+            if(com.physicaldestroydeform.diagnostics.DiagnosticMode.debug())capture(system,epoch,Phase.POST_SOLVER);
+            LAST_POST.put(system,Boolean.TRUE);
             POST.increment();
         } catch (RuntimeException unsafe) {
             LAST_POST.remove(system);
@@ -120,7 +127,8 @@ public final class SableFrameCapture {
                 " rejected="+REJECTED.sum()+" noEpoch="+NO_EPOCH.sum()+
                 " bodyErrors="+BODY_ERRORS.sum()+" stepErrors="+STEP_ERRORS.sum()+
                 " postWithoutPre="+POST_WITHOUT_PRE.sum()+" activeFrames="+ACTIVE.size()+
-                " lastPostFrames="+LAST_POST.size()+" preHistoryDropped="+HISTORY_DROPPED.sum();
+                " lastPostFrames="+LAST_POST.size()+" preHistoryDropped="+HISTORY_DROPPED.sum()+
+                " postAudit="+(com.physicaldestroydeform.diagnostics.DiagnosticMode.debug()?"FULL":"COUNTER_ONLY");
     }
     /** Dropped snapshots make owner mapping incomplete; zero credit rather than guessing. */
     public static long preHistoryDropped() { return HISTORY_DROPPED.sum(); }
@@ -130,6 +138,14 @@ public final class SableFrameCapture {
         Snapshot frame;
         while((frame=PRE_HISTORY.poll())!=null)frames.add(frame);
         return frames;
+    }
+    /** Called only after this server tick's physics; failed/interrupted PRE entries
+     * must never retain an old world or authorize a future callback. */
+    public static void releaseEndedFrames(Object server,long tick){
+        ACTIVE.entrySet().removeIf(e->endedFrame(e.getValue().runtimeStamp(),server,tick));
+    }
+    static boolean endedFrame(ContactBatchStamp stamp,Object server,long tick){
+        return !stamp.known()||stamp.serverIdentity()!=server||stamp.captureServerTick()<=tick;
     }
     public static void clear() {ACTIVE.clear();LAST_POST.clear();PRE_HISTORY.clear();}
 }

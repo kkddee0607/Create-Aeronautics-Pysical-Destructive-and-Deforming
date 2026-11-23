@@ -25,6 +25,7 @@ import static com.physicaldestroydeform.stress.StressPropagation.*;
 public final class StressReservationJournal {
     public static final int MAX_RECORDS=8192,MAX_RECORD_BYTES=16*1024*1024;
     public static final long MAX_STORE_BYTES=64L*1024*1024;
+    public static final long ARCHIVE_CACHE_BYTES=8L*1024*1024;
     private static final int MAX_RAW_BYTES=64*1024*1024,COMPRESSED_FRAME=-5,COMPRESS_THRESHOLD=256*1024;
     private static final long MAX_LOGICAL_STORE_BYTES=128L*1024*1024;
     private static final int MAX_SNAPSHOT_CELLS=7*(MAX_ROOTS+4096);
@@ -110,12 +111,16 @@ public final class StressReservationJournal {
     private final Map<String,Entry> entries=new LinkedHashMap<>();
     private final Map<String,Long> sizes=new HashMap<>();
     private final Map<String,Integer> logicalSizes=new HashMap<>();
+    // Active ownership only. Completed ownership is a cold exact disk lookup.
     private final Map<String,String> sourceOwners=new HashMap<>();
     private long bytes,logicalBytes;
     private boolean faulted;
     public StressReservationJournal(Path directory)throws IOException {
+        this(directory,ARCHIVE_CACHE_BYTES);
+    }
+    StressReservationJournal(Path directory,long archiveCacheBytes)throws IOException {
         this.directory=directory.toAbsolutePath();Files.createDirectories(this.directory);
-        archive=new StressClosedArchive(this.directory,sourceOwners);
+        archive=new StressClosedArchive(this.directory,archiveCacheBytes);
         try(var paths=Files.list(this.directory)){
             // Bound collection BEFORE sorting; an oversized directory must not
             // allocate an unbounded list before the record cap can reject it.
@@ -138,7 +143,7 @@ public final class StressReservationJournal {
                 if(entries.putIfAbsent(id,entry)!=null)
                     throw new IOException("stress filename/id conflict");
                 for(var origin:entry.reservation.origins)
-                    if(sourceOwners.putIfAbsent(origin.applyId(),id)!=null)throw new IOException("source origin reserved twice");
+                    if(archive.owner(origin.applyId())!=null||sourceOwners.putIfAbsent(origin.applyId(),id)!=null)throw new IOException("source origin reserved twice");
                 sizes.put(id,size);bytes+=size;logicalSizes.put(id,logical);logicalBytes+=logical;
             }
         }
@@ -151,12 +156,12 @@ public final class StressReservationJournal {
             if(!old.reservation.equals(reservation))throw new IllegalArgumentException("Credit reused with different reservation");
             return false;
         }
-        if(archive.contains(reservation.creditId)){
-            if(!archive.matchesReservation(reservation,false))throw new IllegalArgumentException("Credit reused with different reservation");
+        if(isArchived(reservation.creditId)){
+            if(!matchesArchivedReservation(reservation,false))throw new IllegalArgumentException("Credit reused with different reservation");
             return false;
         }
         for(var origin:reservation.origins)
-            if(sourceOwners.containsKey(origin.applyId()))throw new IllegalArgumentException("source origin already reserved");
+            if(sourceOwner(origin.applyId())!=null)throw new IllegalArgumentException("source origin already reserved");
         if(entries.size()>=MAX_RECORDS)throw new CapacityException("stress active record capacity");
         persist(new Entry(reservation,Phase.RESERVED,List.of(),null,"RESERVED"));return true;
     }
@@ -249,26 +254,43 @@ public final class StressReservationJournal {
     /** Caller must have verified every source and derived durable receipt. The compact
      * file is authoritative before the old full file is removed. No Q is reissued. */
     public synchronized void compactHandoff(String id)throws IOException {
-        ensureHealthy();if(archive.contains(id))return;
+        ensureHealthy();if(isArchived(id))return;
         Entry old=require(id);
         if(old.phase==Phase.RESERVED||!old.ledger.finished()||old.ledger.pendingQ()!=0)
             throw new IllegalStateException("cannot compact unfinished stress");
         try{
+            for(var origin:old.reservation.origins)if(!id.equals(sourceOwners.get(origin.applyId())))
+                throw new IOException("stress archive origin ownership conflict");
             archive.store(old);
             Files.delete(directory.resolve(filename(id)));forceDirectory(directory);
             entries.remove(id);bytes-=sizes.remove(id);logicalBytes-=logicalSizes.remove(id);
+            for(var origin:old.reservation.origins)sourceOwners.remove(origin.applyId(),id);
         }catch(IOException failure){faulted=true;throw failure;}
     }
-    public synchronized boolean isArchived(String id){return archive.contains(id);}
-    public synchronized boolean matchesArchivedRetry(Reservation r)throws IOException{return archive.matchesReservation(r,true);}
-    public synchronized Ledger archivedLedger(String id){return archive.ledger(id);}
-    public synchronized String sourceOwner(String originId){return sourceOwners.get(originId);}
+    public synchronized boolean isArchived(String id)throws IOException {
+        try{return archive.contains(id);}catch(IOException failure){faulted=true;throw failure;}
+    }
+    private boolean matchesArchivedReservation(Reservation r,boolean retry)throws IOException {
+        try{return archive.matchesReservation(r,retry);}catch(IOException failure){faulted=true;throw failure;}
+    }
+    public synchronized boolean matchesArchivedRetry(Reservation r)throws IOException{return matchesArchivedReservation(r,true);}
+    public synchronized Ledger archivedLedger(String id)throws IOException {
+        try{return archive.ledger(id);}catch(IOException failure){faulted=true;throw failure;}
+    }
+    public synchronized String sourceOwner(String originId)throws IOException {
+        String active=sourceOwners.get(originId);if(active!=null)return active;
+        try{return archive.owner(originId);}catch(IOException failure){faulted=true;throw failure;}
+    }
     synchronized boolean isArchivedHandoff(String applyId,Set<String> activeOutputs){
-        String owner=sourceOwners.get(applyId);
+        if(sourceOwners.containsKey(applyId))return false;
         // Archived source ownership is explicit. Published legacy output IDs
         // belong exclusively to the derived namespace and may outlive the plan.
-        return owner!=null?archive.contains(owner):isDerivedApplyId(applyId)&&!activeOutputs.contains(applyId);
+        try{return archive.owner(applyId)!=null||isDerivedApplyId(applyId)&&!activeOutputs.contains(applyId);}
+        catch(IOException failure){faulted=true;throw new UncheckedIOException(failure);}
     }
+    synchronized int activeSourceCount(){return sourceOwners.size();}
+    synchronized long cachedArchiveBytes(){return archive.cachedBytes();}
+    public synchronized String cacheStatus(){return "archiveCacheLimit="+ARCHIVE_CACHE_BYTES+" activeSourceOwners="+sourceOwners.size()+" "+archive.status();}
     public synchronized int activeCount(){return entries.size();}
     public synchronized int archivedCount(){return archive.size();}
     public synchronized long activeBytes(){return bytes;}

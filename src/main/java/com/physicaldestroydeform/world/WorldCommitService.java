@@ -300,6 +300,7 @@ public final class WorldCommitService {
     boolean isQuarantined(SparseStateKey key){return quarantined.contains(new Cell(key))||movement.fences.quarantined(key)
             ||lineageActive.contains(new Cell(key))||lineageQuarantine.containsKey(new Cell(key));}
     public WorldPersistentJournal lineageJournal(){return journal;}
+    public String storagePerformance(){return journal.storageStatus();}
     public boolean lineageFaulted(){return fault||core.ioFault();}
     boolean lineageRecoveryConflict(SparseStateKey key){
         var cell=new Cell(key);

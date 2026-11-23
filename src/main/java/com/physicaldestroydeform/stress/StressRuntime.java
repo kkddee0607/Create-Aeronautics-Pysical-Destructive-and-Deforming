@@ -11,6 +11,7 @@ import com.physicaldestroydeform.world.WorldCommitService;
 import com.physicaldestroydeform.plot.PlotCommitService;
 import com.physicaldestroydeform.plot.PlotKeyCodec;
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.security.MessageDigest;
@@ -151,8 +152,11 @@ public final class StressRuntime {
         // from the original deadline for IDs with no full active record.
         java.util.function.Predicate<WorldCommitCore.Intent> archived=intent->journal.isArchivedHandoff(intent.applyId(),activeOutputs);
         long ttl=Policy.defaults().ttlTicks();
-        int archivedPending=(world==null?0:world.cancelRecoveredArchivedStress(startupGameTick,ttl,archived))
-                +(plot==null?0:plot.cancelRecoveredArchivedStress(startupGameTick,ttl,archived));
+        int archivedPending;
+        try{
+            archivedPending=(world==null?0:world.cancelRecoveredArchivedStress(startupGameTick,ttl,archived))
+                    +(plot==null?0:plot.cancelRecoveredArchivedStress(startupGameTick,ttl,archived));
+        }catch(UncheckedIOException failure){throw failure.getCause();}
         if(world!=null)world.attachStress(this);
         if(plot!=null)plot.attachStress(this);
         if(rollbackJobsRemaining>0||archivedPending>0)
@@ -182,7 +186,7 @@ public final class StressRuntime {
     /** Called once per projected owner-side Grant, BEFORE any original direct intent is queued. */
     public boolean reserve(List<WorldCommitCore.Intent> origins,MaterialRegistry.Snapshot materials,DamageModel.Settings settings)throws IOException {
         requireThread();if(origins.isEmpty())return true;
-        if(faulted)throw new IOException("stress runtime faulted");
+        if(faulted||journal.faulted())throw new IOException("stress runtime faulted");
         var ordered=new ArrayList<>(origins);ordered.sort(Comparator.comparing(WorldCommitCore.Intent::applyId));
         String id=originId(ordered);
         Entry prior=journal.get(id);
@@ -230,17 +234,25 @@ public final class StressRuntime {
     public boolean holds(WorldCommitCore.Intent intent){
         String id=originJobs.get(intent.applyId());if(id==null)return false;
         Entry entry=journal.get(id);
-        return entry!=null&&entry.phase()!=Phase.CLOSED&&(faulted||entry.holdsOrigins());
+        return entry!=null&&entry.phase()!=Phase.CLOSED&&(faulted||journal.faulted()||entry.holdsOrigins());
     }
     public boolean holdsForClockRollback(WorldCommitCore.Intent intent){
         if(rollbackJobsRemaining==0&&!liveClockRollback)return false;
         String id=intent.applyId();
-        if(liveClockRollback&&(isDerivedApplyId(id)||journal.sourceOwner(id)!=null))return true;
+        if(liveClockRollback){
+            if(journal.faulted())return true;
+            try{if(isDerivedApplyId(id)||journal.sourceOwner(id)!=null)return true;}
+            catch(IOException failure){
+                // An unavailable cold ownership record is never evidence that
+                // the original intent was unrelated to rolled-back stress.
+                faulted=true;log.error("[PDD-STRESS-LEDGER] phase=HALT reason=ARCHIVE_LOOKUP_FAILURE QReissue=false",failure);return true;
+            }
+        }
         if(rollbackOutputs.contains(id))return true;
         Job job=jobs.get(originJobs.get(id));
         return job!=null&&job.clockRolledBack;
     }
-    public boolean faulted(){return faulted;}
+    public boolean faulted(){return faulted||journal.faulted();}
     private void charge(){if(used>=workCap)throw BUDGET_END;used++;}
     private void requireThread(){if(!server.isSameThread())throw new IllegalStateException("stress requires server thread");}
     private void watch(Job job,Cell cell){
@@ -315,7 +327,7 @@ public final class StressRuntime {
     }
     public void tick(){
         requireThread();long tick=server.overworld().getGameTime();
-        if(faulted||tick==lastTick)return;
+        if(faulted||journal.faulted()||tick==lastTick)return;
         if(tick<lastTick){faulted=true;liveClockRollback=true;log.error("[PDD-STRESS-LEDGER] phase=HALT reason=GAME_CLOCK_ROLLBACK");return;}
         lastTick=tick;used=0;shown=0;archivesThisTick=0;originsThisTick=0;materialLookup.beginTick();
         try{
@@ -337,8 +349,8 @@ public final class StressRuntime {
                 }
                 if(jobs.containsKey(id))order.addLast(id);
             }
-            if(server.getTickCount()%100==0)log.info("[PDD-STRESS-LEDGER] phase=SUMMARY jobs={} work={} cap={} records={} fault=false seals={} handoffs={} unchangedSnapshotWritesAvoided={} unchangedSealWritesAvoided={} traceSuppressed={} activeRecords={} archivedRecords={} activeBytes={} decodedBytes={} worldOriginJobs={} plotOriginJobs={} pressureRetries={} archiveConflicts={} rollbackJobsReconciled={}",
-                    jobs.size(),used,workCap,journal.size(),seals,handoffs,snapshotWritesAvoided,sealWritesAvoided,traceSuppressed,journal.activeCount(),journal.archivedCount(),journal.activeBytes(),journal.activeLogicalBytes(),worldOriginOrder.size(),plotOriginOrder.size(),capacityRetries,archiveConflicts,rollbackJobsReconciled);
+            if(server.getTickCount()%100==0)log.info("[PDD-STRESS-LEDGER] phase=SUMMARY jobs={} work={} cap={} records={} fault=false seals={} handoffs={} unchangedSnapshotWritesAvoided={} unchangedSealWritesAvoided={} traceSuppressed={} activeRecords={} archivedRecords={} activeBytes={} decodedBytes={} worldOriginJobs={} plotOriginJobs={} pressureRetries={} archiveConflicts={} rollbackJobsReconciled={} {}",
+                    jobs.size(),used,workCap,journal.size(),seals,handoffs,snapshotWritesAvoided,sealWritesAvoided,traceSuppressed,journal.activeCount(),journal.archivedCount(),journal.activeBytes(),journal.activeLogicalBytes(),worldOriginOrder.size(),plotOriginOrder.size(),capacityRetries,archiveConflicts,rollbackJobsReconciled,journal.cacheStatus());
         }catch(IOException|RuntimeException failure){
             faulted=true;log.error("[PDD-STRESS-LEDGER] phase=HALT reason=SAVE_OR_PLAN_FAILURE QReissue=false",failure);
         }

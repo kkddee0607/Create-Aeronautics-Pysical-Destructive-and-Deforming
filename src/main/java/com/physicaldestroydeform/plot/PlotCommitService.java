@@ -219,6 +219,7 @@ public final class PlotCommitService {
     }
     public boolean faulted(){return fault||core.ioFault();}
     public WorldPersistentJournal lineageJournal(){return journal;}
+    public String storagePerformance(){return journal.storageStatus();}
     public void watchRecoveredLineage(SparseStateKey key){
         lineageActive.add(new Coordinate(key));registerState(key);
     }
@@ -598,6 +599,7 @@ public final class PlotCommitService {
                     journal.checkpointPending(),journal.size(),journal.receiptCount(),core.queued());
             }
         }catch(IOException failed){
+            fault=true;
             log.error("[PDD-PLOT] phase=STOP status=CHECKPOINT_FAILED wal=RETAINED",failed);
         }
         active.clear();activeOwnersByUuid.clear();quarantined.clear();knownSplitParents.clear();unresolved.clear();orphanCleanup.clear();orphanCleanupSet.clear();

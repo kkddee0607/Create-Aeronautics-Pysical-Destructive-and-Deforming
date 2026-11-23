@@ -164,6 +164,8 @@ public final class MaterialRegistry {
         Snapshot next=new Snapshot(contentGeneration(result,states,ALGORITHM_REVISION+"|"+CopycatMaterial.POLICY),result,states,ALGORITHM_REVISION,
                 items,source.hashes());
         current=next;
+        // A successful publication invalidates derived caches; failed reloads retain the prior snapshot.
+        TargetMaterials.invalidateCaches();
         logger.info("[PDD-MATERIAL] rebuild generation={} policy={} blockTypes={} items={} recipesInferred={} " +
                 "explicitProfiles={} stateProfiles={} jarBlockRows={} jsonOverrides={} externalBlockRows={} " +
                 "invalidExternalRows={} duplicateExternalIds={} unregisteredExternalIds={} miningFallback={} " +

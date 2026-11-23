@@ -13,6 +13,7 @@ import net.minecraft.world.phys.shapes.VoxelShape;
 import net.neoforged.fml.ModList;
 import java.lang.reflect.Method;
 import java.util.*;
+import java.util.concurrent.atomic.AtomicLong;
 
 /** Optional, read-only adapter for the hash-verified Copycats+ 3.0.11 API.
  * No direct Copycats type linkage, no NBT serialization, no material setters. */
@@ -34,6 +35,37 @@ public final class CopycatMaterial {
     }
     /** Diagnostic values are not part of identity or the material registry. */
     record Capture(Resolved resolved,String reason,String slots,double k){}
+    // The key contains only immutable value inputs, never a BE, position, level or registry snapshot.
+    // Every caller must first gather current shape/slot/material evidence; only pure mixing and hashing are reused.
+    static final int CALCULATION_CAP=2048, MAX_SIGNATURE_CHARS=8192;
+    private static final CalculationCache CALCULATIONS=new CalculationCache(CALCULATION_CAP);
+    private static final AtomicLong LIVE_READS=new AtomicLong();
+    private record CalculationKey(long generation,String slots,List<Part> parts,boolean safe){}
+    record CalculationStats(int entries,long hits,long misses,long evictions,long invalidations){}
+    static final class CalculationCache {
+        private final int cap;
+        private final LinkedHashMap<CalculationKey,Capture> entries=new LinkedHashMap<>(16,.75f,true);
+        private long hits,misses,evictions,invalidations;
+        CalculationCache(int cap){if(cap<1)throw new IllegalArgumentException("cache capacity");this.cap=cap;}
+        synchronized Capture resolve(long generation,String slots,List<Part> parts,boolean safe){
+            var key=new CalculationKey(generation,slots,List.copyOf(parts),safe);
+            boolean cacheable=slots.length()<=MAX_SIGNATURE_CHARS&&parts.size()<=32;
+            Capture existing=cacheable?entries.get(key):null;
+            if(existing!=null){hits++;return existing;}
+            misses++;
+            // Identical legacy mix, fingerprint and floating-point summation order on every cache miss.
+            var capture=new Capture(new Resolved(mix(key.parts()),hash(slots),safe),"OK",slots,key.parts().stream().mapToDouble(Part::weight).sum());
+            if(cacheable){entries.put(key,capture);if(entries.size()>cap){entries.pollFirstEntry();evictions++;}}
+            return capture;
+        }
+        synchronized CalculationStats stats(){return new CalculationStats(entries.size(),hits,misses,evictions,invalidations);}
+        synchronized void clear(){entries.clear();invalidations++;}
+        synchronized void reset(){entries.clear();hits=misses=evictions=invalidations=0;}
+    }
+    static CalculationStats calculationStats(){return CALCULATIONS.stats();}
+    static long liveReads(){return LIVE_READS.get();}
+    static void invalidateCalculations(){CALCULATIONS.clear();}
+    static void resetCalculations(){CALCULATIONS.reset();LIVE_READS.set(0);}
     public static MaterialProperties mix(List<Part> parts){
         double h=0,d=0,e=0,t=0,k=0;
         for(var part:parts){var m=part.material();double w=part.weight();k+=w;h+=w*m.hardness();d+=w*m.ductilityPercent();e+=w*m.elasticityPercent();t+=w*m.threshold();}
@@ -85,6 +117,7 @@ public final class CopycatMaterial {
         if(!isCopycat(fp)){
             var m=snapshot.resolveFingerprint(fp);return m==null?rejected("UNRESOLVED"):new Capture(new Resolved(m,"",false),"OK","",1);
         }
+        LIVE_READS.incrementAndGet();
         try{
             if(!supportedVersion())return rejected("UNSUPPORTED_VERSION");
             String id=BuiltInRegistries.BLOCK.getKey(state.getBlock()).getPath();
@@ -118,8 +151,8 @@ public final class CopycatMaterial {
                 };
                 if(!append(snapshot,parts,revision,"single",m,weight,a))return rejected("INVALID_SINGLE_MATERIAL_OR_VOLUME");
             }
-            var mixed=mix(parts);boolean safe=safeDecorative(id,be.getClass().getName());
-            return new Capture(new Resolved(mixed,hash(revision.toString()),safe),"OK",revision.toString(),parts.stream().mapToDouble(Part::weight).sum());
+            boolean safe=safeDecorative(id,be.getClass().getName());
+            return CALCULATIONS.resolve(snapshot.generation(),revision.toString(),parts,safe);
         }catch(ReflectiveOperationException|RuntimeException|LinkageError invalid){return rejected("ADAPTER_"+invalid.getClass().getSimpleName());}
     }
     private static double layerWeight(BlockState state){

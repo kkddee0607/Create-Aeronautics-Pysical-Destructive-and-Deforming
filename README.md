@@ -1,10 +1,10 @@
-# PDD 0.6.1 spreadFix — Physical Destructive and Deforming
+# PDD 0.6.1 optiFix — Physical Destructive and Deforming
 
 Minecraft 1.21.1 · Java 21 · NeoForge 21.1.228 · Sable 2.0.6 · Create 6.0.10 · Aeronautics 1.3.2. 선택 호환: Copycats+ 3.0.11.
 
 [통합설계서 1.0.9](.github/workflows/PDD-1.0.9-Integrated-Design-Specification.md) · [0.6.0 릴리스 검증](docs/verification/PDD-0.6.0-Release-Verification.md)
 
-[0.6.1 spreadFix 검증 및 인게임 절차](docs/verification/PDD-0.6.1-spreadFix.md). 기준 SHA `a6d3123091016081bde150adafc6cd7c7b04ec2c`. 기존 월드를 백업한 뒤 `physical-destroy-deform-0.6.1-spreadFix.jar` 하나만 사용한다. 기존 데이터 디렉터리는 유지한다. [이전 0.6.1 fix 검증](docs/verification/PDD-0.6.1-Fix.md).
+[0.6.1 optiFix 검증 및 인게임 절차](docs/verification/PDD-0.6.1-optiFix.md). 기준 SHA `96a4ccf7c56025d211ac4626e73f76392dcb9b39`. 기존 월드를 백업한 뒤 `physical-destroy-deform-0.6.1-optiFix.jar` 하나만 사용한다. 기존 데이터 디렉터리는 유지한다. [spreadFix 검증](docs/verification/PDD-0.6.1-spreadFix.md) · [이전 0.6.1 fix 검증](docs/verification/PDD-0.6.1-Fix.md).
 
 [0.6.0 BuildFix: CI 실패 원인 및 회귀 검증](docs/verification/PDD-0.6.0-BuildFix.md) — 파괴 한도 및 좌표별 공기 상태를 정확히 검증하도록 테스트를 수정. 게임 런타임·물성 수치·버전은 변경하지 않음.
 

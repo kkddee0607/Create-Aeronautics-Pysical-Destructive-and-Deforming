@@ -38,6 +38,8 @@ public final class VerifiedContactGraph implements ForcePropagation.CrossOwnerCo
     private static final Vec ZERO=new Vec(0,0,0);
     private static final Pose WORLD_POSE=new Pose(ZERO,ZERO,new Vec(1,1,1),0,0,0,1);
     private static final int MAX_FRAME_EDGES=NativeEffectGroups.MAX_RECORDS;
+    private static final int MAX_CACHED_CELLS=4096;
+    private static final int MAX_CACHED_ENDPOINTS=2*MAX_FRAME_EDGES;
     private static final int MAX_PRE_FRAMES=256;
     private static final int MAX_CUBE_FRAME_CHECKS=8192;
     private static final Set<String> EMPTY_SHAPE_RESULTS=Set.of("CACHED_SHAPE_POINT_MISS",
@@ -48,7 +50,7 @@ public final class VerifiedContactGraph implements ForcePropagation.CrossOwnerCo
     record Geometry(Pose aPose,Pose bPose,Vec localA,Vec localB,Vec worldA,Vec worldB,
                     Vec outwardA,Vec outwardB,Vec worldOutwardA,long firstEpoch,long lastEpoch) {}
     record Transport(ForcePropagation.Orientation orientation,double projection) {}
-    private record Endpoint(Owner owner,Target target,BlockPos allocated,Vec point,
+    record Endpoint(Owner owner,Target target,BlockPos allocated,Vec point,
                             MovePlan.SignedAxes inward,Pose pose,CopycatMaterial.Resolved material,
                             Vec nativeOutward,boolean cube,boolean exactFace) {
         EndIdentity identity(){return new EndIdentity(target,inward.x(),inward.y(),inward.z(),material);}
@@ -63,6 +65,23 @@ public final class VerifiedContactGraph implements ForcePropagation.CrossOwnerCo
                           List<ForcePropagation.CrossEdge> edges,boolean unresolved) {}
     private record PosePair(Pose a,Pose b) {}
     private record NativeFrames(Geometry geometry,List<PosePair> poses,boolean exactPoints) {}
+    /** A bounded read-only-plan memo. Full cache means execute the original
+     * audit without remembering its result, never deny a valid edge for space. */
+    static final class PlanMemo<K> {
+        private final Map<K,Boolean> checks=new HashMap<>();
+        private final int limit;
+        PlanMemo(int limit){if(limit<0)throw new IllegalArgumentException("negative memo limit");this.limit=limit;}
+        boolean contains(K key){return checks.containsKey(key);}
+        boolean read(K key,java.util.function.BooleanSupplier audit){
+            Boolean prior=checks.get(key);
+            if(prior!=null)return prior;
+            boolean result=audit.getAsBoolean();
+            if(checks.size()<limit)checks.put(key,result);
+            return result;
+        }
+        void clear(){checks.clear();}
+        int size(){return checks.size();}
+    }
     record EndIdentity(Target target,int nx,int ny,int nz,CopycatMaterial.Resolved material) {}
     private record HistoryKey(Pair pair,EndIdentity a,EndIdentity b) {
         static HistoryKey of(Pair pair,EndIdentity a,EndIdentity b){
@@ -130,8 +149,7 @@ public final class VerifiedContactGraph implements ForcePropagation.CrossOwnerCo
     private final ContactBatchStamp.Status nativeBatchStatus;
     private final ToLongFunction<String> currentGeneration;
     private final MaterialRegistry.Snapshot snapshot;
-    private final TargetMaterials materials;
-    private final OwnerResolver.NativeAuditBatch shapeBatch;
+    private final AuditReads observedReads;
     private final History history;
     private final Map<String,Integer> stats=new TreeMap<>();
     private final Map<Cell,List<Proof>> adjacency=new HashMap<>();
@@ -141,7 +159,6 @@ public final class VerifiedContactGraph implements ForcePropagation.CrossOwnerCo
     private int admitted;
     private int cubeFrameChecks;
     private boolean saturated;
-    private Lookup nextLookup;
 
     public VerifiedContactGraph(MinecraftServer server,String dimension,long tick,
                                 ToLongFunction<String> currentGeneration) {
@@ -164,8 +181,7 @@ public final class VerifiedContactGraph implements ForcePropagation.CrossOwnerCo
         this.nativeBatchStatus=Objects.requireNonNull(nativeBatchStatus);
         this.currentGeneration=Objects.requireNonNull(currentGeneration);
         this.snapshot=MaterialRegistry.snapshot();
-        this.materials=new TargetMaterials(server,dimension,snapshot);
-        this.shapeBatch=new OwnerResolver.NativeAuditBatch(server,dimension);
+        this.observedReads=new AuditReads();
         this.history=Objects.requireNonNull(history);
         this.history.bind(server);
     }
@@ -208,8 +224,8 @@ public final class VerifiedContactGraph implements ForcePropagation.CrossOwnerCo
                 var g=frames.geometry();
                 Owner oa=owner(pair,record.idA(),record.frameA());
                 Owner ob=owner(pair,record.idB(),record.frameB());
-                var as=endpoints(oa,g.localA(),g.outwardA(),g.aPose(),g.firstEpoch(),shapeBatch,materials);
-                var bs=endpoints(ob,g.localB(),g.outwardB(),g.bPose(),g.firstEpoch(),shapeBatch,materials);
+                var as=observedReads.read(oa,g.localA(),g.outwardA(),g.aPose(),g.firstEpoch());
+                var bs=observedReads.read(ob,g.localB(),g.outwardB(),g.bPose(),g.firstEpoch());
                 if(as.isEmpty()||bs.isEmpty()){count("ENDPOINT_OR_MATERIAL");continue;}
                 // Do not choose an arbitrary first endpoint when a complete
                 // comparison of all candidates cannot fit this work budget.
@@ -338,33 +354,65 @@ public final class VerifiedContactGraph implements ForcePropagation.CrossOwnerCo
     }
 
     @Override public List<ForcePropagation.CrossEdge> edges(Target from,ForcePropagation.Orientation inward) {
-        Lookup value=nextLookup;
-        nextLookup=null;
-        if(value!=null&&!value.edges().isEmpty()&&runtimeStatus()!=ContactBatchStamp.Status.CURRENT)return List.of();
-        if(value==null||!Objects.equals(from,value.from())||!Objects.equals(inward,value.inward()))
-            value=lookup(from,inward);
-        return value.edges();
+        return lookup(from,inward,null).edges();
     }
 
     @Override public boolean unresolved(Target from,ForcePropagation.Orientation inward) {
-        nextLookup=lookup(from,inward);
-        return nextLookup.unresolved();
+        return lookup(from,inward,null).unresolved();
     }
 
-    private Lookup lookup(Target from,ForcePropagation.Orientation inward) {
+    /** A single synchronous read-only credit plan, used by the native bridge
+     * before its first Commit.offer. Never retain this view for the next plan:
+     * earlier Commit.offer or mod callbacks may have changed the world already,
+     * even within one tick. The initial native witness is not a live read. */
+    public ForcePropagation.CrossOwnerContext planContext() {
+        return new ForcePropagation.CrossOwnerContext(){
+            private final LiveAudit audit=new LiveAudit();
+            public Map<String,Owner> owners(){return VerifiedContactGraph.this.owners();}
+            public List<ForcePropagation.CrossEdge> edges(Target from,ForcePropagation.Orientation inward){
+                return lookup(from,inward,audit).edges();
+            }
+            public boolean unresolved(Target from,ForcePropagation.Orientation inward){
+                return lookup(from,inward,audit).unresolved();
+            }
+        };
+    }
+
+    /** Reset a snapshot only BEFORE a complete endpoint witness; the face seam
+     * checks need all <=8 candidate cells at once. Saturation is not rejection. */
+    private final class AuditReads {
+        private OwnerResolver.NativeAuditBatch shapes;
+        private TargetMaterials materials;
+        void reset(){shapes=null;materials=null;}
+        List<Endpoint> read(Owner owner,Vec point,Vec outward,Pose pose,long epoch){
+            if(shapes==null||shapes.cachedCells()>MAX_CACHED_CELLS-SableConsumerTargets.MAX_CANDIDATES){
+                shapes=new OwnerResolver.NativeAuditBatch(server,dimension);
+                materials=new TargetMaterials(server,dimension,snapshot);
+            }
+            return endpoints(owner,point,outward,pose,epoch,shapes,materials);
+        }
+    }
+    private final class LiveAudit {
+        final AuditReads reads=new AuditReads();
+        final PlanMemo<Endpoint> memo=new PlanMemo<>(MAX_CACHED_ENDPOINTS);
+        void reset(){memo.clear();reads.reset();}
+    }
+
+    private Lookup lookup(Target from,ForcePropagation.Orientation inward,LiveAudit scope) {
         if(from==null||inward==null||!inward.verified()||saturated)return new Lookup(from,inward,List.of(),false);
         Cell fromCell=Cell.of(from);
         var candidates=adjacency.get(fromCell);
         // Most F nodes are internal, so no extra world/BE reads for those.
         if(candidates==null||candidates.isEmpty())return new Lookup(from,inward,List.of(),false);
         var status=runtimeStatus();
-        if(status!=ContactBatchStamp.Status.CURRENT){count("STALE_LOOKUP_"+status);return new Lookup(from,inward,List.of(),true);}
-        if(MaterialRegistry.generation()!=snapshot.generation())
+        if(status!=ContactBatchStamp.Status.CURRENT){if(scope!=null)scope.reset();count("STALE_LOOKUP_"+status);return new Lookup(from,inward,List.of(),true);}
+        if(MaterialRegistry.generation()!=snapshot.generation()){
+            if(scope!=null)scope.reset();
             return new Lookup(from,inward,List.of(),true);
+        }
         // Live re-audit before any cross-owner use; a graph captured before
         // another queued plan must never release F to changed/removed material.
-        var liveShape=new OwnerResolver.NativeAuditBatch(server,dimension);
-        var liveMaterials=new TargetMaterials(server,dimension,snapshot);
+        var audit=scope==null?new LiveAudit():scope;
         var out=new ArrayList<ForcePropagation.CrossEdge>();
         boolean unresolved=false;
         for(var proof:candidates) {
@@ -373,7 +421,7 @@ public final class VerifiedContactGraph implements ForcePropagation.CrossOwnerCo
             Vec outward=forward?proof.geometry().worldOutwardA():proof.geometry().worldOutwardA().times(-1);
             var direction=transport(inward,a.pose(),b.pose(),outward);
             if(direction==null)continue; // not compression
-            if(!a.target().equals(from)||!stillLive(a,liveShape,liveMaterials)||!stillLive(b,liveShape,liveMaterials)){
+            if(!a.target().equals(from)||!stillLive(a,audit)||!stillLive(b,audit)){
                 count("STALE_LIVE_ENDPOINT");unresolved=true;continue;
             }
             out.add(new ForcePropagation.CrossEdge(b.target(),direction.orientation(),direction.projection()));
@@ -395,14 +443,19 @@ public final class VerifiedContactGraph implements ForcePropagation.CrossOwnerCo
         return ContactBatchStamp.UNKNOWN;
     }
 
-    private boolean stillLive(Endpoint endpoint,OwnerResolver.NativeAuditBatch shapes,TargetMaterials current) {
-        if(!fresh(endpoint.owner()))return false;
+    private boolean stillLive(Endpoint endpoint,LiveAudit audit) {
         // No use of an old-world transform even if the local voxel still exists.
         // Re-read the authoritative pose of this loaded Plot after the snapshot.
-        if(!livePose(endpoint))return false;
-        var live=endpoints(endpoint.owner(),endpoint.point(),endpoint.nativeOutward(),endpoint.pose(),
-                endpoint.inward().transformEpoch(),shapes,current);
-        return live.contains(endpoint);
+        if(!fresh(endpoint.owner())||!livePose(endpoint)){
+            audit.reset();return false;
+        }
+        // Direction transport is tested for each path above; never memoize it
+        // by block position. The complete endpoint (full pose, native point,
+        // signed face, owner/generation, fingerprint and material revision)
+        // is the key. Only consecutive reads inside this plan can use it.
+        count(audit.memo.contains(endpoint)?"PLAN_ENDPOINT_HIT":"PLAN_ENDPOINT_MISS");
+        return audit.memo.read(endpoint,()->audit.reads.read(endpoint.owner(),endpoint.point(),
+                endpoint.nativeOutward(),endpoint.pose(),endpoint.inward().transformEpoch()).contains(endpoint));
     }
     private boolean livePose(Endpoint endpoint){
         String owner=endpoint.owner().stableKey();

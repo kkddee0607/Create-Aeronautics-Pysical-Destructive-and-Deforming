@@ -17,12 +17,18 @@ final class StressClosedArchive {
     private static final int MAGIC=0x50534331,VERSION=1;
     private record Closed(String id,String reservationHash,String retryHash,String entryHash,
                           List<String> origins,Ledger ledger,String reason) {}
+    private record Cached(Closed value,long weight) {}
     private final Path root;
-    private final Map<String,Closed> records=new HashMap<>();
-    private final Map<String,String> owners;
+    private final StressOriginIndex origins;
+    private final long cacheLimit;
+    private final LinkedHashMap<String,Cached> cache=new LinkedHashMap<>(16,.75f,true);
+    private long cachedBytes,hits,misses;
+    private int records;
 
-    StressClosedArchive(Path directory,Map<String,String> owners)throws IOException {
-        this.owners=owners;root=directory.resolve("closed-v1");
+    StressClosedArchive(Path directory,long bytesLimit)throws IOException {
+        if(bytesLimit<0)throw new IllegalArgumentException("negative stress archive cache limit");
+        cacheLimit=bytesLimit/2;origins=new StressOriginIndex(directory,bytesLimit-cacheLimit);
+        root=directory.resolve("closed-v1");
         if(!Files.exists(root))Files.createDirectory(root);
         forceDirectory(directory);
         try(var paths=Files.walk(root)){
@@ -31,22 +37,46 @@ final class StressClosedArchive {
                 Path p=it.next();long size=Files.size(p);
                 if(size<16||size>MAX_RECORD_BYTES)throw new IOException("invalid stress archive size");
                 Closed record=decode(Files.readAllBytes(p));
-                if(!p.equals(path(record.id()))||records.putIfAbsent(record.id(),record)!=null)
+                if(!p.equals(path(record.id())))
                     throw new IOException("stress archive filename/id conflict");
-                for(String origin:record.origins())if(owners.putIfAbsent(origin,record.id())!=null)
-                    throw new IOException("archived origin reserved twice");
+                records=Math.incrementExact(records);
+                origins.append(record.origins(),record.id());
             }
         }
     }
-    boolean contains(String id){return records.containsKey(id);}
-    int size(){return records.size();}
-    Ledger ledger(String id){Closed c=records.get(id);return c==null?null:c.ledger();}
+    private Closed lookup(String id)throws IOException {
+        Cached cached=cache.get(id);if(cached!=null){hits++;return cached.value;}
+        misses++;Path p=path(id);long size;
+        try{size=Files.size(p);}catch(NoSuchFileException missing){
+            if(origins.containsCredit(id))throw new IOException("known stress archive receipt missing",missing);
+            return null;
+        }
+        if(size<16||size>MAX_RECORD_BYTES)throw new IOException("invalid stress archive size");
+        Closed c=decode(Files.readAllBytes(p));
+        if(!c.id.equals(id))throw new IOException("stress archive identity mismatch");
+        remember(c);return c;
+    }
+    private void remember(Closed c){
+        // Conservative accounting of retained strings, list elements, ledger
+        // and index entry; this is a working-set estimate, not JVM heap size.
+        long weight=1024L+2L*(c.id.length()+c.reservationHash.length()+c.retryHash.length()+c.entryHash.length()+c.reason.length());
+        for(String origin:c.origins)weight+=128L+2L*origin.length();
+        if(weight>cacheLimit)return;
+        while(!cache.isEmpty()&&cachedBytes+weight>cacheLimit){var it=cache.values().iterator();cachedBytes-=it.next().weight;it.remove();}
+        Cached prior=cache.put(c.id,new Cached(c,weight));if(prior!=null)cachedBytes-=prior.weight;cachedBytes+=weight;
+    }
+    boolean contains(String id)throws IOException{return lookup(id)!=null;}
+    int size(){return records;}
+    Ledger ledger(String id)throws IOException {Closed c=lookup(id);return c==null?null:c.ledger();}
+    String owner(String origin)throws IOException{return origins.owner(origin);}
+    long cachedBytes(){return cachedBytes+origins.cachedBytes();}
+    String status(){return "closedCacheEntries="+cache.size()+" closedCacheBytes="+cachedBytes+" closedHits="+hits+" closedMisses="+misses+" "+origins.status();}
     boolean matchesReservation(Reservation r,boolean retry)throws IOException {
-        Closed c=records.get(r.creditId());
+        Closed c=lookup(r.creditId());
         return c!=null&&(retry?c.retryHash():c.reservationHash()).equals(reservationHash(r,retry));
     }
     boolean matchesEntry(Entry e)throws IOException {
-        Closed c=records.get(e.reservation().creditId());
+        Closed c=lookup(e.reservation().creditId());
         return c!=null&&c.entryHash().equals(hash(encodeCanonical(e)));
     }
     void confirmDurable(String id)throws IOException {
@@ -64,7 +94,6 @@ final class StressClosedArchive {
     void store(Entry e)throws IOException {
         Reservation r=e.reservation();
         var origins=r.origins().stream().map(o->o.applyId()).toList();
-        for(String origin:origins)if(!r.creditId().equals(owners.get(origin)))throw new IOException("stress archive origin ownership conflict");
         Closed c=new Closed(r.creditId(),reservationHash(r,false),reservationHash(r,true),hash(encodeCanonical(e)),origins,e.ledger(),e.reason());
         Path target=path(c.id()),part=target.getParent();
         if(!Files.exists(part)){Files.createDirectory(part);forceDirectory(root);}
@@ -75,7 +104,9 @@ final class StressClosedArchive {
                 ByteBuffer b=ByteBuffer.wrap(data);while(b.hasRemaining())ch.write(b);ch.force(true);
             }
             Files.move(temp,target,StandardCopyOption.ATOMIC_MOVE);forceDirectory(part);
-            records.put(c.id(),c);
+            // The sidecar cannot become a source of authority: if updating it
+            // fails, the caller faults and preserves the full active file.
+            this.origins.append(c.origins(),c.id());records=Math.incrementExact(records);remember(c);
         }finally{Files.deleteIfExists(temp);}
     }
     private static byte[] encodeClosed(Closed c)throws IOException {

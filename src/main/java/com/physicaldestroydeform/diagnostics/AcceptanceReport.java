@@ -4,11 +4,17 @@ import org.slf4j.Logger;
 
 /** One structured summary per interval; no log line per collision in normal operation. */
 public final class AcceptanceReport {
-    private final CollisionAcceptanceMetrics counts = new CollisionAcceptanceMetrics();
+    private CollisionAcceptanceMetrics counts;
     private long previousTotal;
     private long previousDrop;
     private long previousErrors;
-    public AcceptanceReport() { RawObservationDispatcher.setConsumer(counts); }
+    public AcceptanceReport() { start(); }
+    public void start() {
+        counts=new CollisionAcceptanceMetrics();
+        previousTotal=SableContactQueue.total();previousDrop=SableContactQueue.dropped();
+        previousErrors=SableContactQueue.captureErrors();
+        RawObservationDispatcher.setConsumer(counts);
+    }
     public CollisionAcceptanceMetrics counts() { return counts; }
     public void log(Logger logger) {
         var s = counts.snapshot();
