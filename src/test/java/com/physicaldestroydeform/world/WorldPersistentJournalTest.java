@@ -34,6 +34,13 @@ class WorldPersistentJournalTest {
         while(journal.checkpointPending()&&++passes<2048);
         assertFalse(journal.checkpointPending());
     }
+    @Test void freshJournalReportsNoLegacyMigration()throws Exception{
+        var a=area();
+        try(var journal=a.open()){
+            assertFalse(journal.migrated());
+            assertEquals(journal.stats().migrated(),journal.migrated());
+        }
+    }
     @Test void copycatShapeRevisionRetainsDamageRemainderAndHistoryAcrossRestart()throws Exception{
         var a=area();var j=a.open();
         var before=new SparseStateKey(OVERWORLD,"WORLD",OVERWORLD,1,0,64,0,"copycats:copycat_slab|single");

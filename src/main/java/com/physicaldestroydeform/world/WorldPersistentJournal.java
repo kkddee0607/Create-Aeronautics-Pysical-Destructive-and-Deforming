@@ -154,6 +154,8 @@ public final class WorldPersistentJournal implements WorldJournal, AutoCloseable
     }
 
     public synchronized String ioPerformance(){return io.summary();}
+    /** True only when this journal instance migrated legacy persisted data on open. */
+    public synchronized boolean migrated(){return migrated;}
     /** Recovered crash-time incomplete WAL bytes, excluding complete CRC-invalid frames. */
     public synchronized long repairedTailBytes(){return repairedTailBytes;}
     public synchronized boolean receiptLookupFaulted(){return receiptReadFault!=null;}
