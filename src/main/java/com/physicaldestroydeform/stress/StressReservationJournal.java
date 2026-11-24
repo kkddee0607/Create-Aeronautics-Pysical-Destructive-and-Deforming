@@ -32,6 +32,24 @@ public final class StressReservationJournal {
     private static final int MAGIC=0x50535452,VERSION=4;
     private static final int CLOSURE_HEADROOM=2048;
     private static final String CLOCK_ROLLBACK_UNUSED="STRESS_CLOCK_ROLLBACK_UNUSED";
+    private enum IoPhase { ENCODE, FILE_WRITE, FILE_FORCE, ATOMIC_MOVE, DIRECTORY_FORCE, ARCHIVE }
+    private final long[] ioCount=new long[IoPhase.values().length],ioMaxNanos=new long[IoPhase.values().length];
+    private final long[] ioTotalNanos=new long[IoPhase.values().length];
+    private void recordIo(IoPhase phase,long nanos){
+        int i=phase.ordinal();if(nanos<0)return;
+        ioCount[i]++;ioTotalNanos[i]+=nanos;ioMaxNanos[i]=Math.max(ioMaxNanos[i],nanos);
+    }
+    public synchronized String ioPerformance(){
+        var line=new StringBuilder();
+        for(var phase:IoPhase.values()){
+            int i=phase.ordinal();if(ioCount[i]==0)continue;
+            if(!line.isEmpty())line.append(' ');
+            line.append(phase).append("={count:").append(ioCount[i])
+                    .append(",maxNanos:").append(ioMaxNanos[i])
+                    .append(",totalNanos:").append(ioTotalNanos[i]).append('}');
+        }
+        return line.toString();
+    }
     public static final class CapacityException extends IOException {
         CapacityException(String reason){super(reason);}
     }
@@ -258,6 +276,7 @@ public final class StressReservationJournal {
         Entry old=require(id);
         if(old.phase==Phase.RESERVED||!old.ledger.finished()||old.ledger.pendingQ()!=0)
             throw new IllegalStateException("cannot compact unfinished stress");
+        long archiveStarted=System.nanoTime();
         try{
             for(var origin:old.reservation.origins)if(!id.equals(sourceOwners.get(origin.applyId())))
                 throw new IOException("stress archive origin ownership conflict");
@@ -266,6 +285,7 @@ public final class StressReservationJournal {
             entries.remove(id);bytes-=sizes.remove(id);logicalBytes-=logicalSizes.remove(id);
             for(var origin:old.reservation.origins)sourceOwners.remove(origin.applyId(),id);
         }catch(IOException failure){faulted=true;throw failure;}
+        finally{recordIo(IoPhase.ARCHIVE,System.nanoTime()-archiveStarted);}
     }
     public synchronized boolean isArchived(String id)throws IOException {
         try{return archive.contains(id);}catch(IOException failure){faulted=true;throw failure;}
@@ -312,7 +332,11 @@ public final class StressReservationJournal {
         }
     }
     private void persist(Entry entry,boolean closing)throws IOException {
-        byte[] payload=encode(entry);String id=entry.reservation.creditId;
+        long encodeStarted=System.nanoTime();
+        byte[] payload;
+        try{payload=encode(entry);}
+        finally{recordIo(IoPhase.ENCODE,System.nanoTime()-encodeStarted);}
+        String id=entry.reservation.creditId;
         int logical=logicalSize(payload);
         long nextBytes=bytes-sizes.getOrDefault(id,0L)+payload.length;
         long nextLogical=logicalBytes-logicalSizes.getOrDefault(id,0)+logical;
@@ -333,10 +357,17 @@ public final class StressReservationJournal {
         try {
             temp=Files.createTempFile(directory,"pending-",".tmp");
             try(FileChannel channel=FileChannel.open(temp,StandardOpenOption.WRITE)){
-                ByteBuffer buffer=ByteBuffer.wrap(payload);while(buffer.hasRemaining())channel.write(buffer);channel.force(true);
+                long writeStarted=System.nanoTime();
+                try{ByteBuffer buffer=ByteBuffer.wrap(payload);while(buffer.hasRemaining())channel.write(buffer);}
+                finally{recordIo(IoPhase.FILE_WRITE,System.nanoTime()-writeStarted);}
+                long forceStarted=System.nanoTime();
+                try{channel.force(true);}finally{recordIo(IoPhase.FILE_FORCE,System.nanoTime()-forceStarted);}
             }
-            Files.move(temp,directory.resolve(filename(id)),StandardCopyOption.ATOMIC_MOVE,StandardCopyOption.REPLACE_EXISTING);
-            forceDirectory(directory);
+            long moveStarted=System.nanoTime();
+            try{Files.move(temp,directory.resolve(filename(id)),StandardCopyOption.ATOMIC_MOVE,StandardCopyOption.REPLACE_EXISTING);}
+            finally{recordIo(IoPhase.ATOMIC_MOVE,System.nanoTime()-moveStarted);}
+            long dirStarted=System.nanoTime();
+            try{forceDirectory(directory);}finally{recordIo(IoPhase.DIRECTORY_FORCE,System.nanoTime()-dirStarted);}
             boolean fresh=!entries.containsKey(id);
             entries.put(id,entry);sizes.put(id,(long)payload.length);bytes=nextBytes;
             logicalSizes.put(id,logical);logicalBytes=nextLogical;

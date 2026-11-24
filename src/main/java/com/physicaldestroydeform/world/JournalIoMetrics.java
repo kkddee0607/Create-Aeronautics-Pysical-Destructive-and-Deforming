@@ -5,13 +5,15 @@ import java.util.Arrays;
 /** Bounded timings only. Neither admission, WAL ordering, nor recovery depends on these samples. */
 final class JournalIoMetrics {
     enum Phase { WAL_APPEND, WAL_FORCE, WAL_CREATE, RECEIPT_ENCODE, RECEIPT_INDEX,
-        COLD_RECEIPT_READ, DURABLE_WRITE, FILE_FORCE, DIRECTORY_FORCE, PUBLISH, CHECKPOINT }
+        COLD_RECEIPT_READ, SNAPSHOT_BUILD, DURABLE_WRITE, FILE_WRITE, FILE_FORCE,
+        MANIFEST_ENCODE, MANIFEST_FILE_WRITE, MANIFEST_FILE_FORCE, MANIFEST_MOVE,
+        MANIFEST_DIRECTORY_FORCE, DIRECTORY_FORCE, PUBLISH, CHECKPOINT, CLEANUP_SCAN }
     private static final int WINDOW=128;
     private final long[][] durations=new long[Phase.values().length][WINDOW];
     private final int[] size=new int[Phase.values().length], next=new int[Phase.values().length];
     private final long[] counts=new long[Phase.values().length], max=new long[Phase.values().length];
 
-    void record(Phase phase,long nanos) {
+    synchronized void record(Phase phase,long nanos) {
         if(nanos<0)return;
         int i=phase.ordinal();
         durations[i][next[i]]=nanos;next[i]=(next[i]+1)%WINDOW;
@@ -19,7 +21,8 @@ final class JournalIoMetrics {
         counts[i]++;
         if(nanos>max[i])max[i]=nanos;
     }
-    String summary() {
+    void recordBackgroundCleanup(long nanos){record(Phase.CLEANUP_SCAN,nanos);}
+    synchronized String summary() {
         var result=new StringBuilder();
         for(var phase:Phase.values()) {
             int i=phase.ordinal();

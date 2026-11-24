@@ -35,7 +35,7 @@ import org.slf4j.LoggerFactory;
 @Mod(PhysicalDestroyDeform.MOD_ID)
 public final class PhysicalDestroyDeform {
     public static final String MOD_ID = "physical_destroy_deform";
-    public static final String BUILD_VERSION = "0.6.1-optiFix2";
+    public static final String BUILD_VERSION = "0.6.1-optiFix3";
     private static final Logger LOGGER = LoggerFactory.getLogger(PhysicalDestroyDeform.class);
     private final AcceptanceReport acceptanceReport = new AcceptanceReport();
     private final RealFixRuntimeBridge bridge = new RealFixRuntimeBridge();
@@ -109,7 +109,7 @@ public final class PhysicalDestroyDeform {
             WorldBlockMutationTracker.attachPlot(null);
             LOGGER.error("[PDD-STRESS-LEDGER] phase=START status=HALTED reason=JOURNAL_INIT_FAILED mutations=OFF",unsafeStressJournal);
         }
-        LOGGER.info("[PDD-0.6.1] phase=START revision=0.6.1-optiFix2 CONTACT_ELASTIC_ALPHA04_PERSISTENT_CONTACT bridge=READ_ONLY nativeScalar=GAME_FORCE_PROXY " +
+        LOGGER.info("[PDD-0.6.1] phase=START revision=0.6.1-optiFix3 CONTACT_ELASTIC_ALPHA04_PERSISTENT_CONTACT bridge=READ_ONLY nativeScalar=GAME_FORCE_PROXY " +
                 "newNativeABI=NOT_REQUIRED customNullCallback=DISABLED faceRecovery=MULTI_SURFACE_PLUS_SPARSE_SHAPE_HALO worldMutation={} plotMutation={} ",
                 worldCommit==null?"DISABLED":"WORLD_STATIC_ONLY",plotCommit==null?"DISABLED":"SABLE_PLOT");
     }
@@ -173,7 +173,8 @@ public final class PhysicalDestroyDeform {
                     if(worldCommit!=null){LOGGER.info("[PDD-STORAGE-PERF] owner=WORLD {}",worldCommit.storagePerformance());
                         LOGGER.info("[PDD-JOURNAL-IO] owner=WORLD {}",worldCommit.ioPerformance());}
                     if(plotCommit!=null){LOGGER.info("[PDD-STORAGE-PERF] owner=PLOT {}",plotCommit.storagePerformance());
-                        LOGGER.info("[PDD-JOURNAL-IO] owner=PLOT {}",plotCommit.ioPerformance());}}
+                        LOGGER.info("[PDD-JOURNAL-IO] owner=PLOT {}",plotCommit.ioPerformance());}
+                    if(stress!=null)LOGGER.info("[PDD-STRESS-IO] {}",stress.ioPerformance());}
                 catch(RuntimeException|LinkageError unavailable){LOGGER.warn("[PDD-PERFORMANCE] status=DIAGNOSTICS_UNAVAILABLE",unavailable);}
                 finally{runtimeDiagnostics.recordPhase(Phase.DIAGNOSTICS,System.nanoTime()-diagnosticStart);}
             }

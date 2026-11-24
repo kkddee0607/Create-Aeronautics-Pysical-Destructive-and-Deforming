@@ -128,6 +128,7 @@ public final class PlotCommitService {
                         "massCollider=SABLE_NORMAL_BLOCK_CHANGE_HOOK_NOT_INDEPENDENTLY_VERIFIED",
                 cap,journal.size(),journal.receiptCount(),unresolved.size(),quarantined.size(),
                 WorldPersistentJournal.SCHEMA);
+        journal.enableWalChannelReuse();
         log.info("[PDD-PLOT-SAFE] phase=POLICY source=SABLE_2_0_6_HEATMAP_READ_ONLY tickWitness=REQUIRED_CURRENT_SERVER_TICK " +
                 "breakSpacingTicks={} uncertainSpacingMin=3 pendingAction=DEFER_BEFORE_PREPARED " +
                 "unknownState=FAIL_CLOSED splitAndNativeSave=NOT_INDEPENDENTLY_VERIFIED",
@@ -220,7 +221,7 @@ public final class PlotCommitService {
     public boolean faulted(){return fault||core.ioFault();}
     public WorldPersistentJournal lineageJournal(){return journal;}
     public String storagePerformance(){return journal.storageStatus();}
-    public String ioPerformance(){return journal.ioPerformance();}
+    public String ioPerformance(){return journal.ioPerformance()+" cleanup={"+journal.obsoleteCleanupStatus()+"}";}
     public void watchRecoveredLineage(SparseStateKey key){
         lineageActive.add(new Coordinate(key));registerState(key);
     }
@@ -588,8 +589,8 @@ public final class PlotCommitService {
         return StressCommitHandoff.offer(core,entry,plan,intent,server.overworld().getGameTime(),index);
     }
     public void stop(){
-        gateway.stopLifecycle();
         try{
+            gateway.stopLifecycle();
             if(fault||core.ioFault())log.warn("[PDD-PLOT] phase=STOP checkpointSkipped=IO_FAULT wal=RETAINED");
             else{
             journal.stagePendingOrder(core.pendingSnapshot());
@@ -602,6 +603,8 @@ public final class PlotCommitService {
         }catch(IOException failed){
             fault=true;
             log.error("[PDD-PLOT] phase=STOP status=CHECKPOINT_FAILED wal=RETAINED",failed);
+        }finally{
+            try{journal.close();}catch(IOException failed){fault=true;log.error("[PDD-PLOT] phase=STOP_CHANNEL status=FAILED wal=RETAINED",failed);}
         }
         active.clear();activeOwnersByUuid.clear();quarantined.clear();knownSplitParents.clear();unresolved.clear();orphanCleanup.clear();orphanCleanupSet.clear();
         verifiedLineage.clear();lineageActive.clear();lineageQuarantine.clear();

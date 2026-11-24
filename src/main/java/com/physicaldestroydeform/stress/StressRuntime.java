@@ -31,6 +31,21 @@ public final class StressRuntime {
     private static final int MAX_WORK=512,QUANTUM=16,LARGE_QUANTUM=64,MAX_ORIGINS_PER_TICK=64,MAX_LOGS=Math.max(0,Math.min(128,
             Integer.getInteger("pdd.stress.trace.maxPerTick",8)));
     private static final int MAX_ARCHIVES_PER_TICK=4;
+    private enum WorkPhase { PROBE, VALIDATE, SEAL, HANDOFF, ARCHIVE }
+    private final long[] workCounts=new long[WorkPhase.values().length],workMax=new long[WorkPhase.values().length];
+    private void workTime(WorkPhase phase,long started){
+        int i=phase.ordinal();long elapsed=Math.max(0,System.nanoTime()-started);
+        workCounts[i]++;workMax[i]=Math.max(workMax[i],elapsed);
+    }
+    private String workPerformance(){
+        var result=new StringBuilder();
+        for(var phase:WorkPhase.values()){
+            int i=phase.ordinal();if(workCounts[i]==0)continue;
+            result.append(' ').append(phase).append("={count:").append(workCounts[i])
+                    .append(",maxNanos:").append(workMax[i]).append('}');
+        }
+        return result.toString();
+    }
     private static final boolean TRACE=Boolean.parseBoolean(System.getProperty("pdd.stress.trace","true"));
     private static final class BudgetEnd extends RuntimeException {
         @Override public synchronized Throwable fillInStackTrace(){return this;}
@@ -253,6 +268,7 @@ public final class StressRuntime {
         return job!=null&&job.clockRolledBack;
     }
     public boolean faulted(){return faulted||journal.faulted();}
+    public String ioPerformance(){return journal.ioPerformance()+workPerformance();}
     private void charge(){if(used>=workCap)throw BUDGET_END;used++;}
     private void requireThread(){if(!server.isSameThread())throw new IllegalStateException("stress requires server thread");}
     private void watch(Job job,Cell cell){
@@ -399,12 +415,14 @@ public final class StressRuntime {
             }
             if(job.validation==null){
                 int quantum=r.seeds().size()>256?LARGE_QUANTUM:QUANTUM;
+                long probeStarted=System.nanoTime();
                 try{
                     for(int i=0;i<quantum&&used<workCap;i++){
                         job.probes.advance(job.session,cell->frozen(job,cell),tick,this::charge);
                         if(job.session.finished()||job.session.waiting())break;
                     }
                 }catch(BudgetEnd exhausted){/* persist the frozen partial operation too */}
+                finally{workTime(WorkPhase.PROBE,probeStarted);}
                 job.session.verify();
                 // Before the last root, no derived plan can exist. Persist its
                 // frozen observations, but do not repeatedly CAS the entire
@@ -439,7 +457,8 @@ public final class StressRuntime {
                     if(journal.get(job.id)==entry)snapshotWritesAvoided++;
                 }
             }
-            while(job.validationIndex<job.validation.size()&&used<workCap){
+            long validateStarted=System.nanoTime();
+            try{while(job.validationIndex<job.validation.size()&&used<workCap){
                 var probe=job.validation.get(job.validationIndex);
                 if(job.published.contains(entry,probe.getKey())){
                     // Already-paid nodes may have been removed by their own commit.
@@ -462,13 +481,15 @@ public final class StressRuntime {
                 if(actual.state()==State.UNAVAILABLE)return;
                 if(!actual.equals(probe.getValue())){job.invalidated=true;return;}
                 job.validationIndex++;
-            }
+            }}finally{workTime(WorkPhase.VALIDATE,validateStarted);}
             if(job.validationIndex<job.validation.size())return;
             if(job.invalidated)return;
             // Recovery recomputes from saved graph; do not publish an incomplete old prefix.
             if(job.session.plannedNodes()>=entry.plans().size()){
                 charge();var beforeSeal=journal.get(job.id);
-                journal.sealProgress(job.id,job.session,job.snapshot);
+                long sealStarted=System.nanoTime();
+                try{journal.sealProgress(job.id,job.session,job.snapshot);}
+                finally{workTime(WorkPhase.SEAL,sealStarted);}
                 var sealed=journal.get(job.id);job.finished=job.session.finished();
                 if(sealed==beforeSeal)sealWritesAvoided++;
                 else{
@@ -487,8 +508,11 @@ public final class StressRuntime {
         while(job.deliveryIndex<entry.plans().size()&&handoffs++<QUANTUM&&used<workCap){
             charge();var plan=entry.plans().get(job.deliveryIndex);
             var intent=derivedIntent(job,plan);var key=intent.key();
-            boolean accepted=PlotKeyCodec.isPlotStorage(key)?plot!=null&&plot.offerStress(entry,plan,intent,job.deliveryIndex)
-                    :world!=null&&world.offerStress(entry,plan,intent,job.deliveryIndex);
+            long handoffStarted=System.nanoTime();
+            boolean accepted;
+            try{accepted=PlotKeyCodec.isPlotStorage(key)?plot!=null&&plot.offerStress(entry,plan,intent,job.deliveryIndex)
+                    :world!=null&&world.offerStress(entry,plan,intent,job.deliveryIndex);}
+            finally{workTime(WorkPhase.HANDOFF,handoffStarted);}
             if(!accepted)break;
             job.deliveryIndex++;this.handoffs++;
             if(showTrace())log.info("[PDD-STRESS-APPLY] phase=DURABLE_HANDOFF id={} origin={} owner={} position={},{},{} depth={} incomingQ={} fixedDamage={} status=QUEUED_OR_TERMINAL_NOT_ASSUMED_APPLIED",
@@ -564,7 +588,9 @@ public final class StressRuntime {
         if(archivesThisTick>=MAX_ARCHIVES_PER_TICK||archivesThisTick>0&&System.nanoTime()-archiveStartedNanos>=2_000_000L)return;
         charge();if(archivesThisTick++==0)archiveStartedNanos=System.nanoTime();
         Entry entry=journal.get(job.id);
-        journal.compactHandoff(job.id);
+        long archiveStarted=System.nanoTime();
+        try{journal.compactHandoff(job.id);}
+        finally{workTime(WorkPhase.ARCHIVE,archiveStarted);}
         if(job.clockRolledBack){
             for(var plan:entry.plans())rollbackOutputs.remove(applyId(job.id,plan.node().cell()));
             rollbackJobsRemaining--;

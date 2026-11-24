@@ -5,6 +5,8 @@ import java.io.*;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.file.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.*;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.*;
@@ -18,7 +20,7 @@ import static java.nio.file.StandardOpenOption.*;
  * A missing or corrupt committed object fails closed, never silently resets damage.
  * No Plot mutation, forced chunk load, or Minecraft API occurs in this class.
  */
-public final class WorldPersistentJournal implements WorldJournal {
+public final class WorldPersistentJournal implements WorldJournal, AutoCloseable {
     public static final int SCHEMA=6, MAX_STATES_PER_CHUNK=4096;
     public static final int MAX_TOTAL_STATES=2_000_000, MAX_RECEIPTS=2_000_000;
     public static final int MAX_REVISIONS_PER_CHUNK=131_072, MAX_TOTAL_REVISIONS=4_000_000;
@@ -77,7 +79,15 @@ public final class WorldPersistentJournal implements WorldJournal {
     private long generation,walBytes,repairedTailBytes;
     private String legacyHash="";
     private boolean staging, migrated;
-    private boolean appendUncertain;
+    private boolean appendUncertain,closed;
+    // Production-only: tests retain the historical open/close-per-append behavior unless explicitly enabled.
+    private FileChannel activeWal;
+    private ExecutorService obsoleteCleaner;
+    private final AtomicReference<CleanupScope> cleanupRequest=new AtomicReference<>();
+    private final AtomicBoolean cleanupRunning=new AtomicBoolean();
+    private volatile long cleanupDeleted,cleanupFaults;
+    private record CleanupScope(long committedGeneration,Set<String> liveFiles) {}
+
     // The committed manifest selects the reader schema; new writes use schema 5.
     private int loadingSchema=SCHEMA;
 
@@ -99,7 +109,50 @@ public final class WorldPersistentJournal implements WorldJournal {
         }else bootstrap();
         recoveredUncertain.addAll(uncertainReceipts.keySet());
     }
-    public synchronized boolean migrated(){return migrated;}
+    /** Enable channel reuse only after recovery/initialization. The caller closes at server STOP. */
+    public synchronized void enableWalChannelReuse() throws IOException {
+        if(closed)throw new IOException("JOURNAL_CLOSED");
+        if(activeWal!=null)return;
+        if(appendUncertain)throw new IOException("RECOVERY_WAL_APPEND_UNCERTAIN");
+        FileChannel channel=FileChannel.open(walPath(generation),WRITE);
+        try {
+            if(channel.size()!=walBytes)throw new IOException("recovery WAL changed externally");
+            channel.position(walBytes);
+            activeWal=channel;
+        } catch(IOException | RuntimeException failed) {
+            channel.close();throw failed;
+        }
+        if(obsoleteCleaner==null){
+            obsoleteCleaner=Executors.newSingleThreadExecutor(task->{
+                Thread thread=new Thread(task,"pdd-obsolete-shard-cleaner");
+                thread.setDaemon(true);return thread;
+            });
+            scheduleCleanup(); // Also reclaim orphaned OLD generations left by previous crashes.
+        }
+    }
+    @Override public synchronized void close() throws IOException {
+        IOException failed=null;
+        if(activeWal!=null){try{activeWal.close();}catch(IOException e){failed=e;}finally{activeWal=null;}}
+        closed=true;
+        cleanupRequest.set(null);
+        if(obsoleteCleaner!=null){
+            // Old generations remain on disk if the bounded maintenance job is interrupted.
+            // A future server session will safely sweep them after reading its manifest.
+            var cleaner=obsoleteCleaner;obsoleteCleaner=null;
+            cleaner.shutdownNow();
+            try {
+                if(!cleaner.awaitTermination(500,TimeUnit.MILLISECONDS))cleanupFaults++;
+            }catch(InterruptedException interrupted){
+                Thread.currentThread().interrupt();cleanupFaults++;
+            }
+        }
+        if(failed!=null)throw failed;
+    }
+    public synchronized String obsoleteCleanupStatus(){
+        return "deleted="+cleanupDeleted+" faults="+cleanupFaults
+                +" busy="+cleanupRunning.get()+" pending="+(cleanupRequest.get()!=null);
+    }
+
     public synchronized String ioPerformance(){return io.summary();}
     /** Recovered crash-time incomplete WAL bytes, excluding complete CRC-invalid frames. */
     public synchronized long repairedTailBytes(){return repairedTailBytes;}
@@ -474,6 +527,7 @@ public final class WorldPersistentJournal implements WorldJournal {
     @Override public synchronized int checkpointBatch(int maxObjects) throws IOException {
         long checkpointStarted=System.nanoTime();
         try{
+        if(closed)throw new IOException("JOURNAL_CLOSED");
         if(appendUncertain)throw new IOException("RECOVERY_WAL_APPEND_UNCERTAIN");
         checkReceiptReadHealth();
         if(maxObjects<1)throw new IllegalArgumentException("checkpoint budget must be positive");
@@ -498,7 +552,10 @@ public final class WorldPersistentJournal implements WorldJournal {
                         && revisionChunks.getOrDefault(key,Set.of()).isEmpty()){
                     stagedChunks.remove(key);
                 }else{
-                    byte[] snapshot=chunkBytes(key);
+                    long snapshotStarted=System.nanoTime();
+                    byte[] snapshot;
+                    try{snapshot=chunkBytes(key);}
+                    finally{io.record(JournalIoMetrics.Phase.SNAPSHOT_BUILD,System.nanoTime()-snapshotStarted);}
                     writeDurable(root.resolve(relative),blob(CHUNK,snapshot));
                     stagedChunks.put(key,relative);
                 }
@@ -840,24 +897,109 @@ public final class WorldPersistentJournal implements WorldJournal {
         long next=generation+1;
         createWal(next); // durable empty WAL BEFORE referencing it in manifest
         writeManifest(next,stagedChunks,stagedBuckets); // atomic publish: previous WAL+objects remain valid until now
-        Map<ChunkKey,String> previousChunks=new HashMap<>(currentChunks);
-        Map<Integer,String> previousBuckets=new HashMap<>(currentBuckets);
-        long oldGeneration=generation;
+        // Tests/standalone readers keep the original synchronous cleanup contract.
+        Map<ChunkKey,String> oldChunks=obsoleteCleaner==null?new HashMap<>(currentChunks):null;
+        Map<Integer,String> oldBuckets=obsoleteCleaner==null?new HashMap<>(currentBuckets):null;
         currentChunks.clear();currentChunks.putAll(stagedChunks);
         currentBuckets.clear();currentBuckets.putAll(stagedBuckets);
         receiptShards.clear();receiptShards.putAll(stagedReceiptShards);
         stagedReceiptShards=null;receiptOverlay.clear();overlayCount=0;
         generation=next;staging=false;stagedChunks=null;stagedBuckets=null;
-        // Once manifest is durable, cleanup is not part of the safety boundary.
-        for(var e:previousChunks.entrySet())if(!Objects.equals(e.getValue(),currentChunks.get(e.getKey())))
-            deleteBestEffort(root.resolve(e.getValue()));
-        for(var e:previousBuckets.entrySet())if(!Objects.equals(e.getValue(),currentBuckets.get(e.getKey())))
-            deleteBestEffort(root.resolve(e.getValue()));
-        deleteBestEffort(walPath(oldGeneration));
+        if(activeWal!=null){
+            try{
+                activeWal.close();activeWal=FileChannel.open(walPath(next),WRITE);
+                if(activeWal.size()!=walBytes)throw new IOException("rotated WAL size mismatch");
+                activeWal.position(walBytes);
+            }catch(IOException rotationFailure){appendUncertain=true;throw rotationFailure;}
+        }
+        // The new manifest and WAL are durable. Old files are not part of commit success.
+        if(obsoleteCleaner!=null)scheduleCleanup();
+        else {
+            for(var e:oldChunks.entrySet())if(!Objects.equals(e.getValue(),currentChunks.get(e.getKey())))
+                deleteBestEffort(root.resolve(e.getValue()));
+            for(var e:oldBuckets.entrySet())if(!Objects.equals(e.getValue(),currentBuckets.get(e.getKey())))
+                deleteBestEffort(root.resolve(e.getValue()));
+            deleteBestEffort(walPath(next-1));
+        }
+        }catch(IOException failure){
+            // A manifest move may have succeeded before directory fsync reported failure.
+            // Never append to a potentially stale generation in that case.
+            appendUncertain=true;throw failure;
         }finally{io.record(JournalIoMetrics.Phase.PUBLISH,System.nanoTime()-publishStarted);}
     }
+    /** Only older, unreferenced generations are eligible; future manifests start from current refs. */
+    private void scheduleCleanup() {
+        if(obsoleteCleaner==null||closed)return;
+        var referenced=new HashSet<String>(currentChunks.values());referenced.addAll(currentBuckets.values());
+        cleanupRequest.set(new CleanupScope(generation,Collections.unmodifiableSet(referenced)));
+        if(cleanupRunning.compareAndSet(false,true))startCleanup();
+    }
+    private void startCleanup() {
+        var worker=obsoleteCleaner;
+        if(worker==null){cleanupRunning.set(false);return;}
+        try{worker.execute(this::runCleanup);}
+        catch(RejectedExecutionException rejected){cleanupRunning.set(false);}
+    }
+    private void runCleanup() {
+        try{
+            CleanupScope scope;
+            while((scope=cleanupRequest.getAndSet(null))!=null && !Thread.currentThread().isInterrupted()){
+                long started=System.nanoTime();
+                try(var files=Files.walk(root)){
+                    for(var iterator=files.iterator();iterator.hasNext();){
+                        if(Thread.currentThread().isInterrupted())break;
+                        Path file=iterator.next();
+                        if(Files.isSymbolicLink(file)||!Files.isRegularFile(file,LinkOption.NOFOLLOW_LINKS))continue;
+                        if(!obsoleteFor(file,scope)||isLegacyOrUncertainFile(file))continue;
+                        try {
+                            if(Files.deleteIfExists(file) && (++cleanupDeleted & 15L)==0L){
+                                // Throttle background disk operations; no game/world access from this worker.
+                                try{Thread.sleep(25);}catch(InterruptedException stopped){
+                                    Thread.currentThread().interrupt();break;
+                                }
+                            }
+                        }catch(IOException ignored){cleanupFaults++;/* retry from next durable generation */}
+                    }
+                }catch(IOException | UncheckedIOException failure){cleanupFaults++;}
+                finally{io.recordBackgroundCleanup(System.nanoTime()-started);}
+            }
+        } finally {
+            cleanupRunning.set(false);
+            if(cleanupRequest.get()!=null && cleanupRunning.compareAndSet(false,true))startCleanup();
+        }
+    }
     private static void deleteBestEffort(Path file){try{Files.deleteIfExists(file);}catch(IOException ignored){/* orphan is safe */}}
+    private static final java.util.regex.Pattern CHUNK_NAME=java.util.regex.Pattern.compile(
+            "chunks/[0-9a-f]{32}/-?\\d+_-?\\d+\\.(\\d+)\\.pds");
+    private static final java.util.regex.Pattern RECEIPT_NAME=java.util.regex.Pattern.compile(
+            "receipts/(?:[0-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-5])\\.(\\d+)\\.pdr");
+    private static final java.util.regex.Pattern WAL_NAME=java.util.regex.Pattern.compile(
+            "recovery-(\\d+)\\.wal");
+    private boolean obsoleteFor(Path file,CleanupScope scope){
+        String relative=root.relativize(file).toString().replace('\\','/');
+        var chunk=CHUNK_NAME.matcher(relative);
+        var receipt=RECEIPT_NAME.matcher(relative);
+        var wal=WAL_NAME.matcher(relative);
+        String number;
+        if(chunk.matches())number=chunk.group(1);
+        else if(receipt.matches())number=receipt.group(1);
+        else if(wal.matches())number=wal.group(1);
+        else return false;
+        try {
+            long gen=Long.parseLong(number);
+            return gen>0&&gen<scope.committedGeneration()&&!scope.liveFiles().contains(relative);
+        }catch(NumberFormatException invalid){return false;}
+    }
+    private boolean isLegacyOrUncertainFile(Path file){
+        // Schema migration intentionally leaves the original recovery files intact.
+        // Any unreadable orphan is forensic evidence, not an automatic deletion candidate.
+        try(var in=new DataInputStream(Files.newInputStream(file))){
+            int magic=in.readInt(),schema=in.readInt();
+            return (magic!=DISK_MAGIC&&magic!=WAL_MAGIC)||schema<SCHEMA||schema>SCHEMA;
+        }catch(IOException unreadable){cleanupFaults++;return true;}
+    }
     private void writeManifest(long gen,Map<ChunkKey,String> chunks,Map<Integer,String> buckets)throws IOException {
+        long encodeStarted=System.nanoTime();
         ByteArrayOutputStream b=new ByteArrayOutputStream();
         try(var out=new DataOutputStream(b)){
             out.writeLong(gen);writeString(out,legacyHash);
@@ -869,11 +1011,16 @@ public final class WorldPersistentJournal implements WorldJournal {
                 out.writeInt(e.getKey());writeString(out,e.getValue());
             }
         }
+        io.record(JournalIoMetrics.Phase.MANIFEST_ENCODE,System.nanoTime()-encodeStarted);
         Path tmp=root.resolve("checkpoint.manifest.tmp");
         writeDurable(tmp,blob(MANIFEST,b.toByteArray()));
+        long moveStarted=System.nanoTime();
         try{Files.move(tmp,manifestPath,StandardCopyOption.ATOMIC_MOVE,StandardCopyOption.REPLACE_EXISTING);}
         catch(AtomicMoveNotSupportedException e){throw new IOException("atomic manifest replace unavailable",e);}
-        forceDirectory(root);
+        finally{io.record(JournalIoMetrics.Phase.MANIFEST_MOVE,System.nanoTime()-moveStarted);}
+        long directoryStarted=System.nanoTime();
+        try{forceDirectory(root);}
+        finally{io.record(JournalIoMetrics.Phase.MANIFEST_DIRECTORY_FORCE,System.nanoTime()-directoryStarted);}
     }
     private Path walPath(long gen){return root.resolve("recovery-"+gen+".wal");}
     private void createWal(long gen)throws IOException {
@@ -888,17 +1035,22 @@ public final class WorldPersistentJournal implements WorldJournal {
         }finally{io.record(JournalIoMetrics.Phase.WAL_CREATE,System.nanoTime()-createStarted);}
     }
     private void append(byte[] frame)throws IOException {
+        if(closed)throw new IOException("JOURNAL_CLOSED");
         if(appendUncertain)throw new IOException("RECOVERY_WAL_APPEND_UNCERTAIN");
         checkReceiptReadHealth();
         if(walBytes+frame.length>MAX_WAL_BYTES)throw new IOException("RECOVERY_WAL_CAP_EXCEEDED");
         Path path=walPath(generation);
         long appendStarted=System.nanoTime();
-        try(var channel=FileChannel.open(path,APPEND,WRITE)){
-            if(channel.size()!=walBytes)throw new IOException("recovery WAL changed externally");
-            ByteBuffer b=ByteBuffer.wrap(frame);while(b.hasRemaining())channel.write(b);
-            long forceStarted=System.nanoTime();
-            try{channel.force(true);}finally{io.record(JournalIoMetrics.Phase.WAL_FORCE,System.nanoTime()-forceStarted);}
-            walBytes+=frame.length;
+        try{
+            FileChannel channel=activeWal==null?FileChannel.open(path,WRITE):activeWal;
+            try {
+                if(channel.size()!=walBytes)throw new IOException("recovery WAL changed externally");
+                channel.position(walBytes);
+                ByteBuffer b=ByteBuffer.wrap(frame);while(b.hasRemaining())channel.write(b);
+                long forceStarted=System.nanoTime();
+                try{channel.force(true);}finally{io.record(JournalIoMetrics.Phase.WAL_FORCE,System.nanoTime()-forceStarted);}
+                walBytes+=frame.length;
+            }finally{if(channel!=activeWal)channel.close();}
         }catch(IOException uncertain){appendUncertain=true;throw uncertain;}
         finally{io.record(JournalIoMetrics.Phase.WAL_APPEND,System.nanoTime()-appendStarted);}
     }
@@ -968,10 +1120,19 @@ public final class WorldPersistentJournal implements WorldJournal {
         try{
             Files.createDirectories(path.getParent());
             try(var ch=FileChannel.open(path,CREATE,TRUNCATE_EXISTING,WRITE)){
-                ByteBuffer b=ByteBuffer.wrap(bytes);while(b.hasRemaining())ch.write(b);
+                boolean manifest=path.getFileName().toString().equals("checkpoint.manifest.tmp");
+                long writeStarted=System.nanoTime();
+                try{ByteBuffer b=ByteBuffer.wrap(bytes);while(b.hasRemaining())ch.write(b);}
+                finally{
+                    io.record(JournalIoMetrics.Phase.FILE_WRITE,System.nanoTime()-writeStarted);
+                    if(manifest)io.record(JournalIoMetrics.Phase.MANIFEST_FILE_WRITE,System.nanoTime()-writeStarted);
+                }
                 long forceStarted=System.nanoTime();
                 try{ch.force(true);}
-                finally{io.record(JournalIoMetrics.Phase.FILE_FORCE,System.nanoTime()-forceStarted);}
+                finally{
+                    io.record(JournalIoMetrics.Phase.FILE_FORCE,System.nanoTime()-forceStarted);
+                    if(manifest)io.record(JournalIoMetrics.Phase.MANIFEST_FILE_FORCE,System.nanoTime()-forceStarted);
+                }
             }
             forceDirectory(path.getParent());
         }finally{io.record(JournalIoMetrics.Phase.DURABLE_WRITE,System.nanoTime()-started);}

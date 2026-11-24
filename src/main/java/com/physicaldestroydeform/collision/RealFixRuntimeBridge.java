@@ -421,7 +421,7 @@ public final class RealFixRuntimeBridge {
         // accepted only when every matching snapshot maps to the same stable pair.
         final int[] logCounts={0,0};
         final int[] fTraceLines={0};
-        final int[] contactBudgetAuditLines={0};
+        final var contactBudgetTop=new ContactBudgetTop();
         // Clearance is safety-critical. R4 is diagnostic-only: separate
         // bounded budgets prevent R4 from starving positive separation proof.
         int[] remainingClearanceChecks={RealFixBoundaryCandidates.MAX_PER_TICK};
@@ -998,14 +998,12 @@ public final class RealFixRuntimeBridge {
                                     grant.propagationA().audit().crossEdges()+grant.propagationB().audit().crossEdges(),
                                     fInput,grant.propagationA().assignedF()+grant.propagationB().assignedF(),grant.contactDampedF(),grant.dampedF(),grant.unresolvedF(),
                                     grant.propagationA().audit().thresholdDiscardF()+grant.propagationB().audit().thresholdDiscardF());
-                            // Audit only large unresolved budgets. Evidence never authorizes new F here.
-                            if(fInput>0 && grant.unresolvedF()/fInput>=0.10 && contactBudgetAuditLines[0]++<4)
-                                log.warn("[PDD-CONTACT-BUDGET] credit={} unresolvedRatio={} unresolvedF={} " +
-                                                "reasonA={} reasonB={} nativeCap={} regionStatus={} " +
-                                                "policy=WITHHOLD_UNPROVED mutation=OFF",
-                                        grant.id(),grant.unresolvedF()/fInput,grant.unresolvedF(),
-                                        grant.propagationA().endReason(),grant.propagationB().endReason(),
-                                        saturatedPoll,regions.status());
+                            // Retain the largest absolute unresolved budgets, not the first four events.
+                            contactBudgetTop.consider(new ContactBudgetTop.Sample(
+                                    String.valueOf(grant.id()),fInput,grant.unresolvedF(),
+                                    String.valueOf(grant.propagationA().endReason()),
+                                    String.valueOf(grant.propagationB().endReason()),
+                                    saturatedPoll,String.valueOf(regions.status())));
                             log.info("[PDD-F-INVARIANT] credit={} FInput={} FAccounted={} FError={} " +
                                             "issuedQ={} reservedA={} reservedB={} unusedQ={} QError={} " +
                                             "FStatus={} QStatus={} mutation=OFF",
@@ -1193,6 +1191,12 @@ public final class RealFixRuntimeBridge {
                         stamp.tick,directAuthorized.size(),secondary.size(),contactGraph.historySize(),contactGraph.stats(),
                         capture.sourceGameTick(),contactGraph.liveGameTick(),capture.captureServerTick(),now,contactGraph.runtimeStatus());
         }
+        for(var sample:contactBudgetTop.samples())
+            log.warn("[PDD-CONTACT-BUDGET] credit={} unresolvedRatio={} unresolvedF={} " +
+                            "reasonA={} reasonB={} nativeCap={} regionStatus={} " +
+                            "policy=WITHHOLD_UNPROVED mutation=OFF",
+                    sample.credit(),sample.ratio(),sample.unresolvedF(),
+                    sample.reasonA(),sample.reasonB(),sample.nativeCap(),sample.regionStatus());
         // Bounded state update: missing native effects NEVER imply separation.
         // Plot/Plot uses disjoint AABBs; Plot/World requires an atomic verified empty region.
         for(var entry:tracked.entrySet()) {

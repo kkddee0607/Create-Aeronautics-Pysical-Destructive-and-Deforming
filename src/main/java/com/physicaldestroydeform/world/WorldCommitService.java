@@ -110,6 +110,7 @@ public final class WorldCommitService {
                         "intentPayloadPersisted=true forceChunkLoad=false traceEach={}",
                 startupDeferred,startupPrepared,restored,TRACE_RECOVERY);
         movement.recover();
+        journal.enableWalChannelReuse();
         WorldBlockMutationTracker.attach(this);
         log.info("[PDD-WORLD-POLICY] revision=0.4.1-spreadFix blockTypeVeto=OFF " +
                 "blockEntities=VETO multiBlock=VETO " +
@@ -301,7 +302,7 @@ public final class WorldCommitService {
             ||lineageActive.contains(new Cell(key))||lineageQuarantine.containsKey(new Cell(key));}
     public WorldPersistentJournal lineageJournal(){return journal;}
     public String storagePerformance(){return journal.storageStatus();}
-    public String ioPerformance(){return journal.ioPerformance();}
+    public String ioPerformance(){return journal.ioPerformance()+" cleanup={"+journal.obsoleteCleanupStatus()+"}";}
     public boolean lineageFaulted(){return fault||core.ioFault();}
     boolean lineageRecoveryConflict(SparseStateKey key){
         var cell=new Cell(key);
@@ -503,6 +504,8 @@ public final class WorldCommitService {
         }catch(IOException failed){
             fault=true;log.error("[PDD-PERSIST] phase=STOP_CHECKPOINT status=FAILED " +
                     "recoveryWalStillDurable=true",failed);
+        }finally{
+            try{journal.close();}catch(IOException failed){fault=true;log.error("[PDD-PERSIST] phase=STOP_CHANNEL status=FAILED wal=RETAINED",failed);}
         }
         log.info("[PDD-RECOVERY] phase=STOP deferredAborted={} " +
                         "preparedQuarantined={} awaitingLoaded={} loadMissAttempts={} " +

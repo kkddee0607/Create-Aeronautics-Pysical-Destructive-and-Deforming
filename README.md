@@ -1,10 +1,10 @@
-# PDD 0.6.1 optiFix2 — Physical Destructive and Deforming
+# PDD 0.6.1 optiFix3 — Physical Destructive and Deforming
 
 Minecraft 1.21.1 · Java 21 · NeoForge 21.1.228 · Sable 2.0.6 · Create 6.0.10 · Aeronautics 1.3.2. 선택 호환: Copycats+ 3.0.11.
 
 [통합설계서 1.0.9](.github/workflows/PDD-1.0.9-Integrated-Design-Specification.md) · [0.6.0 릴리스 검증](docs/verification/PDD-0.6.0-Release-Verification.md)
 
-[0.6.1 optiFix2 검증 및 인게임 절차](docs/verification/PDD-0.6.1-optiFix2.md). 기준 SHA `7209c45e34a789dfcdb158fc8db7cabf13b5d229`. 기존 월드를 백업한 뒤 `physical-destroy-deform-0.6.1-optiFix2.jar` 하나만 사용한다. 기존 데이터 디렉터리는 유지한다. [spreadFix 검증](docs/verification/PDD-0.6.1-spreadFix.md) · [이전 0.6.1 fix 검증](docs/verification/PDD-0.6.1-Fix.md).
+[0.6.1 optiFix3 검증 및 인게임 절차](docs/verification/PDD-0.6.1-optiFix3.md). 기준 SHA `077cc8769b170732ee7668bfdfbe6e3efd442a68`. 기존 월드를 백업한 뒤 `physical-destroy-deform-0.6.1-optiFix3.jar` 하나만 사용한다. 기존 데이터 디렉터리는 유지한다. [optiFix2 검증](docs/verification/PDD-0.6.1-optiFix2.md). [spreadFix 검증](docs/verification/PDD-0.6.1-spreadFix.md) · [이전 0.6.1 fix 검증](docs/verification/PDD-0.6.1-Fix.md).
 
 [0.6.0 BuildFix: CI 실패 원인 및 회귀 검증](docs/verification/PDD-0.6.0-BuildFix.md) — 파괴 한도 및 좌표별 공기 상태를 정확히 검증하도록 테스트를 수정. 게임 런타임·물성 수치·버전은 변경하지 않음.
 
@@ -29,7 +29,7 @@ Minecraft 1.21.1 · Java 21 · NeoForge 21.1.228 · Sable 2.0.6 · Create 6.0.10
 - Copycats+ 단일/다중 재질과 형상 보정 T, 재질 revision 및 기존 손상 보존, 안전한 장식 BE의 NBT 이전, 기존 드롭 계약. 기능성/미확인 BE는 VETO.
 - 실제 양측 접촉 블록의 탄성 감쇠 강도는 기존 곡선의 40%이며 단일 원장에 차감한다. 완전하게 입증된 후보 집합의 E가 일치할 때만 대응 재질로 사용할 수 있다. 불확실한 F는 unresolved로 닫는다.
 - 동일 물리 프레임의 검증된 지속 압축 접촉을 별도 owner 전파 간선으로 사용한다. 독립 충돌로 승인된 경계 및 인과관계가 불명확한 경계는 제외한다. 접촉 이력은 현재의 물리·형상 증거를 대신하지 않는다.
-- optiFix2는 `[PDD-PHASE-PERF]`, `[PDD-JOURNAL-IO]`, `[PDD-CONTACT-BUDGET]`로 틱 단계·원장 I/O·미확정 접촉의 원인을 측정한다. 미확인 병목을 이유로 WAL fsync나 충돌 검증을 생략하지 않으며 물리·저장 포맷은 optiFix와 동일하다.
+- optiFix3는 기존 물리·저장 포맷·WAL fsync를 유지하면서 World/Plot WAL 채널을 재사용하고, manifest가 내구화된 **이후** 구세대 파일 정리를 제한된 백그라운드 작업으로 분리한다. Stress 저장 단계·manifest 세부 I/O를 계측하고 최대 절대 미확정 F 진단을 보완한다. 고위험 비동기 WAL/손상 지연 커밋은 **구현하지 않았다**. 상세 계약과 기존 로그 비교: [optiFix3 검증](docs/verification/PDD-0.6.1-optiFix3.md).
 
 ## 적용 및 검증
 
