@@ -1,12 +1,14 @@
-# PDD 0.6.1-duperFix-buildFix — Physical Destructive and Deforming
+# PDD 0.6.1-originFix — Physical Destructive and Deforming
 
 Minecraft 1.21.1 · Java 21 · NeoForge 21.1.228 · Sable 2.0.6 · Create 6.0.10 · Aeronautics 1.3.2. 선택 호환: Copycats+ 3.0.11.
 
-[통합설계서 1.0.9](.github/workflows/PDD-1.0.9-Integrated-Design-Specification.md) · [0.6.0 릴리스 검증](docs/verification/PDD-0.6.0-Release-Verification.md)
+[통합설계서 1.0.9](.github/workflows/PDD-1.0.9-Integrated-Design-Specification.md) · [originFix 구현·검증 보고](docs/verification/PDD-0.6.1-originFix.md).
 
-**현재 배포판: 0.6.1-duperFix-buildFix.** 이전 duperFix의 양측 충돌면 복원 알고리즘은 유지하면서 GitHub Actions #45583354353에서 발생한 `compileTestJava`의 `DamageModel` import 누락을 수정했다. 기존 실행에서는 `compileJava`와 `processResources`는 통과했지만 JUnit·JAR는 실행되지 못했다. 이번 수정판의 실제 빌드 성공은 아직 미검증이다. 물성 수치, F/Q, WAL, Sable 원본 콜백은 변경하지 않았다.
+**현재 배포판: 0.6.1-originFix.** duperFix-buildFix의 F/Q·충돌 승인·Sable 원본 콜백 및 WAL을 보존하면서, Native 접촉 기록의 동일 프레임 면 중복 탐색을 통합하고 A/B 양쪽 격자를 독립적으로 탐색한다. 실제 양측 충돌면의 양수 교차 면적과 외부면만 인증하고, 상대 후보 수 8개 초과시 이미 검증된 블록쌍을 임의 폐기하지 않도록 singleton 연결로 전달한다. 정렬 면의 정수 후보 범위를 좁혀 과다한 polygon 검사를 줄였다. 미완성·미확정 면은 기존 보수 정책으로 처리한다.
 
-**현재 설치 대상:** `build/libs/physical-destroy-deform-0.6.1-duperFix-buildFix.jar` **한 개만 설치한다.** 기존 PDD JAR와 동시 설치하지 않는다. NeoForge 인게임 모드 목록과 서버 시작 로그는 `0.6.1-duperFix-buildFix`를 표시한다. [BuildFix 검증·JUnit 계약 검토](docs/verification/PDD-0.6.1-duperFix-buildFix.md) · [duperFix 접촉면 설계 및 검증](docs/verification/PDD-0.6.1-duperFix.md).
+**설계 대비 남은 제약:** 현재 Sable Java ABI에는 블록별 독립 solver F가 없고, originFix의 면 감사와 WAL fsync는 아직 동기식이다. 틱 간 면 스캔 재개, 내구성 증명된 비동기 WAL/checkpoint, Stress 전파 분할은 이번 코드에 구현되지 않았다. 대형 접촉 또는 느린 디스크에서 렉이 완전히 사라졌다고 주장할 수 없다. 이 사실을 감추기 위해 게임 충격량·저장 순서를 바꾸지 않았다.
+
+**설치 대상:** `build/libs/physical-destroy-deform-0.6.1-originFix.jar` 단 하나. 기존 PDD JAR와 동시 설치 금지. NeoForge 모드 목록 및 서버 시작 로그의 버전은 `0.6.1-originFix`이다. 실제 Gradle/JUnit·Actions·인게임 검증은 사용자가 수행한다.
 
 **아래는 이전 버전의 변경 기록이다.** 과거 ZIP/JAR 설치 지시는 현재 버전에 적용하지 않는다.
 

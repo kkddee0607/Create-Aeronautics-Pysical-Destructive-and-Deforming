@@ -33,8 +33,8 @@ for path in tests:
                 contradictions.append(f"{path.relative_to(root)}: {expression}")
 
 count = sum(len(re.findall(r"@Test\b", p.read_text(encoding="utf-8"))) for p in tests)
-if count < 792:
-    contradictions.append(f"JUnit @Test declarations unexpectedly fell below duperFix baseline 792: {count}")
+if count < 798:
+    contradictions.append(f"JUnit @Test declarations unexpectedly fell below originFix baseline 798: {count}")
 if contradictions:
     print("Static assertion contract FAILED:", *contradictions, sep="\n - ", file=sys.stderr)
     sys.exit(1)

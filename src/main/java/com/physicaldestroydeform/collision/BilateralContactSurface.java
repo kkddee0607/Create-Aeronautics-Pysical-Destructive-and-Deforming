@@ -97,66 +97,123 @@ final class BilateralContactSurface {
     }
     private static int axis(MovePlan.SignedAxes axes){return axes.x()!=0?0:axes.y()!=0?1:2;}
 
-    /** Flood fill *paired* and connected cells; a hole or an unsupported shape
-     * stops traversal. Each pair must have positive overlap and opposing faces.
-     * No O(sizeA*sizeB) scan and no unloaded-chunk generation. */
+    /** A native record is an anchor, not a separate surface or F credit. The
+     * same pair of rigid poses and oriented faces is scanned only once, even
+     * when the solver reports many different anchors for that component. */
     static Result reconstruct(Frame frame,ShapeReader source,int maxChecks){
-        if(frame==null||source==null||maxChecks<1)return new Result(List.of(),0,false,"NO_FRAME");
-        var initialA=SableConsumerTargets.cells(frame.contactA());
-        var initialB=SableConsumerTargets.cells(frame.contactB());
-        var queue=new ArrayDeque<Pair>();var queued=new HashSet<Pair>();
-        var certified=new LinkedHashMap<Match,Match>();
-        int checks=0;boolean limited=false;
-        for(var ap:initialA)for(var bp:initialB){
-            if(checks>=maxChecks){limited=true;break;}
-            checks++;
-            Cell a=source.get(0,ap),b=source.get(1,bp);
-            if(anchorFace(frame,a,0)&&anchorFace(frame,b,1)&&positiveOverlap(frame,source,a,b)){
-                var key=new Pair(ap,bp);if(queued.add(key))queue.add(key);
-            }
+        return reconstructAll(frame==null?List.of():List.of(frame),source,maxChecks);
+    }
+    private record FrameKey(FrameMath.Pose a,FrameMath.Pose b,
+                            int ax,int ay,int az,int bx,int by,int bz) {
+        FrameKey(Frame f){this(f.a(),f.b(),f.inwardA().x(),f.inwardA().y(),f.inwardA().z(),
+                f.inwardB().x(),f.inwardB().y(),f.inwardB().z());}
+    }
+    /** Scans both independent owner lattices. No same-grid assumption and no
+     * O(A*B) cross product: candidates come only from the transformed surface
+     * envelope of the newly reached face. A failed budget NEVER seals a partial
+     * face as a complete F distribution. */
+    static Result reconstructAll(List<Frame> frames,ShapeReader source,int maxChecks){
+        if(frames==null||frames.isEmpty()||source==null||maxChecks<1)
+            return new Result(List.of(),0,false,"NO_FRAME");
+        var groups=new LinkedHashMap<FrameKey,List<Frame>>();
+        for(var f:frames)if(f!=null)groups.computeIfAbsent(new FrameKey(f),k->new ArrayList<>()).add(f);
+        var result=new LinkedHashSet<Match>();
+        int checked=0;
+        for(var group:groups.values()){
+            var search=new Search(group.getFirst(),source,maxChecks-checked,MAX_PAIRS-result.size());
+            var discovered=search.run(group);
+            checked+=search.checks;
+            if(search.incomplete)return new Result(List.of(),checked,true,"SURFACE_BUDGET");
+            result.addAll(discovered);
         }
-        int tangent=axis(frame.inwardA());
-        while(!queue.isEmpty()&&!limited) {
-            Pair key=queue.remove();
-            if(checks>=maxChecks||certified.size()>=MAX_PAIRS){limited=true;break;}
-            checks++;
-            Cell a=source.get(0,key.a()),b=source.get(1,key.b());
-            if(!positiveOverlap(frame,source,a,b))continue;
-            certified.putIfAbsent(new Match(a.target(),b.target()),new Match(a.target(),b.target()));
-            // Advance to the four owner-local tangent neighbors. Any crossing
-            // of an air gap is impossible; the corresponding opposite cells
-            // are found by transform, NOT by a parallel-grid assumption.
-            for(int dir=0;dir<4;dir++){
-                if(checks>=maxChecks){limited=true;break;}
-                int[] xyz={key.a().getX(),key.a().getY(),key.a().getZ()};
-                int u=(tangent+1)%3,v=(tangent+2)%3;
-                xyz[dir<2?u:v]+=(dir%2==0?1:-1);
-                var neighbor=new BlockPos(xyz[0],xyz[1],xyz[2]);
-                Cell next=source.get(0,neighbor);
-                if(next==null||!touchingFaceCells(frame,a,next))continue;
-                var other=opposingCandidateCells(frame,next);
-                if(other==null){limited=true;break;}
-                for(var candidate:other){
-                    if(checks>=maxChecks){limited=true;break;}
-                    var proposal=new Pair(neighbor,candidate);
-                    if(queued.contains(proposal))continue;
-                    checks++;
-                    if(positiveOverlap(frame,source,next,source.get(1,candidate))){
-                        queued.add(proposal);queue.add(proposal);
+        return new Result(new ArrayList<>(result),checked,false,
+                result.isEmpty()?"NO_POSITIVE_FACE":"BILATERAL_SURFACE");
+    }
+    private static final class Search {
+        final Frame frame;
+        final ShapeReader source;
+        final int maxChecks,maxPairs;
+        final Map<Pair,Boolean> evaluated=new HashMap<>();
+        final Map<Pair,Match> matched=new LinkedHashMap<>();
+        final Map<Pair,Boolean> queued=new HashMap<>();
+        final Map<BlockPos,Cell> cellsA=new HashMap<>(),cellsB=new HashMap<>();
+        final ArrayDeque<Pair> frontier=new ArrayDeque<>();
+        int checks;
+        boolean incomplete;
+        Search(Frame frame,ShapeReader source,int maxChecks,int maxPairs){
+            this.frame=frame;this.source=source;this.maxChecks=maxChecks;this.maxPairs=maxPairs;
+        }
+        Cell cell(int side,BlockPos pos){
+            var cache=side==0?cellsA:cellsB;
+            if(!cache.containsKey(pos))cache.put(pos,source.get(side,pos));
+            return cache.get(pos);
+        }
+        boolean enqueue(Pair p){
+            if(queued.containsKey(p))return false;
+            Boolean pass=evaluated.get(p);
+            if(pass==null){
+                // A missing cell needs no expensive polygon/face validation.
+                // Do not spend the geometry budget on the many empty integer
+                // buckets adjacent to a perfectly flat contact face.
+                Cell a=cell(0,p.a()),b=cell(1,p.b());
+                if(a==null||b==null){evaluated.put(p,Boolean.FALSE);return false;}
+                if(checks>=maxChecks){incomplete=true;return false;}
+                checks++;
+                pass=positiveOverlap(frame,source,a,b);
+                evaluated.put(p,pass);
+            }
+            if(pass){queued.put(p,Boolean.TRUE);frontier.add(p);}
+            return pass;
+        }
+        List<Match> run(List<Frame> anchors){
+            for(var witness:anchors){
+                for(var a:SableConsumerTargets.cells(witness.contactA())){
+                    if(incomplete)break;
+                    if(!anchorFace(witness,cell(0,a),0))continue;
+                    for(var b:SableConsumerTargets.cells(witness.contactB())){
+                        if(incomplete)break;
+                        if(anchorFace(witness,cell(1,b),1))enqueue(new Pair(a,b));
                     }
                 }
             }
+            while(!frontier.isEmpty()&&!incomplete){
+                var current=frontier.remove();
+                Cell a=cell(0,current.a()), b=cell(1,current.b());
+                if(a==null||b==null)continue;
+                if(matched.size()>=maxPairs){incomplete=true;break;}
+                matched.put(current,new Match(a.target(),b.target()));
+                // Either owner's face may continue while the other owner has
+                // just one cell spanning several opposite cells.
+                for(int side=0;side<2&&!incomplete;side++){
+                    BlockPos at=side==0?current.a():current.b();
+                    Cell old=side==0?a:b;
+                    int normal=axis(frame.inward(side));
+                    int u=(normal+1)%3,v=(normal+2)%3;
+                    for(int dir=0;dir<4&&!incomplete;dir++){
+                        int[] xyz={at.getX(),at.getY(),at.getZ()};
+                        xyz[dir<2?u:v]+=(dir%2==0?1:-1);
+                        var next=cell(side,new BlockPos(xyz[0],xyz[1],xyz[2]));
+                        if(next==null||!touchingFaceCells(frame,old,next,side))continue;
+                        var candidates=opposingCandidateCells(frame,next,side);
+                        if(candidates==null){incomplete=true;break;}
+                        for(var other:candidates){
+                            var p=side==0?new Pair(next.allocated(),other):new Pair(other,next.allocated());
+                            if(!enqueue(p)&&incomplete)break;
+                        }
+                    }
+                }
+            }
+            return new ArrayList<>(matched.values());
         }
-        // Incomplete search may not masquerade as a complete reconstructed
-        // face. Keep earlier Native-direct targets in the caller unchanged.
-        return new Result(limited?List.of():new ArrayList<>(certified.values()),checks,limited,
-                limited?"SURFACE_BUDGET":certified.isEmpty()?"NO_POSITIVE_FACE":"BILATERAL_SURFACE");
     }
     /** Two adjacent block identities do not imply connected visible faces.
      * Partial collision boxes must touch across the actual tangent seam. */
     static boolean touchingFaceCells(Frame f,Cell old,Cell next){
+        return touchingFaceCells(f,old,next,0);
+    }
+    static boolean touchingFaceCells(Frame f,Cell old,Cell next,int side){
         if(f==null||old==null||next==null)return false;
-        int axis=axis(f.inwardA());
+        int axis=axis(f.inward(side));
         int[] delta={next.allocated().getX()-old.allocated().getX(),
                 next.allocated().getY()-old.allocated().getY(),
                 next.allocated().getZ()-old.allocated().getZ()};
@@ -166,7 +223,7 @@ final class BilateralContactSurface {
         }
         if(seam<0)return false;
         int other=3-axis-seam;
-        int inward=axis==0?f.inwardA().x():axis==1?f.inwardA().y():f.inwardA().z();
+        int inward=axis==0?f.inward(side).x():axis==1?f.inward(side).y():f.inward(side).z();
         for(var boxA:old.boxes())for(var boxB:next.boxes()){
             double[] alo={boxA.minX,boxA.minY,boxA.minZ};
             double[] ahi={boxA.maxX,boxA.maxY,boxA.maxZ};
@@ -186,21 +243,39 @@ final class BilateralContactSurface {
         }
         return false;
     }
-    private static List<BlockPos> opposingCandidateCells(Frame f,Cell cell){
+    private static List<BlockPos> opposingCandidateCells(Frame f,Cell cell,int side){
         if(cell==null)return List.of();
-        int ax=axis(f.inwardA());var bounds=new double[]{Double.POSITIVE_INFINITY,Double.POSITIVE_INFINITY,Double.POSITIVE_INFINITY,
+        int ax=axis(f.inward(side));var bounds=new double[]{Double.POSITIVE_INFINITY,Double.POSITIVE_INFINITY,Double.POSITIVE_INFINITY,
                 Double.NEGATIVE_INFINITY,Double.NEGATIVE_INFINITY,Double.NEGATIVE_INFINITY};
-        for(var box:cell.boxes())for(var p:faceCorners(box,cell.allocated(),ax,f.inwardA())){
-            var mapped=f.b().toLocalPoint(f.a().toWorldPoint(p));
+        for(var box:cell.boxes())for(var p:faceCorners(box,cell.allocated(),ax,f.inward(side))){
+            var mapped=f.pose(1-side).toLocalPoint(f.pose(side).toWorldPoint(p));
             if(!mapped.finite())return null;
             double[] cs={mapped.x(),mapped.y(),mapped.z()};
             for(int i=0;i<3;i++){bounds[i]=Math.min(bounds[i],cs[i]);bounds[i+3]=Math.max(bounds[i+3],cs[i]);}
         }
         if(!Double.isFinite(bounds[0]))return List.of();
         var low=new int[3];var high=new int[3];long count=1;
+        int opposingNormal=axis(f.inward(1-side));
         for(int i=0;i<3;i++){
             if(bounds[i]<Integer.MIN_VALUE+3||bounds[i+3]>Integer.MAX_VALUE-3)return null;
-            low[i]=(int)Math.floor(bounds[i]-EPS);high[i]=(int)Math.floor(bounds[i+3]+EPS);
+            if(i==opposingNormal){
+                // A face lies on a cell boundary. Either side of that plane
+                // can contain a real exterior B face; retain both cells.
+                low[i]=(int)Math.floor(bounds[i]-EPS);
+                high[i]=(int)Math.floor(bounds[i+3]+EPS);
+            }else{
+                // Tangential zero-area intersections (only a shared grid
+                // edge) cannot receive F. Removing them here avoids the
+                // expensive 3x3 candidate fan-out for every full cube.
+                low[i]=(int)Math.floor(bounds[i]+EPS);
+                high[i]=(int)Math.ceil(bounds[i+3]-EPS)-1;
+                if(high[i]<low[i]){
+                    // Very thin positive-width faces must still reach the
+                    // authoritative polygon-area test, not silently vanish.
+                    low[i]=(int)Math.floor(bounds[i]-EPS);
+                    high[i]=(int)Math.floor(bounds[i+3]+EPS);
+                }
+            }
             count*=high[i]-low[i]+1L;
             if(count>MAX_CANDIDATE_CELLS)return null;
         }
