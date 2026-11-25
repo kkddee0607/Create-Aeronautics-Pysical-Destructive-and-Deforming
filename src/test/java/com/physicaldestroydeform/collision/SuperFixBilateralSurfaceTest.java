@@ -148,7 +148,10 @@ final class SuperFixBilateralSurfaceTest {
         assertEquals(24,grant.propagationB().shares().stream().filter(s->s.layer()==0).count());
         assertEquals(grant.issuedQ(),grant.accounted(),1e-5);
     }
-    @Test void incoherentContactPlaneCannotBePromotedIntoFullFacePair(){
+    // The legacy witness-hull pairing remains strictly fail-closed on noisy
+    // planes. duperFix has a SEPARATE bilateral shape proof (see
+    // DuperFixBilateralSurfaceTest), not a relaxation of these assertions.
+    @Test void legacyIncoherentContactPlaneCannotBePromotedIntoFullFacePair(){
         var fixture=fixture(false,false,.1);
         assertTrue(fixture.patches()[0].footprints().isEmpty());
         assertTrue(fixture.patches()[1].footprints().isEmpty());

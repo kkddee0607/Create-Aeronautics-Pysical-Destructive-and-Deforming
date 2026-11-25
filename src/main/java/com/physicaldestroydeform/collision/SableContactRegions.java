@@ -262,6 +262,77 @@ public final class SableContactRegions {
                 pairBudgetA=pairing.limitedA();pairBudgetB=pairing.limitedB();
                 shapeChecksA+=firstA-remaining[0];shapeChecksB+=firstB-remaining[1];
             }
+            // duperFix: independently reconstruct connected, actually opposing
+            // VoxelShape faces from each witnessed native contact. A solver
+            // corner is only an ANCHOR, never an assumed whole-face polygon.
+            // This is material/Layer-0 evidence, not move-direction authority.
+            int[] remainingSurface={RUNTIME_MAX_UNIQUE_CELLS_PER_SIDE-collected.checksA()-shapeChecksA,
+                    RUNTIME_MAX_UNIQUE_CELLS_PER_SIDE-collected.checksB()-shapeChecksB};
+            boolean[] surfaceReadLimited={false,false};
+            int surfacePairChecks=0,surfaceMatches=0,surfaceRejected=0;
+            java.util.Set<NativeCollisionTelemetry.Contact> visitedRecords=new java.util.LinkedHashSet<>(records);
+            var surfaceReader=new BilateralContactSurface.ShapeReader(){
+                @Override public BilateralContactSurface.Cell get(int side,net.minecraft.core.BlockPos pos){
+                    String key=owners[side];
+                    if(!nativeBatch.cached(key,pos)&&remainingSurface[side]<=0){surfaceReadLimited[side]=true;return null;}
+                    var item=nativeBatch.inspectCell(key,pos);
+                    if(item.newCell())remainingSurface[side]--;
+                    if(!item.result().verified())return null;
+                    var id=item.result().key();
+                    return new BilateralContactSurface.Cell(new GameImpactCredit.Target(key,
+                            id.x()+","+id.y()+","+id.z(),id.fingerprint()),pos,nativeBatch.boxes(key,pos));
+                }
+                @Override public boolean exposed(int side,FrameMath.Vec point,
+                        com.physicaldestroydeform.deform.MovePlan.SignedAxes inward){
+                    // A face between two blocks of the SAME structure is not
+                    // an exterior contact. Unknown/unloaded cells fail closed.
+                    var beyond=point.minus(new FrameMath.Vec(inward.x(),inward.y(),inward.z()).times(.001));
+                    for(var cell:SableConsumerTargets.cells(beyond)){
+                        var observed=get(side,cell);
+                        if(surfaceReadLimited[side])return false;
+                        if(observed!=null){
+                            if(nativeBatch.contains(owners[side],cell,beyond,1e-6))return false;
+                        } else {
+                            // Absent/unloaded is NOT proof of air: only an
+                            // authoritative empty shape may leave this exposed.
+                            var sample=nativeBatch.inspectCell(owners[side],cell).result();
+                            if(sample.status()!=OwnerResolver.Status.BLOCK_UNAVAILABLE||
+                                    !java.util.Set.of("BLOCK_MISSING_OR_AIR","WORLD_SHAPE_EMPTY","PLOT_SHAPE_EMPTY")
+                                        .contains(sample.detail()))return false;
+                        }
+                    }
+                    return true;
+                }
+            };
+            var surfaceEvidence=new java.util.ArrayList<BilateralContactSurface.Match>();
+            int pairRemaining=RUNTIME_MAX_UNIQUE_CELLS_PER_SIDE;
+            if(remainingSurface[0]>0&&remainingSurface[1]>0){
+                for(var witness:visitedRecords){
+                    if(witness==null){surfaceRejected++;continue;}
+                    if(pairRemaining<=0||surfaceReadLimited[0]||surfaceReadLimited[1])break;
+                    var frame=BilateralContactSurface.fromRecord(pair,witness,witness.serverTick());
+                    if(frame==null){surfaceRejected++;continue;}
+                    var found=BilateralContactSurface.reconstruct(frame,surfaceReader,pairRemaining);
+                    pairRemaining-=found.checks();surfacePairChecks+=found.checks();
+                    if(found.incomplete()||surfaceReadLimited[0]||surfaceReadLimited[1]){surfaceRejected++;continue;}
+                    surfaceMatches+=found.matches().size();surfaceEvidence.addAll(found.matches());
+                }
+            }
+            int distinctSurfaceA=(int)surfaceEvidence.stream().map(BilateralContactSurface.Match::a).distinct().count();
+            int distinctSurfaceB=(int)surfaceEvidence.stream().map(BilateralContactSurface.Match::b).distinct().count();
+            var before=joined.size();
+            joined=new java.util.LinkedHashSet<>(mergeBilateralPairs(new java.util.ArrayList<>(joined),surfaceEvidence));
+            int surfaceAdded=Math.max(0,joined.size()-before);
+            shapeChecksA+=RUNTIME_MAX_UNIQUE_CELLS_PER_SIDE-collected.checksA()-shapeChecksA-remainingSurface[0];
+            shapeChecksB+=RUNTIME_MAX_UNIQUE_CELLS_PER_SIDE-collected.checksB()-shapeChecksB-remainingSurface[1];
+            descriptions.append(" bilateralPairs=").append(surfaceMatches)
+                    .append(" bilateralCertifiedA=").append(distinctSurfaceA)
+                    .append(" bilateralCertifiedB=").append(distinctSurfaceB)
+                    .append(" surfaceAdded=").append(surfaceAdded)
+                    .append(" surfaceChecks=").append(surfacePairChecks)
+                    .append(" surfaceRejected=").append(surfaceRejected)
+                    .append(" surfaceBudgetA=").append(surfaceReadLimited[0])
+                    .append(" surfaceBudgetB=").append(surfaceReadLimited[1]);
             patchStatus=descriptions.toString();
             collected=new Result(new ArrayList<>(joined),
                     collected.status(),collected.checksA()+shapeChecksA,collected.checksB()+shapeChecksB,
@@ -300,6 +371,63 @@ public final class SableContactRegions {
         return new Result(collected.regions(),collected.status(),collected.checksA(),collected.checksB(),
                 collected.rejected(),collected.methodA(),collected.methodB(),t2);
     }
+    /** Merge only distinct verified owner cells into the already-issued single
+     * Credit. Existing exact native pair identities and compatibility regions
+     * are preserved; an ambiguous (>8) opposite set remains unresolved. */
+    static List<ContactCreditLedger.Region> mergeBilateralPairs(
+            List<ContactCreditLedger.Region> current,List<BilateralContactSurface.Match> verified){
+        if(verified.isEmpty())return current;
+        var initialA=new java.util.HashMap<GameImpactCredit.Target,java.util.Set<GameImpactCredit.Target>>();
+        var initialB=new java.util.HashMap<GameImpactCredit.Target,java.util.Set<GameImpactCredit.Target>>();
+        for(var pair:verified){
+            initialA.computeIfAbsent(pair.a(),k->new java.util.HashSet<>()).add(pair.b());
+            initialB.computeIfAbsent(pair.b(),k->new java.util.HashSet<>()).add(pair.a());
+        }
+        // Keep every certificate on both sides or none. Dropping only one
+        // overflowed side would create references to absent opposite targets.
+        var a=new java.util.HashMap<GameImpactCredit.Target,java.util.Set<GameImpactCredit.Target>>();
+        var b=new java.util.HashMap<GameImpactCredit.Target,java.util.Set<GameImpactCredit.Target>>();
+        for(var pair:verified){
+            if(initialA.get(pair.a()).size()>SableConsumerTargets.MAX_CANDIDATES ||
+                    initialB.get(pair.b()).size()>SableConsumerTargets.MAX_CANDIDATES)continue;
+            a.computeIfAbsent(pair.a(),k->new java.util.HashSet<>()).add(pair.b());
+            b.computeIfAbsent(pair.b(),k->new java.util.HashSet<>()).add(pair.a());
+        }
+        var presentA=new java.util.HashSet<GameImpactCredit.Target>();
+        var presentB=new java.util.HashSet<GameImpactCredit.Target>();
+        var replaced=new java.util.ArrayList<ContactCreditLedger.Region>();
+        for(var region:current){
+            if(region.a()!=null)presentA.add(region.a());
+            if(region.b()!=null)presentB.add(region.b());
+            if((region.a()==null)==(region.b()==null)){replaced.add(region);continue;}
+            boolean sideA=region.a()!=null;
+            var self=sideA?region.a():region.b();
+            var candidates=sideA?a.get(self):b.get(self);
+            if(candidates==null){replaced.add(region);continue;}
+            var all=new java.util.HashSet<>(region.opposingCandidates());all.addAll(candidates);
+            if(all.size()>SableConsumerTargets.MAX_CANDIDATES){replaced.add(region);continue;}
+            replaced.add(sideA?new ContactCreditLedger.Region(self,null,new java.util.ArrayList<>(all))
+                    :new ContactCreditLedger.Region(null,self,new java.util.ArrayList<>(all)));
+        }
+        // Do not exceed the ORIGINAL per-side and overall target budgets, and
+        // do not truncate an incomplete face to concentrate F on a few seeds.
+        long newA=a.keySet().stream().filter(k->!presentA.contains(k)).count();
+        long newB=b.keySet().stream().filter(k->!presentB.contains(k)).count();
+        if(presentA.size()+newA>ContactCreditLedger.MAX_TARGETS_PER_SIDE||
+                presentB.size()+newB>ContactCreditLedger.MAX_TARGETS_PER_SIDE||
+                replaced.size()+newA+newB>ContactCreditLedger.MAX_REGIONS)return current;
+        var sortedA=new java.util.ArrayList<>(a.keySet());
+        var sortedB=new java.util.ArrayList<>(b.keySet());
+        java.util.Comparator<GameImpactCredit.Target> order=java.util.Comparator
+                .comparing(GameImpactCredit.Target::ownerKey).thenComparing(GameImpactCredit.Target::localBlock);
+        sortedA.sort(order);sortedB.sort(order);
+        for(var target:sortedA)if(!presentA.contains(target)&&a.get(target).size()<=SableConsumerTargets.MAX_CANDIDATES)
+            replaced.add(new ContactCreditLedger.Region(target,null,new java.util.ArrayList<>(a.get(target))));
+        for(var target:sortedB)if(!presentB.contains(target)&&b.get(target).size()<=SableConsumerTargets.MAX_CANDIDATES)
+            replaced.add(new ContactCreditLedger.Region(null,target,new java.util.ArrayList<>(b.get(target))));
+        return List.copyOf(new java.util.LinkedHashSet<>(replaced));
+    }
+
     @FunctionalInterface interface SurfaceProbe {
         GameImpactCredit.Target verify(int side,FrameMath.Vec point,
                 com.physicaldestroydeform.deform.MovePlan.SignedAxes inward);

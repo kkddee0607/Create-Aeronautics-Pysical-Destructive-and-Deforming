@@ -181,6 +181,12 @@ public final class OwnerResolver {
         private static boolean inside(AABB b,double x,double y,double z,double e){
             return x>b.minX-e&&x<b.maxX+e&&y>b.minY-e&&y<b.maxY+e&&z>b.minZ-e&&z<b.maxZ+e;
         }
+        /** Structural owner/shape snapshot without requiring an arbitrary interior point. */
+        public Sample inspectCell(String owner,BlockPos pos){return inspect(owner,pos,null);}
+        public List<AABB> boxes(String owner,BlockPos pos){
+            var cell=cells.get(new CellKey(owner,pos));
+            return cell!=null&&cell.identity().verified()?cell.boxes():List.of();
+        }
         public Sample inspect(String owner,BlockPos pos,Vec point) {
             var key=new CellKey(owner,pos);
             Cell evidence=cells.get(key);
@@ -202,7 +208,7 @@ public final class OwnerResolver {
             if(!structural.verified())return new Sample(structural,added);
             pointTests++;
             testedBoxes+=evidence.boxes().size();
-            if(!nearAabbs(evidence.boxes(),point,evidence.shapePos()))
+            if(point!=null&&!nearAabbs(evidence.boxes(),point,evidence.shapePos()))
                 return new Sample(Check.failed(Status.BLOCK_MISMATCH,"CACHED_SHAPE_POINT_MISS"),added);
             return new Sample(structural,added);
         }
@@ -398,7 +404,7 @@ public final class OwnerResolver {
             try {
                 state=actualPlot.getEmbeddedLevelAccessor().getBlockState(relative);
                 if(state!=null) {
-                    var shape=state.getCollisionShape(actualPlot.getEmbeddedLevelAccessor(),relative);
+                    var shape=SableEffectShapeReader.read(actualPlot.getEmbeddedLevelAccessor(),state);
                     if(shape.isEmpty())return Check.failed(Status.BLOCK_UNAVAILABLE,"PLOT_SHAPE_EMPTY");
                     if(capture!=null)capture.value=shape;
                     if(localContact!=null && !nearShape(shape,localContact,pos))
@@ -412,7 +418,7 @@ public final class OwnerResolver {
             try {
                 state=level.getBlockState(pos);
                 if(state!=null) {
-                    var shape=state.getCollisionShape(level,pos);
+                    var shape=SableEffectShapeReader.read(level,state);
                     if(shape.isEmpty())return Check.failed(Status.BLOCK_UNAVAILABLE,"WORLD_SHAPE_EMPTY");
                     if(capture!=null)capture.value=shape;
                     if(localContact!=null && !nearShape(shape,localContact,pos))

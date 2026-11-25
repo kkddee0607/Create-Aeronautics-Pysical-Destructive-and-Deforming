@@ -57,14 +57,14 @@ tasks.named('test', Test).configure {
 }
 jar {
     // Keep existing mod/save version; distinguish the fix release artifact.
-    archiveClassifier.set('superFix-buildFix2')
+    archiveClassifier.set('duperFix')
     manifest {
         attributes([
             'Specification-Title': 'Physical Destruction and Deforming',
             'Specification-Version': '0.6.1',
             'Implementation-Title': project.name,
             'Implementation-Version': project.version,
-            'PDD-Revision': '0.6.1-superFix-buildFix2'
+            'PDD-Revision': '0.6.1-duperFix'
         ])
     }
 }
