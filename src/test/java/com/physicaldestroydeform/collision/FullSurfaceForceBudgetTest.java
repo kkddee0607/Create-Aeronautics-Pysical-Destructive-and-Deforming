@@ -29,9 +29,11 @@ final class FullSurfaceForceBudgetTest {
             regions.add(new ContactCreditLedger.Region(contactA,contactB));
         }
         var ledger=new ContactCreditLedger();
-        var grant=ledger.issuePropagated(pair,decision,ContactCreditLedger.Source.SABLE_POST_EFFECT,
+        // Verify the same bilateral-target API used by RealFixRuntimeBridge.
+        var grant=ledger.issuePropagatedTargets(pair,decision,ContactCreditLedger.Source.SABLE_POST_EFFECT,
                 regions,(from,x,y,z)->ForcePropagation.Probe.empty(),
-                fp->new MaterialProperties(0,32,0,0,false),force,DamageModel.Settings.defaults());
+                target->new MaterialProperties(0,32,0,0,false),force,DamageModel.Settings.defaults(),
+                Map.of(),null,fp->new MaterialProperties(0,32,0,0,false));
         assertTrue(grant.credited(),ledger.lastPropagationFailure());
         assertEquals(25,grant.propagationA().shares().size());
         assertEquals(25,grant.propagationB().shares().size());

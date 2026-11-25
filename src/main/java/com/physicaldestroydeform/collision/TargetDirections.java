@@ -37,10 +37,13 @@ public final class TargetDirections {
         var d=new TargetDirections();
         if(!complete){d.gate="INCOMPLETE_SOURCE";return d;}
         if(contacts.isEmpty()){d.gate="NO_CONTACTS";return d;}
-        if(contacts.stream().anyMatch(Contact::capSaturated)){d.gate="NATIVE_CAP";return d;}
+        // A saturated native poll disables movement direction authorization,
+        // not independent exact-frame shape correspondence for the records
+        // that were actually observed. Never infer missing native contacts.
         long epoch=pre.stream().filter(p->p.phase()==CollisionFrame.Phase.PRE_SOLVER&&p.serverTick()==tick&&pair.dimension().equals(p.dimension())).mapToLong(CollisionFrame.Snapshot::epoch).min().orElse(-1);
         if(epoch<0){d.gate="NO_PRE_EPOCH";return d;}
-        d.pair=pair;d.contacts=contacts;d.pre=pre;d.tick=tick;d.epoch=epoch;d.gate="AUDIT";
+        d.pair=pair;d.contacts=contacts;d.pre=pre;d.tick=tick;d.epoch=epoch;
+        d.gate=contacts.stream().anyMatch(Contact::capSaturated)?"NATIVE_CAP":"AUDIT";
         return d;
     }
     /** Compatibility entry; production calls forEvent and passes it to the single region audit. */
@@ -51,7 +54,7 @@ public final class TargetDirections {
         return d;
     }
     MovePlan.SignedAxes axis(String owner,Contact contact){
-        if(epoch<0||contact.serverTick()!=tick)return null;
+        if(!active()||contact.serverTick()!=tick)return null;
         var result=normals.computeIfAbsent(contact,c->normalProofs.computeIfAbsent(NormalKey.of(c),key->{
             var n=NativeEffectDirection.verify(pair,List.of(c),pre);
             return NativeApproachEvidence.approaching(pair,pre,n,tick)?n:NativeEffectDirection.unknown("APPROACH_UNVERIFIED");
@@ -64,7 +67,7 @@ public final class TargetDirections {
     /** Expanded polygons require unanimous verified native axes and nearly axial normals.
      * Never promote a sampled cap, sparse halo, ambiguous manifold or two-axis approximation. */
     MovePlan.SignedAxes uniformPatchAxis(String owner){
-        if(epoch<0)return null;
+        if(!active())return null;
         MovePlan.SignedAxes common=null;
         var previous=new LinkedHashSet<FrameMath.Vec>();
         for(var c:contacts){
@@ -94,27 +97,44 @@ public final class TargetDirections {
                     :a.toLocalPoint(b.toWorldPoint(allocated).minus(delta));
         }
         MovePlan.SignedAxes axis(boolean onA){return onA?inwardA:inwardB;}
+        /** Both independent source surfaces must prove the SAME rigid mapping;
+         * comparing projected positions alone can pair unrelated frames. */
+        boolean coherent(PatchFrames other){
+            return other!=null&&a.equals(other.a)&&b.equals(other.b)
+                    &&inwardA.equals(other.inwardA)&&inwardB.equals(other.inwardB)
+                    &&delta.minus(other.delta).squareLength()<=ContactFacePatch.PAIR_EPS*ContactFacePatch.PAIR_EPS;
+        }
     }
-    PatchFrames patchFrames(){
-        if(!active()){patchPairGate="INACTIVE";return null;}
+    PatchFrames patchFrames(){return patchFrames(contacts);}
+    /** Only the explicitly witnessed native records on ONE source surface may
+     * establish its material-only mapping. A cap cannot authorize missing
+     * records and this proof never authorizes deformation direction. */
+    PatchFrames patchFrames(List<Contact> surfaceRecords){
+        if(pair==null||epoch<0||surfaceRecords==null||surfaceRecords.isEmpty()){
+            patchPairGate="NO_FRAME_EVIDENCE";return null;
+        }
         // Conservative separate budget for dual-frame patch proof. Native
         // candidate consensus remains available even if this extra work is held.
         long cost=0;
         for(var f:pre)if(f.phase()==CollisionFrame.Phase.PRE_SOLVER&&f.serverTick()==tick&&pair.dimension().equals(f.dimension()))
             cost+=2L*Math.max(1,f.bodies().size());
-        if(Math.max(1,cost)>8L*SableContactRegions.RUNTIME_MAX_UNIQUE_CELLS_PER_SIDE/Math.max(1,contacts.size())){
+        if(Math.max(1,cost)>8L*SableContactRegions.RUNTIME_MAX_UNIQUE_CELLS_PER_SIDE/Math.max(1,surfaceRecords.size())){
             patchPairGate="FRAME_WORK_BUDGET";return null;
         }
         PatchFrames common=null;
         try{
-            for(var c:contacts){
+            for(var c:surfaceRecords){
+                if(c.serverTick()!=tick||!pair.dimension().equals(c.dimension())
+                        ||!contacts.contains(c)){patchPairGate="SOURCE_RECORD_MISMATCH";return null;}
                 // An exactly revalidated current-record witness need not be
                 // stationary: all captured pre/effect frames must agree on
                 // each source point, and both strict non-collinear polygons
                 // later establish the common tangential mapping.
                 var g=VerifiedContactGraph.revalidateGeometry(pair,c,pre);
                 if(g==null){patchPairGate="FRAME_REVALIDATION_REJECTED";return null;}
-                boolean nativeA=SableConsumerTargets.sourceSide(pair.a().stableKey(),c,pair.dimension())==1;
+                int ownerSide=SableConsumerTargets.sourceSide(pair.a().stableKey(),c,pair.dimension());
+                if(ownerSide==0){patchPairGate="OWNER_FRAME_MISMATCH";return null;}
+                boolean nativeA=ownerSide==1;
                 var an=nativeA?g.outwardA():g.outwardB();var bn=nativeA?g.outwardB():g.outwardA();
                 var aa=patchAxis(an,g.firstEpoch());var ba=patchAxis(bn,g.firstEpoch());
                 if(aa==null||ba==null){patchPairGate="NONAXIAL_DUAL_WITNESS";return null;}
@@ -157,7 +177,7 @@ public final class TargetDirections {
         original.add(target);
     }
     void seed(GameImpactCredit.Target target){original.add(target);}
-    boolean active(){return epoch>=0;}
+    boolean active(){return epoch>=0 && "AUDIT".equals(gate);}
     boolean hasProvenSeed(){return !directions.isEmpty();}
     String summary(){
         var reasons=new TreeMap<String,Integer>();

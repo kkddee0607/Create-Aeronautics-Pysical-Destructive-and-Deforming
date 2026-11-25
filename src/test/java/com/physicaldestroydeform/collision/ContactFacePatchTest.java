@@ -69,6 +69,11 @@ class ContactFacePatchTest {
         assertTrue(patch.planarInterior().contains(target(2,2)));
         assertFalse(patch.planarInterior().contains(target(0,2)));
         assertEquals(new FrameMath.Vec(2.5,65,2.5),patch.interiorPoints().get(target(2,2)));
+        // Positive face area is possible even with the cell centre exactly
+        // on the witnessed hull edge. Only movement directions stay strict.
+        assertTrue(patch.interiorPoints().containsKey(target(0,2)));
+        assertTrue(patch.covers(new FrameMath.Vec(.5,65,2.5)));
+        assertFalse(patch.covers(new FrameMath.Vec(-.5,65,2.5)));
         assertTrue(patch.covers(new FrameMath.Vec(2.5,65,2.5)));
         assertFalse(patch.covers(new FrameMath.Vec(.5,65,2.5)),"polygon edge alone is not strict coverage");
         assertFalse(patch.covers(new FrameMath.Vec(2.5,65.001,2.5)),"nearby plane is not the same surface");
@@ -296,6 +301,32 @@ class ContactFacePatchTest {
         assertTrue(result.reason().contains("faces=1"),result.reason());
         assertEquals(11,result.added().size());
         assertTrue(result.added().stream().anyMatch(t->t.localBlock().equals("3,6,2")));
+    }
+
+    private static ContactFacePatch.Footprint narrowFace(double x0,double x1){
+        var contacts=new ArrayList<NativeCollisionTelemetry.Contact>();
+        for(double x:new double[]{x0,x1})for(double z:new double[]{.1,.9})
+            contacts.add(new NativeCollisionTelemetry.Contact(7,-1,3500,
+                    0,-1,0,0,1,0,0,0,0,x,65,z,DIM,5));
+        var patch=ContactFacePatch.reconstruct(DIM,OWNER,BlockPos.ZERO,
+                List.of(target(0,0)),contacts,(pos,p)->target(pos.getX(),pos.getZ()));
+        assertEquals(1,patch.footprints().size(),patch.reason());
+        return patch.footprints().getFirst();
+    }
+    @Test void twoDisjointFaceSliversWithinOneBlockMustNotPair(){
+        var left=narrowFace(.05,.35);var right=narrowFace(.65,.95);
+        var center=new FrameMath.Vec(.5,65,.5);
+        assertTrue(left.covers(center));assertTrue(right.covers(center));
+        assertNull(ContactFacePatch.commonSurfacePoint(left,right,center,center,p->p),
+                "Separate positive areas inside one cell are not mutual contact evidence");
+    }
+    @Test void overlappingSliversSelectAPointInsideBothProvedPolygons(){
+        var left=narrowFace(.20,.80);var right=narrowFace(.55,.95);
+        var center=new FrameMath.Vec(.5,65,.5);
+        var shared=ContactFacePatch.commonSurfacePoint(left,right,center,center,p->p);
+        assertNotNull(shared);
+        assertTrue(shared.x()>.55&&shared.x()<.80);
+        assertEquals(65,shared.y(),1e-10);
     }
 
 }

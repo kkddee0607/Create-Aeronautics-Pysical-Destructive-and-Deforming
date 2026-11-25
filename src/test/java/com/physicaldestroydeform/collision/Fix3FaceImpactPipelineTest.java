@@ -34,10 +34,14 @@ class Fix3FaceImpactPipelineTest {
         assertEquals(GameImpactCredit.Reason.APPROVED,approved.reason());
         assertEquals(40_000_000d,approved.peakForce(),0);
 
+        // The live bridge uses issuePropagatedTargets(), which requires actual
+        // bilateral material proof. Legacy issuePropagated() bypassed that gate.
+        var opposite=new GameImpactCredit.Target(pair.a().stableKey(),"0,65,0","minecraft:stone");
         var regions=new ArrayList<ContactCreditLedger.Region>();
-        for(var t:all)regions.add(new ContactCreditLedger.Region(null,t));
+        regions.add(new ContactCreditLedger.Region(opposite,null,List.of(roots.getFirst())));
+        for(var t:all)regions.add(new ContactCreditLedger.Region(null,t,List.of(opposite)));
         var ledger=new ContactCreditLedger();
-        var grant=ledger.issuePropagated(pair,approved,
+        var grant=ledger.issuePropagatedTargets(pair,approved,
                 ContactCreditLedger.Source.SABLE_POST_EFFECT,regions,
                 (from,x,y,z)->x>=0&&x<5&&z>=0&&z<5&&y>=61&&y<=64
                         ?ForcePropagation.Probe.present(new GameImpactCredit.Target(
@@ -47,7 +51,8 @@ class Fix3FaceImpactPipelineTest {
                 ignored->new MaterialProperties(0,255,0,0,false),
                 GameImpactCredit.Settings.provisional(),DamageModel.Settings.defaults(),
                 Map.of(ContactFacePatchTest.OWNER,new ForcePropagation.Orientation(
-                        new FrameMath.Vec(0,-1,0),"NATIVE_OWNER_LOCAL")));
+                        new FrameMath.Vec(0,-1,0),"NATIVE_OWNER_LOCAL")),
+                null,ignored->new MaterialProperties(0,255,0,0,false));
         assertEquals(ContactCreditLedger.Status.ISSUED,grant.status());
         assertEquals(25,grant.propagationB().shares().stream()
                 .filter(s->s.layer()==0).count());
@@ -55,9 +60,10 @@ class Fix3FaceImpactPipelineTest {
         assertEquals(grant.issuedQ(),grant.accounted(),1e-4);
         assertTrue(grant.propagationB().audit().maxDepth()>0);
         assertEquals(ContactCreditLedger.Status.DUPLICATE_CAUSE,
-                ledger.issuePropagated(pair,approved,ContactCreditLedger.Source.SABLE_POST_EFFECT,
+                ledger.issuePropagatedTargets(pair,approved,ContactCreditLedger.Source.SABLE_POST_EFFECT,
                         regions,(from,x,y,z)->ForcePropagation.Probe.empty(),
                         ignored->new MaterialProperties(0,255,0,0,false),
-                        GameImpactCredit.Settings.provisional(),DamageModel.Settings.defaults()).status());
+                        GameImpactCredit.Settings.provisional(),DamageModel.Settings.defaults(),
+                        Map.of(),null,ignored->new MaterialProperties(0,255,0,0,false)).status());
     }
 }

@@ -178,6 +178,8 @@ public final class SableContactRegions {
         // The original native pair/tick keeps exactly ONE shared F/Q envelope.
         int expandedA=0, expandedB=0, attemptedA=0, attemptedB=0;
         int pairedPatchA=0,pairedPatchB=0;
+        int pairProofTestsA=0,pairProofTestsB=0;
+        boolean pairBudgetA=false,pairBudgetB=false;
         int shapeChecksA=0, shapeChecksB=0;
         String patchStatus="NOT_ELIGIBLE";
         // One owner may be incomplete while the opposite source-local owner
@@ -241,45 +243,24 @@ public final class SableContactRegions {
                                 ?"TARGET_BUDGET":patch.reason())
                         .append(" tested=").append(patch.attempted());
             }
-            // Material-only patch proof: a strict repaired source point may
-            // obtain the opposing E only from an independently verified
-            // opposite surface at the SAME coherent native frame mapping.
-            // This never invents a cross-owner force edge, target or budget.
+            // A material-only pairing can be established from the independently
+            // revalidated source records on EACH surface. Direction approval is
+            // deliberately separate: a sampled native cap must not grant move
+            // direction, but it does not invalidate a positive exact-frame hit.
             if(pairedSurfaces[0]!=null&&pairedSurfaces[1]!=null&&
                     (!pairedSurfaces[0].interiorPoints().isEmpty()||!pairedSurfaces[1].interiorPoints().isEmpty())){
-                var frames=directions.patchFrames();
-                if(frames!=null){
-                    var seedA=new java.util.HashSet<GameImpactCredit.Target>();
-                    var seedB=new java.util.HashSet<GameImpactCredit.Target>();
-                    for(var r:joined){if(r.a()!=null)seedA.add(r.a());if(r.b()!=null)seedB.add(r.b());}
-                    var patchesRemaining=new int[]{RUNTIME_MAX_UNIQUE_CELLS_PER_SIDE-collected.checksA()-shapeChecksA,
-                            RUNTIME_MAX_UNIQUE_CELLS_PER_SIDE-collected.checksB()-shapeChecksB};
-                    int initialA=patchesRemaining[0],initialB=patchesRemaining[1];
-                    for(int side=0;side<2;side++){
-                        boolean onA=side==0;
-                        var ownOffset=ownerOffsets.get(owners[side]);var otherOffset=ownerOffsets.get(owners[1-side]);
-                        if(ownOffset==null||otherOffset==null)continue;
-                        var own=pairedSurfaces[side];var other=pairedSurfaces[1-side];
-                        var ordered=new ArrayList<>(own.interiorPoints().entrySet());
-                        ordered.sort(java.util.Comparator.comparing(e->e.getKey().localBlock()));
-                        for(var entry:ordered){
-                            var relative=entry.getValue();var source=offset(relative,ownOffset,1);
-                            var opposite=frames.opposite(source,onA);
-                            if(!other.covers(offset(opposite,otherOffset,-1)))continue;
-                            var self=uniquePatchTarget(nativeBatch,owners[side],source,frames.axis(onA),patchesRemaining,side);
-                            if(!entry.getKey().equals(self))continue;
-                            var target=uniquePatchTarget(nativeBatch,owners[1-side],opposite,frames.axis(!onA),patchesRemaining,1-side);
-                            if(target==null||!(onA?seedB:seedA).contains(target))continue;
-                            var previous=onA?new ContactCreditLedger.Region(self,null):new ContactCreditLedger.Region(null,self);
-                            if(joined.remove(previous)){
-                                joined.add(onA?new ContactCreditLedger.Region(self,null,List.of(target))
-                                        :new ContactCreditLedger.Region(null,self,List.of(target)));
-                                if(onA)pairedPatchA++;else pairedPatchB++;
-                            }
-                        }
-                    }
-                    shapeChecksA+=initialA-patchesRemaining[0];shapeChecksB+=initialB-patchesRemaining[1];
-                }
+                var remaining=new int[]{RUNTIME_MAX_UNIQUE_CELLS_PER_SIDE-collected.checksA()-shapeChecksA,
+                        RUNTIME_MAX_UNIQUE_CELLS_PER_SIDE-collected.checksB()-shapeChecksB};
+                int firstA=remaining[0],firstB=remaining[1];
+                var pairing=pairVerifiedSurfaces(new ArrayList<>(joined),pairedSurfaces,
+                        new net.minecraft.core.BlockPos[]{
+                            ownerOffsets.get(owners[0]),ownerOffsets.get(owners[1])},directions,
+                        (side,point,axis)->uniquePatchTarget(nativeBatch,owners[side],point,axis,remaining,side));
+                joined=new LinkedHashSet<>(pairing.regions());
+                pairedPatchA=pairing.pairedA();pairedPatchB=pairing.pairedB();
+                pairProofTestsA=pairing.checksA();pairProofTestsB=pairing.checksB();
+                pairBudgetA=pairing.limitedA();pairBudgetB=pairing.limitedB();
+                shapeChecksA+=firstA-remaining[0];shapeChecksB+=firstB-remaining[1];
             }
             patchStatus=descriptions.toString();
             collected=new Result(new ArrayList<>(joined),
@@ -313,10 +294,94 @@ public final class SableContactRegions {
                 t2.detail()+" patchMaterialPairedA="+pairedPatchA+" patchMaterialPairedB="+pairedPatchB+
                         " exactPairs="+collected.regions().stream().filter(r->r.a()!=null&&r.b()!=null).count()+
                         " candidateSets="+collected.regions().stream().filter(r->!r.opposingCandidates().isEmpty()).count()+
+                        " pairProofTestsA="+pairProofTestsA+" pairProofTestsB="+pairProofTestsB+
+                        " pairBudgetA="+pairBudgetA+" pairBudgetB="+pairBudgetB+
                         " unpaired="+collected.regions().stream().filter(r->(r.a()==null||r.b()==null)&&r.opposingCandidates().isEmpty()).count());
         return new Result(collected.regions(),collected.status(),collected.checksA(),collected.checksB(),
                 collected.rejected(),collected.methodA(),collected.methodB(),t2);
     }
+    @FunctionalInterface interface SurfaceProbe {
+        GameImpactCredit.Target verify(int side,FrameMath.Vec point,
+                com.physicaldestroydeform.deform.MovePlan.SignedAxes inward);
+    }
+    record SurfacePairing(List<ContactCreditLedger.Region> regions,int pairedA,int pairedB,
+                          int checksA,int checksB,boolean limitedA,boolean limitedB){
+        SurfacePairing {regions=List.copyOf(regions);}
+    }
+    private record ProvenFootprint(ContactFacePatch.Footprint face,TargetDirections.PatchFrames frame){}
+
+    /** Pure pairing policy shared by the live auditor and regression tests.
+     * A source-local shape patch is only a candidate; a matching independent
+     * opposite footprint AND two exterior VoxelShape checks are required.
+     * No F/Q is issued and no cross-owner propagation edge is manufactured. */
+    static SurfacePairing pairVerifiedSurfaces(List<ContactCreditLedger.Region> regions,
+            ContactFacePatch.Result[] patches,net.minecraft.core.BlockPos[] offsets,
+            TargetDirections directions,SurfaceProbe proof){
+        var joined=new LinkedHashSet<>(regions);
+        if(patches==null||patches.length!=2||patches[0]==null||patches[1]==null
+                ||offsets==null||offsets.length!=2
+                ||offsets[0]==null||offsets[1]==null||directions==null||proof==null)
+            return new SurfacePairing(new ArrayList<>(joined),0,0,0,0,false,false);
+        var footprintProofs=List.of(new ArrayList<ProvenFootprint>(),new ArrayList<ProvenFootprint>());
+        for(int side=0;side<2;side++){
+            for(var face:patches[side].footprints()){
+                var frame=directions.patchFrames(face.witnesses());
+                if(frame!=null)footprintProofs.get(side).add(new ProvenFootprint(face,frame));
+            }
+        }
+        @SuppressWarnings("unchecked")
+        java.util.Set<GameImpactCredit.Target>[] seeds=new java.util.Set[]{new java.util.HashSet<>(),new java.util.HashSet<>()};
+        for(var region:regions){if(region.a()!=null)seeds[0].add(region.a());
+            if(region.b()!=null)seeds[1].add(region.b());}
+        int[] paired=new int[2],checks=new int[2];
+        boolean[] limited=new boolean[2];
+        for(int side=0;side<2;side++){
+            final boolean onA=side==0;
+            var ordered=new ArrayList<>(patches[side].interiorPoints().entrySet());
+            ordered.sort(java.util.Comparator.comparing(e->e.getKey().localBlock()));
+            targetLoop: for(var entry:ordered){
+                var previous=onA?new ContactCreditLedger.Region(entry.getKey(),null)
+                        :new ContactCreditLedger.Region(null,entry.getKey());
+                if(!joined.contains(previous))continue;
+                var source=offset(entry.getValue(),offsets[side],1);
+                for(var face:footprintProofs.get(side)){
+                    if(checks[side]>=RUNTIME_MAX_UNIQUE_CELLS_PER_SIDE){limited[side]=true;break targetLoop;}
+                    checks[side]++;
+                    if(!face.face().covers(entry.getValue()))continue;
+                    var frame=face.frame();
+                    var mapped=frame.opposite(source,onA);
+                    if(!mapped.finite())continue;
+                    var otherCenter=offset(mapped,offsets[1-side],-1);
+                    for(var other:footprintProofs.get(1-side)){
+                        if(checks[side]>=RUNTIME_MAX_UNIQUE_CELLS_PER_SIDE){limited[side]=true;break targetLoop;}
+                        checks[side]++;
+                        if(!frame.coherent(other.frame()))continue;
+                        var relative=ContactFacePatch.commonSurfacePoint(face.face(),other.face(),
+                                entry.getValue(),otherCenter,p->offset(frame.opposite(
+                                        offset(p,offsets[side],1),onA),offsets[1-side],-1));
+                        if(relative==null)continue;
+                        // Recheck the SAME positive-area point on both shapes.
+                        var opposite=offset(relative,offsets[1-side],1);
+                        var actualSource=frame.opposite(opposite,!onA);
+                        var self=proof.verify(side,actualSource,frame.axis(onA));
+                        if(!entry.getKey().equals(self))continue;
+                        var target=proof.verify(1-side,opposite,frame.axis(!onA));
+                        if(target==null||!seeds[1-side].contains(target))continue;
+                        if(joined.remove(previous)){
+                            joined.add(onA?new ContactCreditLedger.Region(self,null,List.of(target))
+                                    :new ContactCreditLedger.Region(null,self,List.of(target)));
+                            paired[side]++;
+                        }
+                        break;
+                    }
+                    if(!joined.contains(previous))break;
+                }
+            }
+        }
+        return new SurfacePairing(new ArrayList<>(joined),paired[0],paired[1],
+                checks[0],checks[1],limited[0],limited[1]);
+    }
+
     private static FrameMath.Vec offset(FrameMath.Vec p,net.minecraft.core.BlockPos d,int sign){
         return p.plus(new FrameMath.Vec(sign*(double)d.getX(),sign*(double)d.getY(),sign*(double)d.getZ()));
     }

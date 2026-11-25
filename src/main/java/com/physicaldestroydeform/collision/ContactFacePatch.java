@@ -43,26 +43,31 @@ final class ContactFacePatch {
         Result { added = List.copyOf(added); planarInterior=Set.copyOf(planarInterior);
             interiorPoints=Map.copyOf(interiorPoints);footprints=List.copyOf(footprints); }
         Result(List<GameImpactCredit.Target> added,int attempted,String reason){this(added,attempted,reason,Set.of(),Map.of(),List.of());}
-        /** A second owner must have independently reconstructed a coplanar strict
-         * polygon through this point; approximate hull edges and halo cannot pair. */
+        /** A second owner must independently prove a coplanar positive-area
+         * polygon/shape intersection. Merely sharing a line or point is not enough. */
         boolean covers(FrameMath.Vec point){return point!=null&&point.finite()&&footprints.stream().anyMatch(f->f.covers(point));}
     }
     private record Point(double u, double v) {}
-    record Footprint(int axis,double plane,List<Point> hull){
+    record Footprint(int axis,double plane,List<Point> hull,
+                     List<NativeCollisionTelemetry.Contact> witnesses){
+        Footprint {hull=List.copyOf(hull);witnesses=List.copyOf(witnesses);}
         boolean covers(FrameMath.Vec p){
+            if(p==null||!p.finite())return false;
             double[] v={p.x(),p.y(),p.z()};
-            return Math.abs(v[axis]-plane)<=PAIR_EPS&&strictlyWithinPolygon(hull,v[(axis+1)%3],v[(axis+2)%3]);
+            return Math.abs(v[axis]-plane)<=PAIR_EPS &&
+                    overlapsCell(hull,Math.floor(v[(axis+1)%3]),Math.floor(v[(axis+2)%3]));
         }
     }
     private record Witness(double[] normal,double plane,Point point,int axis,boolean axisAligned) {}
     private static final class Plane {
         final Witness first;
         final List<Point> points=new ArrayList<>();
+        final List<NativeCollisionTelemetry.Contact> records=new ArrayList<>();
         double planeSum;
         double minPlane=Double.POSITIVE_INFINITY,maxPlane=Double.NEGATIVE_INFINITY;
-        Plane(Witness first) {this.first=first;include(first);}
-        void include(Witness witness) {
-            points.add(witness.point());planeSum+=witness.plane();
+        Plane(Witness first,NativeCollisionTelemetry.Contact source) {this.first=first;include(first,source);}
+        void include(Witness witness,NativeCollisionTelemetry.Contact source) {
+            records.add(source);points.add(witness.point());planeSum+=witness.plane();
             minPlane=Math.min(minPlane,witness.plane());maxPlane=Math.max(maxPlane,witness.plane());
         }
         double plane() {return planeSum/points.size();}
@@ -115,8 +120,8 @@ final class ContactFacePatch {
                     match=group;break;
                 }
             }
-            if(match==null)planes.add(new Plane(witness));
-            else match.include(witness);
+            if(match==null)planes.add(new Plane(witness,record));
+            else match.include(witness,record);
         }
         Set<String> original=new HashSet<>();
         for(var target:verified)if(owner.equals(target.ownerKey()))original.add(target.localBlock());
@@ -205,7 +210,10 @@ final class ContactFacePatch {
                         if(group.first.axisAligned()
                                 && group.maxPlane-group.minPlane<=SableConsumerTargets.EPSILON
                                 && strictlyWithinPolygon(hull,cu,cv))planarInterior.add(found);
-                        if(pairable&&strictlyWithinPolygon(hull,cu,cv))interiorPoints.put(found,new FrameMath.Vec(p[0],p[1],p[2]));
+                        // Pairing is authorized by positive AREA within the
+                        // witnessed polygon, not by the location of a cell's
+                        // center. Border blocks can touch along half a face.
+                        if(pairable&&overlapsCell(hull,a,b))interiorPoints.put(found,new FrameMath.Vec(p[0],p[1],p[2]));
                     }
                 }
             }
@@ -220,7 +228,7 @@ final class ContactFacePatch {
             } else {
                 faces++;
                 if(localHalo)sparse++;
-                if(pairable)footprints.add(new Footprint(axis,plane,List.copyOf(hull)));
+                if(pairable)footprints.add(new Footprint(axis,plane,hull,group.records));
             }
         }
         if(faces==0)return new Result(List.of(),attempted,
@@ -298,6 +306,106 @@ final class ContactFacePatch {
         }
         return inside;
     }
+    /** A shared cell is not a shared contact patch: intersect BOTH witnessed
+     * polygons and both owner-local cells after the exact rigid mapping.
+     * The returned point is strictly inside positive common area and must
+     * still pass both independent live exterior CollisionShape audits. */
+    static FrameMath.Vec commonSurfacePoint(Footprint from,Footprint to,
+            FrameMath.Vec fromCenter,FrameMath.Vec toCenter,
+            java.util.function.UnaryOperator<FrameMath.Vec> fromTo){
+        if(from==null||to==null||fromCenter==null||toCenter==null||fromTo==null
+                ||!fromCenter.finite()||!toCenter.finite()
+                ||!from.covers(fromCenter)||!to.covers(toCenter))return null;
+        try{
+            double[] source={fromCenter.x(),fromCenter.y(),fromCenter.z()};
+            int u=(from.axis()+1)%3,v=(from.axis()+2)%3;
+            var polygon=clip(from.hull(),square(Math.floor(source[u]),Math.floor(source[v])));
+            if(polygon.size()<3)return null;
+            var translated=new ArrayList<Point>(polygon.size());
+            int targetU=(to.axis()+1)%3,targetV=(to.axis()+2)%3;
+            for(var p:polygon){
+                double[] xyz=new double[3];xyz[from.axis()]=from.plane();xyz[u]=p.u();xyz[v]=p.v();
+                var mapped=fromTo.apply(new FrameMath.Vec(xyz[0],xyz[1],xyz[2]));
+                if(mapped==null||!mapped.finite())return null;
+                double[] values={mapped.x(),mapped.y(),mapped.z()};
+                if(Math.abs(values[to.axis()]-to.plane())>PAIR_EPS)return null;
+                translated.add(new Point(values[targetU],values[targetV]));
+            }
+            translated= new ArrayList<>(clip(translated,to.hull()));
+            double[] target={toCenter.x(),toCenter.y(),toCenter.z()};
+            translated=new ArrayList<>(clip(translated,square(Math.floor(target[targetU]),Math.floor(target[targetV]))));
+            if(translated.size()<3||area(translated)<=GRID_EPS*GRID_EPS)return null;
+            // Mean of a convex polygon's vertices lies in its interior.
+            double au=0,av=0;
+            for(var p:translated){au+=p.u();av+=p.v();}
+            double[] xyz=new double[3];xyz[to.axis()]=to.plane();
+            xyz[targetU]=au/translated.size();xyz[targetV]=av/translated.size();
+            var point=new FrameMath.Vec(xyz[0],xyz[1],xyz[2]);
+            return point.finite()?point:null;
+        }catch(RuntimeException invalid){return null;}
+    }
+    private static List<Point> square(double u,double v){
+        return List.of(new Point(u,v),new Point(u+1,v),new Point(u+1,v+1),new Point(u,v+1));
+    }
+    /** Sutherland-Hodgman clipping; both convex polygons are CCW. */
+    private static List<Point> clip(List<Point> source,List<Point> bound){
+        var polygon=new ArrayList<>(source);
+        if(polygon.size()<3)return List.of();
+        for(int j=0;j<bound.size()&&!polygon.isEmpty();j++){
+            var left=bound.get(j);var right=bound.get((j+1)%bound.size());
+            var clipped=new ArrayList<Point>();
+            var previous=polygon.getLast();double prevDist=cross(left,right,previous);
+            for(var current:polygon){
+                double nextDist=cross(left,right,current);
+                boolean in=nextDist>=0,wasIn=prevDist>=0;
+                if(in!=wasIn){
+                    double t=prevDist/(prevDist-nextDist);
+                    clipped.add(new Point(previous.u()+t*(current.u()-previous.u()),
+                            previous.v()+t*(current.v()-previous.v())));
+                }
+                if(in)clipped.add(current);
+                previous=current;prevDist=nextDist;
+            }
+            polygon=clipped;
+        }
+        return polygon;
+    }
+    private static double area(List<Point> polygon){
+        Point o=polygon.getFirst();double twice=0;
+        for(int i=1;i+1<polygon.size();i++){
+            Point a=polygon.get(i),b=polygon.get(i+1);
+            twice+=(a.u()-o.u())*(b.v()-o.v())-(a.v()-o.v())*(b.u()-o.u());
+        }
+        return Math.abs(twice)*.5;
+    }
+
+    /** Positive-area convex-polygon/unit-cell intersection using separating
+     * axes. Point/edge contact is rejected; no rectangular hull inflation. */
+    private static boolean overlapsCell(List<Point> hull,double cellU,double cellV){
+        if(hull.size()<3||!Double.isFinite(cellU)||!Double.isFinite(cellV))return false;
+        double minU=Double.POSITIVE_INFINITY,maxU=Double.NEGATIVE_INFINITY;
+        double minV=Double.POSITIVE_INFINITY,maxV=Double.NEGATIVE_INFINITY;
+        for(var p:hull){
+            minU=Math.min(minU,p.u());maxU=Math.max(maxU,p.u());
+            minV=Math.min(minV,p.v());maxV=Math.max(maxV,p.v());
+        }
+        if(maxU<=cellU+GRID_EPS||minU>=cellU+1-GRID_EPS||
+                maxV<=cellV+GRID_EPS||minV>=cellV+1-GRID_EPS)return false;
+        double midU=cellU+.5,midV=cellV+.5;
+        for(int i=0;i<hull.size();i++){
+            Point a=hull.get(i),b=hull.get((i+1)%hull.size());
+            double nx=a.v()-b.v(),ny=b.u()-a.u();
+            double low=Double.POSITIVE_INFINITY,high=Double.NEGATIVE_INFINITY;
+            for(var p:hull){double projection=p.u()*nx+p.v()*ny;
+                low=Math.min(low,projection);high=Math.max(high,projection);}
+            double projected=midU*nx+midV*ny;
+            double half=(Math.abs(nx)+Math.abs(ny))*.5;
+            double eps=GRID_EPS*Math.max(1,Math.abs(nx)+Math.abs(ny));
+            if(high<=projected-half+eps||low>=projected+half-eps)return false;
+        }
+        return true;
+    }
+
     private static boolean strictlyWithinPolygon(List<Point> hull,double u,double v){
         if(hull.size()<3)return false;
         var p=new Point(u,v);
