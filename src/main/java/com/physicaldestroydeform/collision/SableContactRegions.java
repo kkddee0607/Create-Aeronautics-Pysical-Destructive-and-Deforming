@@ -336,6 +336,7 @@ public final class SableContactRegions {
         int[] paired=new int[2],checks=new int[2];
         boolean[] limited=new boolean[2];
         for(int side=0;side<2;side++){
+            final int pairedSide=side; // Lambda captures an immutable side per iteration (Java 21).
             final boolean onA=side==0;
             var ordered=new ArrayList<>(patches[side].interiorPoints().entrySet());
             ordered.sort(java.util.Comparator.comparing(e->e.getKey().localBlock()));
@@ -358,7 +359,7 @@ public final class SableContactRegions {
                         if(!frame.coherent(other.frame()))continue;
                         var relative=ContactFacePatch.commonSurfacePoint(face.face(),other.face(),
                                 entry.getValue(),otherCenter,p->offset(frame.opposite(
-                                        offset(p,offsets[side],1),onA),offsets[1-side],-1));
+                                        offset(p,offsets[pairedSide],1),onA),offsets[1-pairedSide],-1));
                         if(relative==null)continue;
                         // Recheck the SAME positive-area point on both shapes.
                         var opposite=offset(relative,offsets[1-side],1);

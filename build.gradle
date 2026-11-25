@@ -50,14 +50,14 @@ sourceSets.test.runtimeClasspath += sourceSets.main.compileClasspath
 tasks.named('test', Test).configure { useJUnitPlatform() }
 jar {
     // Keep existing mod/save version; distinguish the fix release artifact.
-    archiveClassifier.set('superFix')
+    archiveClassifier.set('superFix-buildFix')
     manifest {
         attributes([
             'Specification-Title': 'Physical Destruction and Deforming',
             'Specification-Version': '0.6.1',
             'Implementation-Title': project.name,
             'Implementation-Version': project.version,
-            'PDD-Revision': '0.6.1-superFix'
+            'PDD-Revision': '0.6.1-superFix-buildFix'
         ])
     }
 }
