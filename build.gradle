@@ -4,7 +4,7 @@ plugins {
 }
 
 group = 'com.physicaldestroydeform'
-version = '0.6.1'
+version = '0.6.1-duperFix-buildFix'
 base { archivesName = 'physical-destroy-deform' }
 java.toolchain.languageVersion = JavaLanguageVersion.of(21)
 neoForge {
@@ -56,15 +56,15 @@ tasks.named('test', Test).configure {
     }
 }
 jar {
-    // Keep existing mod/save version; distinguish the fix release artifact.
-    archiveClassifier.set('duperFix')
+    // Preserve the 0.6.1 save schema; display the fix release in the JAR and NeoForge mods list.
+    archiveClassifier.set('')
     manifest {
         attributes([
             'Specification-Title': 'Physical Destruction and Deforming',
             'Specification-Version': '0.6.1',
             'Implementation-Title': project.name,
             'Implementation-Version': project.version,
-            'PDD-Revision': '0.6.1-duperFix'
+            'PDD-Revision': '0.6.1-duperFix-buildFix'
         ])
     }
 }

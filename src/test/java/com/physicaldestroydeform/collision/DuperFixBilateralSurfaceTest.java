@@ -1,5 +1,6 @@
 package com.physicaldestroydeform.collision;
 
+import com.physicaldestroydeform.DamageModel;
 import com.physicaldestroydeform.MaterialProperties;
 import com.physicaldestroydeform.diagnostics.NativeCollisionTelemetry;
 import java.util.*;
