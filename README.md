@@ -1,10 +1,14 @@
-# PDD 0.6.1-originFix-buildFix — Physical Destructive and Deforming
+# PDD 0.6.1-finalFix — Physical Destructive and Deforming
 
 Minecraft 1.21.1 · Java 21 · NeoForge 21.1.228 · Sable 2.0.6 · Create 6.0.10 · Aeronautics 1.3.2. 선택 호환: Copycats+ 3.0.11.
 
 [통합설계서 1.0.9](.github/workflows/PDD-1.0.9-Integrated-Design-Specification.md) · [originFix-buildFix 검증 보고](docs/verification/PDD-0.6.1-originFix-buildFix.md) · [originFix 구현 이력](docs/verification/PDD-0.6.1-originFix.md).
 
-**현재 배포판: 0.6.1-originFix-buildFix.** GitHub Actions #45613784031에서 실패한 부분 충돌면 연결성 회귀를 실제 면 양쪽의 연결성 검사로 수정했다. Native가 직접 증명한 서로 떨어진 두 면은 각각 승인되며, 단일 Native 증거가 한쪽의 빈 간격을 건너뛰지 못하도록 한다. duperFix-buildFix의 F/Q·충돌 승인·Sable 원본 콜백 및 WAL을 보존하면서, Native 접촉 기록의 동일 프레임 면 중복 탐색을 통합하고 A/B 양쪽 격자를 독립적으로 탐색한다. 실제 양측 충돌면의 양수 교차 면적과 외부면만 인증하고, 상대 후보 수 8개 초과시 이미 검증된 블록쌍을 임의 폐기하지 않도록 singleton 연결로 전달한다. 정렬 면의 정수 후보 범위를 좁혀 과다한 polygon 검사를 줄였다. 미완성·미확정 면은 기존 보수 정책으로 처리한다.
+**현재 배포판: 0.6.1-finalFix.** Native 효과 레코드 100개 포화를 이유로 이미 완전히 증명된 독립 접촉면까지 거절하던 전역 승인 게이트를 분리했다. 실제 형상·외부면·접촉 면적·owner/Pose 검증을 통과한 연결 성분은 개별 인증하며, 예산 초과 성분만 보류한다. Native 접촉점 차이는 후보 단계에서만 완화하고 실제 접촉면의 1/32블록 관통 상한, 양의 면적, 두 면 노출 검증을 유지한다. 동일 사건의 F/Q·원장·콜백·내구 저장 순서를 변경하지 않는다. 독립 연결 성분 및 100 Native 레코드의 중복 탐색 회귀 테스트를 추가했다. Sable Rust 100개 원본 제한과 동기 WAL fsync는 이 Java 모드만으로 제거되지 않으며 실측 TPS 개선을 보증하지 않는다. 현재 설치 대상: `build/libs/physical-destroy-deform-0.6.1-finalFix.jar`. 시작 로그·NeoForge 모드 목록 버전을 통일했다. [finalFix 검증 문서](docs/verification/PDD-0.6.1-finalFix.md).
+
+**기존 originFix-buildFix 개발 이력:** 아래는 이전 배포의 설명이며 설치 대상은 아니다.
+
+**이전 배포판 이력: 0.6.1-originFix-buildFix.** GitHub Actions #45613784031에서 실패한 부분 충돌면 연결성 회귀를 실제 면 양쪽의 연결성 검사로 수정했다. Native가 직접 증명한 서로 떨어진 두 면은 각각 승인되며, 단일 Native 증거가 한쪽의 빈 간격을 건너뛰지 못하도록 한다. duperFix-buildFix의 F/Q·충돌 승인·Sable 원본 콜백 및 WAL을 보존하면서, Native 접촉 기록의 동일 프레임 면 중복 탐색을 통합하고 A/B 양쪽 격자를 독립적으로 탐색한다. 실제 양측 충돌면의 양수 교차 면적과 외부면만 인증하고, 상대 후보 수 8개 초과시 이미 검증된 블록쌍을 임의 폐기하지 않도록 singleton 연결로 전달한다. 정렬 면의 정수 후보 범위를 좁혀 과다한 polygon 검사를 줄였다. 미완성·미확정 면은 기존 보수 정책으로 처리한다.
 
 **설계 대비 남은 제약:** 현재 Sable Java ABI에는 블록별 독립 solver F가 없고, originFix의 면 감사와 WAL fsync는 아직 동기식이다. 틱 간 면 스캔 재개, 내구성 증명된 비동기 WAL/checkpoint, Stress 전파 분할은 이번 코드에 구현되지 않았다. 대형 접촉 또는 느린 디스크에서 렉이 완전히 사라졌다고 주장할 수 없다. 이 사실을 감추기 위해 게임 충격량·저장 순서를 바꾸지 않았다.
 

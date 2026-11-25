@@ -209,6 +209,15 @@ public final class SableContactRegions {
                     return new BilateralContactSurface.Cell(new GameImpactCredit.Target(key,
                             id.x()+","+id.y()+","+id.z(),id.fingerprint()),pos,nativeBatch.boxes(key,pos));
                 }
+                @Override public boolean budgetExhausted(){
+                    return surfaceReadLimited[0] || surfaceReadLimited[1];
+                }
+                @Override public boolean unresolvedCell(int side,net.minecraft.core.BlockPos pos){
+                    var sample=nativeBatch.inspectCell(owners[side],pos).result();
+                    return sample.status()!=OwnerResolver.Status.BLOCK_UNAVAILABLE ||
+                            !java.util.Set.of("BLOCK_MISSING_OR_AIR","WORLD_SHAPE_EMPTY","PLOT_SHAPE_EMPTY")
+                                    .contains(sample.detail());
+                }
                 @Override public boolean exposed(int side,FrameMath.Vec point,
                         com.physicaldestroydeform.deform.MovePlan.SignedAxes inward){
                     // A face between two blocks of the SAME structure is not
@@ -247,8 +256,11 @@ public final class SableContactRegions {
                     // connected component once per solver witness.
                     var found=BilateralContactSurface.reconstructAll(validFrames,surfaceReader,pairRemaining);
                     surfacePairChecks=found.checks();
+                    // Incomplete means *some* component failed, not that all
+                    // independently closed components lost their shape proof.
                     if(found.incomplete()||surfaceReadLimited[0]||surfaceReadLimited[1])surfaceRejected++;
-                    else {surfaceMatches=found.matches().size();surfaceEvidence.addAll(found.matches());}
+                    surfaceMatches=found.matches().size();
+                    surfaceEvidence.addAll(found.matches());
                 }
             }
             int distinctSurfaceA=(int)surfaceEvidence.stream().map(BilateralContactSurface.Match::a).distinct().count();
@@ -272,16 +284,21 @@ public final class SableContactRegions {
                     ||!seenPairB.getOrDefault(pairEvidence.b(),java.util.Set.of()).contains(pairEvidence.a())){
                 allPairsProved=false;break;
             }
-            boolean completeSurface=allPairsProved&&surfaceRejected==0
-                    &&!visitedRecords.stream().anyMatch(NativeCollisionTelemetry.Contact::capSaturated)
-                    &&!surfaceReadLimited[0]&&!surfaceReadLimited[1];
+            // A capped *telemetry sample* is not grounds to reject a fully
+            // closed geometric contact component. The cap still prevents any
+            // claim that ALL unobserved components are known, and never grants
+            // movement direction. These are separate proof levels.
+            boolean certifiedSurface=allPairsProved;
+            boolean nativeSaturated=visitedRecords.stream().anyMatch(NativeCollisionTelemetry.Contact::capSaturated);
+            boolean completeSurface=certifiedSurface&&surfaceRejected==0
+                    &&!nativeSaturated&&!surfaceReadLimited[0]&&!surfaceReadLimited[1];
             int surfaceAdded=Math.max(0,updatedRegions.size()-baseRegions.size());
-            if(completeSurface)joined=new LinkedHashSet<>(updatedRegions);
+            if(certifiedSurface)joined=new LinkedHashSet<>(updatedRegions);
             // For an incomplete result preserve the previous native/legacy
             // proof path. In particular do not seal a fragment of a large face.
             shapeChecksA+=RUNTIME_MAX_UNIQUE_CELLS_PER_SIDE-collected.checksA()-shapeChecksA-remainingSurface[0];
             shapeChecksB+=RUNTIME_MAX_UNIQUE_CELLS_PER_SIDE-collected.checksB()-shapeChecksB-remainingSurface[1];
-            if(!completeSurface || directions.active()) for(int side=0;side<2;side++) {
+            if(!certifiedSurface || directions.active()) for(int side=0;side<2;side++) {
                 final String owner=owners[side];
                 var originals=new LinkedHashSet<GameImpactCredit.Target>();
                 for(var region:collected.regions()) {
@@ -324,7 +341,7 @@ public final class SableContactRegions {
                         && joined.size()+patch.added().size()<=ContactCreditLedger.MAX_REGIONS) {
                     pairedSurfaces[side]=patch;
                     for(var target:patch.added()){
-                        if(!completeSurface)joined.add(side==0?new ContactCreditLedger.Region(target,null):new ContactCreditLedger.Region(null,target));
+                        if(!certifiedSurface)joined.add(side==0?new ContactCreditLedger.Region(target,null):new ContactCreditLedger.Region(null,target));
                         if(directions.active())directions.patch(target,patch.planarInterior().contains(target)&&patchFaces.contains(target)?patchAxis:null);
                     }
                     if(side==0)expandedA=patch.added().size();
@@ -339,7 +356,7 @@ public final class SableContactRegions {
             // revalidated source records on EACH surface. Direction approval is
             // deliberately separate: a sampled native cap must not grant move
             // direction, but it does not invalidate a positive exact-frame hit.
-            if(!completeSurface&&pairedSurfaces[0]!=null&&pairedSurfaces[1]!=null&&
+            if(!certifiedSurface&&pairedSurfaces[0]!=null&&pairedSurfaces[1]!=null&&
                     (!pairedSurfaces[0].interiorPoints().isEmpty()||!pairedSurfaces[1].interiorPoints().isEmpty())){
                 var remaining=new int[]{RUNTIME_MAX_UNIQUE_CELLS_PER_SIDE-collected.checksA()-shapeChecksA,
                         RUNTIME_MAX_UNIQUE_CELLS_PER_SIDE-collected.checksB()-shapeChecksB};
@@ -363,6 +380,8 @@ public final class SableContactRegions {
                     .append(" surfaceBudgetA=").append(surfaceReadLimited[0])
                     .append(" surfaceBudgetB=").append(surfaceReadLimited[1]);
             descriptions.append(" completeSurface=").append(completeSurface)
+                    .append(" certifiedComponentsPresent=").append(certifiedSurface)
+                    .append(" nativeCapSaturated=").append(nativeSaturated)
                     .append(" sharedFrameCount=").append(validFrames.size());
             patchStatus=descriptions.toString();
             collected=new Result(new ArrayList<>(joined),

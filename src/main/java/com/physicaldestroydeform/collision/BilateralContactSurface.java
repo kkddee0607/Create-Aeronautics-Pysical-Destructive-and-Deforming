@@ -14,11 +14,15 @@ import java.util.*;
  */
 final class BilateralContactSurface {
     private BilateralContactSurface() {}
-    private static final double PENETRATION=1.0/32.0; // Existing verified-contact bound.
+    private static final double PENETRATION=1.0/32.0; // Actual shape-to-shape separation bound; NOT loosened.
+    // Native impact witnesses can be noisy. Candidate acceptance is NOT damage authorization:
+    // real opposing exterior shapes must pass positiveOverlap() before any F is assigned.
+    private static final double WITNESS_TOLERANCE=1.0/16.0;
+    private static final double FACE_OPPOSITION=.98;
     private static final double EPS=1.0e-5;
     private static final double MIN_AREA=1.0e-10;
     private static final int MAX_PAIRS=ContactCreditLedger.MAX_REGIONS;
-    private static final int MAX_CANDIDATE_CELLS=64;
+    private static final int MAX_CANDIDATE_CELLS=64; // Existing transformed-face budget; not Native contact records
     private static final FrameMath.Vec ZERO=new FrameMath.Vec(0,0,0);
     private static final FrameMath.Pose WORLD=new FrameMath.Pose(ZERO,ZERO,new FrameMath.Vec(1,1,1),0,0,0,1);
 
@@ -29,6 +33,10 @@ final class BilateralContactSurface {
         Cell get(int side,BlockPos allocated);
         /** An unknown neighbor is not evidence of empty space. */
         boolean exposed(int side,FrameMath.Vec point,MovePlan.SignedAxes inward);
+        /** Distinguish an unknown cell caused by exhausted read budget from real air. */
+        default boolean budgetExhausted(){return false;}
+        /** A failed/unloaded cell read is NOT proof that the face terminates. */
+        default boolean unresolvedCell(int side,BlockPos allocated){return false;}
     }
     record Match(GameImpactCredit.Target a,GameImpactCredit.Target b) {}
     record Result(List<Match> matches,int checks,boolean incomplete,String gate) {
@@ -63,7 +71,7 @@ final class BilateralContactSurface {
             if(localA==null||localB==null||!localA.finite()||!localB.finite())return null;
             var rawA=normal(record,aSide==1).unit();var rawB=normal(record,bSide==1).unit();
             var worldA=a.toWorldNormal(rawA);var worldB=b.toWorldNormal(rawB);
-            if(worldA.dot(worldB)>-.90)return null;
+            if(worldA.dot(worldB)>-.80)return null; // Candidate hint, not face proof.
             var aa=axis(rawA,tick);var bb=axis(rawB,tick);
             if(aa==null||bb==null)return null;
             // Effect consumer witness is only an anchor. Significant separation
@@ -71,7 +79,7 @@ final class BilateralContactSurface {
             var d=b.toWorldPoint(localB).minus(a.toWorldPoint(localA));
             double along=d.dot(worldA);
             var lateral=d.minus(worldA.times(along));
-            if(!d.finite()||along>EPS||along<-PENETRATION||lateral.squareLength()>PENETRATION*PENETRATION)return null;
+            if(!d.finite()||Math.abs(along)>WITNESS_TOLERANCE||lateral.squareLength()>WITNESS_TOLERANCE*WITNESS_TOLERANCE)return null;
             return new Frame(a,b,aa,bb,localA,localB);
         } catch(RuntimeException invalid){return null;}
     }
@@ -91,7 +99,7 @@ final class BilateralContactSurface {
         int axis=Math.abs(n.x())>=Math.abs(n.y())&&Math.abs(n.x())>=Math.abs(n.z())?0:
                 Math.abs(n.y())>=Math.abs(n.z())?1:2;
         double component=axis==0?n.x():axis==1?n.y():n.z();
-        if(Math.abs(component)<.90)return null;
+        if(Math.abs(component)<.75)return null; // Real face must still pass strict geometric overlap.
         int sign=component>0?-1:1; // Inward: positive means LOW face.
         return new MovePlan.SignedAxes(axis==0?sign:0,axis==1?sign:0,axis==2?sign:0,true,tick);
     }
@@ -108,34 +116,39 @@ final class BilateralContactSurface {
         FrameKey(Frame f){this(f.a(),f.b(),f.inwardA().x(),f.inwardA().y(),f.inwardA().z(),
                 f.inwardB().x(),f.inwardB().y(),f.inwardB().z());}
     }
-    /** Scans both independent owner lattices. No same-grid assumption and no
-     * O(A*B) cross product: candidates come only from the transformed surface
-     * envelope of the newly reached face. A failed budget NEVER seals a partial
-     * face as a complete F distribution. */
+    /** A completed connected contact component is independent of unrelated native
+     * records and of the 100-record Sable telemetry cap. Incomplete components
+     * never publish a partial F seed set. Previously completed components remain
+     * certified if a later component exhausts its budget. */
     static Result reconstructAll(List<Frame> frames,ShapeReader source,int maxChecks){
         if(frames==null||frames.isEmpty()||source==null||maxChecks<1)
             return new Result(List.of(),0,false,"NO_FRAME");
         var groups=new LinkedHashMap<FrameKey,List<Frame>>();
         for(var f:frames)if(f!=null)groups.computeIfAbsent(new FrameKey(f),k->new ArrayList<>()).add(f);
-        var result=new LinkedHashSet<Match>();
-        int checked=0;
+        var completed=new LinkedHashSet<Match>();
+        int checked=0;boolean incomplete=false;
         for(var group:groups.values()){
-            var search=new Search(group.getFirst(),source,maxChecks-checked,MAX_PAIRS-result.size());
-            var discovered=search.run(group);
+            if(checked>=maxChecks||completed.size()>=MAX_PAIRS||source.budgetExhausted()){
+                incomplete=true;break;
+            }
+            var search=new Search(group.getFirst(),source,maxChecks-checked,MAX_PAIRS-completed.size());
+            completed.addAll(search.run(group));
             checked+=search.checks;
-            if(search.incomplete)return new Result(List.of(),checked,true,"SURFACE_BUDGET");
-            result.addAll(discovered);
+            if(search.incomplete)incomplete=true;
+            if(source.budgetExhausted())break;
         }
-        return new Result(new ArrayList<>(result),checked,false,
-                result.isEmpty()?"NO_POSITIVE_FACE":"BILATERAL_SURFACE");
+        return new Result(new ArrayList<>(completed),checked,incomplete,
+                incomplete?(completed.isEmpty()?"SURFACE_BUDGET":"PARTIAL_CERTIFIED_COMPONENTS"):
+                completed.isEmpty()?"NO_POSITIVE_FACE":"BILATERAL_SURFACE");
     }
     private static final class Search {
         final Frame frame;
         final ShapeReader source;
         final int maxChecks,maxPairs;
         final Map<Pair,Boolean> evaluated=new HashMap<>();
-        final Map<Pair,Match> matched=new LinkedHashMap<>();
-        final Map<Pair,Boolean> queued=new HashMap<>();
+        final Map<Pair,Match> complete=new LinkedHashMap<>();
+        final Map<Pair,Match> active=new LinkedHashMap<>();
+        final Set<Pair> queued=new HashSet<>();
         final Map<BlockPos,Cell> cellsA=new HashMap<>(),cellsB=new HashMap<>();
         final ArrayDeque<Pair> frontier=new ArrayDeque<>();
         int checks;
@@ -146,44 +159,55 @@ final class BilateralContactSurface {
         Cell cell(int side,BlockPos pos){
             var cache=side==0?cellsA:cellsB;
             if(!cache.containsKey(pos))cache.put(pos,source.get(side,pos));
+            if(source.budgetExhausted()||cache.get(pos)==null&&source.unresolvedCell(side,pos))incomplete=true;
             return cache.get(pos);
         }
         boolean enqueue(Pair p){
-            if(queued.containsKey(p))return false;
+            if(incomplete||complete.containsKey(p)||queued.contains(p))return false;
             Boolean pass=evaluated.get(p);
             if(pass==null){
-                // A missing cell needs no expensive polygon/face validation.
-                // Do not spend the geometry budget on the many empty integer
-                // buckets adjacent to a perfectly flat contact face.
                 Cell a=cell(0,p.a()),b=cell(1,p.b());
+                if(incomplete)return false;
                 if(a==null||b==null){evaluated.put(p,Boolean.FALSE);return false;}
                 if(checks>=maxChecks){incomplete=true;return false;}
                 checks++;
                 pass=positiveOverlap(frame,source,a,b);
+                if(source.budgetExhausted()){incomplete=true;return false;}
                 evaluated.put(p,pass);
             }
-            if(pass){queued.put(p,Boolean.TRUE);frontier.add(p);}
+            if(pass){queued.add(p);frontier.add(p);}
             return pass;
         }
         List<Match> run(List<Frame> anchors){
+            // Each anchor seeds its own connected component. Completed components
+            // stay cached, so 100 witnesses on one face do NOT rescan it 100 times.
             for(var witness:anchors){
-                for(var a:SableConsumerTargets.cells(witness.contactA())){
+                if(incomplete)break;
+                for(var pa:SableConsumerTargets.cells(witness.contactA())){
                     if(incomplete)break;
-                    if(!anchorFace(witness,cell(0,a),0))continue;
-                    for(var b:SableConsumerTargets.cells(witness.contactB())){
+                    if(!anchorFace(witness,cell(0,pa),0))continue;
+                    for(var pb:SableConsumerTargets.cells(witness.contactB())){
                         if(incomplete)break;
-                        if(anchorFace(witness,cell(1,b),1))enqueue(new Pair(a,b));
+                        if(!anchorFace(witness,cell(1,pb),1))continue;
+                        active.clear();queued.clear();frontier.clear();
+                        if(!enqueue(new Pair(pa,pb)))continue;
+                        drain();
+                        if(incomplete){active.clear();frontier.clear();break;}
+                        complete.putAll(active); // ONLY a closed, fully inspected component.
                     }
                 }
             }
+            return new ArrayList<>(complete.values());
+        }
+        private void drain(){
             while(!frontier.isEmpty()&&!incomplete){
                 var current=frontier.remove();
                 Cell a=cell(0,current.a()), b=cell(1,current.b());
+                if(incomplete)break;
                 if(a==null||b==null)continue;
-                if(matched.size()>=maxPairs){incomplete=true;break;}
-                matched.put(current,new Match(a.target(),b.target()));
-                // Either owner's face may continue while the other owner has
-                // just one cell spanning several opposite cells.
+                if(complete.size()+active.size()>=maxPairs){incomplete=true;break;}
+                active.put(current,new Match(a.target(),b.target()));
+                // A real tangent seam on EACH changed owner is required.
                 for(int side=0;side<2&&!incomplete;side++){
                     BlockPos at=side==0?current.a():current.b();
                     Cell old=side==0?a:b;
@@ -193,23 +217,19 @@ final class BilateralContactSurface {
                         int[] xyz={at.getX(),at.getY(),at.getZ()};
                         xyz[dir<2?u:v]+=(dir%2==0?1:-1);
                         var next=cell(side,new BlockPos(xyz[0],xyz[1],xyz[2]));
+                        if(incomplete)break;
                         if(next==null||!touchingFaceCells(frame,old,next,side))continue;
                         var candidates=opposingCandidateCells(frame,next,side);
                         if(candidates==null){incomplete=true;break;}
                         for(var other:candidates){
                             var p=side==0?new Pair(next.allocated(),other):new Pair(other,next.allocated());
-                            // A continuous face on ONE owner cannot bridge a gap in
-                            // the OTHER owner's physical contact surface. Each
-                            // changed owner cell must itself have an exterior seam.
-                            // An unchanged cell may legitimately touch multiple
-                            // adjacent cells on the opposite owner (rotated grids).
                             if(!connectedTransition(current,p,a,b))continue;
-                            if(!enqueue(p)&&incomplete)break;
+                            enqueue(p);
+                            if(incomplete)break;
                         }
                     }
                 }
             }
-            return new ArrayList<>(matched.values());
         }
         private boolean connectedTransition(Pair current,Pair proposed,Cell a,Cell b){
             return (current.a().equals(proposed.a())
@@ -330,7 +350,7 @@ final class BilateralContactSurface {
         var outwardB=new FrameMath.Vec(-f.inwardB().x(),-f.inwardB().y(),-f.inwardB().z());
         try{
             var n=f.a().toWorldNormal(outwardA);
-            if(n.dot(f.b().toWorldNormal(outwardB))>-.995)return false;
+            if(n.dot(f.b().toWorldNormal(outwardB))>-FACE_OPPOSITION)return false;
             int ax=axis(f.inwardA()),bx=axis(f.inwardB());
             for(var boxA:a.boxes())for(var boxB:b.boxes()){
                 var pa=faceCorners(boxA,a.allocated(),ax,f.inwardA()).stream().map(f.a()::toWorldPoint).toList();
@@ -353,7 +373,7 @@ final class BilateralContactSurface {
                 // not the A plane projected into the interior of body B.
                 var nb=f.b().toWorldNormal(outwardB);
                 double denom=nb.dot(n);
-                if(Math.abs(denom)<.995)continue;
+                if(Math.abs(denom)<FACE_OPPOSITION)continue;
                 double distance=-nb.dot(centerA.minus(pb.getFirst()))/denom;
                 if(distance>EPS||distance<-PENETRATION)continue;
                 var centerB=centerA.plus(n.times(distance));
