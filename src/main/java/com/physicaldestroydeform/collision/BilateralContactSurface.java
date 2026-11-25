@@ -198,12 +198,24 @@ final class BilateralContactSurface {
                         if(candidates==null){incomplete=true;break;}
                         for(var other:candidates){
                             var p=side==0?new Pair(next.allocated(),other):new Pair(other,next.allocated());
+                            // A continuous face on ONE owner cannot bridge a gap in
+                            // the OTHER owner's physical contact surface. Each
+                            // changed owner cell must itself have an exterior seam.
+                            // An unchanged cell may legitimately touch multiple
+                            // adjacent cells on the opposite owner (rotated grids).
+                            if(!connectedTransition(current,p,a,b))continue;
                             if(!enqueue(p)&&incomplete)break;
                         }
                     }
                 }
             }
             return new ArrayList<>(matched.values());
+        }
+        private boolean connectedTransition(Pair current,Pair proposed,Cell a,Cell b){
+            return (current.a().equals(proposed.a())
+                    || touchingFaceCells(frame,a,cell(0,proposed.a()),0))
+                    && (current.b().equals(proposed.b())
+                    || touchingFaceCells(frame,b,cell(1,proposed.b()),1));
         }
     }
     /** Two adjacent block identities do not imply connected visible faces.

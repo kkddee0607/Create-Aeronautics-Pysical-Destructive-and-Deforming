@@ -114,20 +114,43 @@ class DuperFixBilateralSurfaceTest {
                 new FrameMath.Vec(.5,65,.5),new FrameMath.Vec(.5,65,.5));
         assertEquals(25,area(compressed,reader(5,5,false,false)).matches().size());
     }
-    @Test void disconnectedPartialCollisionBoxesDoNotBridgeTheFloodFill(){
-        var frame=new BilateralContactSurface.Frame(IDENTITY,IDENTITY,
-                frame(IDENTITY).inwardA(),frame(IDENTITY).inwardB(),
-                new FrameMath.Vec(.2,65,.5),new FrameMath.Vec(.2,65,.5));
-        var surface=new BilateralContactSurface.ShapeReader(){
+    private static BilateralContactSurface.ShapeReader disconnectedFace(int interruptedSide){
+        return new BilateralContactSurface.ShapeReader(){
             @Override public BilateralContactSurface.Cell get(int side,BlockPos p){
                 if(p.getX()<0||p.getX()>1||p.getZ()!=0||p.getY()!=(side==0?64:65))return null;
-                var shape=side==0?(p.getX()==0?new AABB(0,0,0,.4,1,1):new AABB(.6,0,0,1,1,1)):CUBE;
+                var shape=side==interruptedSide
+                        ?(p.getX()==0?new AABB(0,0,0,.4,1,1):new AABB(.6,0,0,1,1,1))
+                        :CUBE;
                 return new BilateralContactSurface.Cell(target(side,p.getX(),0),p,List.of(shape));
             }
             @Override public boolean exposed(int side,FrameMath.Vec p,
                     com.physicaldestroydeform.deform.MovePlan.SignedAxes inward){return true;}
         };
-        assertEquals(1,area(frame,surface).matches().size());
+    }
+    private static BilateralContactSurface.Frame anchoredAt(double x){
+        return new BilateralContactSurface.Frame(IDENTITY,IDENTITY,
+                frame(IDENTITY).inwardA(),frame(IDENTITY).inwardB(),
+                new FrameMath.Vec(x,65,.5),new FrameMath.Vec(x,65,.5));
+    }
+    @Test void disconnectedPartialCollisionBoxesDoNotBridgeTheFloodFill(){
+        var result=area(anchoredAt(.2),disconnectedFace(0));
+        assertFalse(result.incomplete(),result.gate());
+        assertEquals(List.of(new BilateralContactSurface.Match(target(0,0,0),target(1,0,0))),result.matches(),
+                "A connected B face must not jump over a missing A surface seam");
+    }
+    @Test void connectedAFaceCannotBridgeDisconnectedBBoxes(){
+        var result=area(anchoredAt(.2),disconnectedFace(1));
+        assertFalse(result.incomplete(),result.gate());
+        assertEquals(List.of(new BilateralContactSurface.Match(target(0,0,0),target(1,0,0))),result.matches(),
+                "The same no-bridge rule must hold with A and B exchanged");
+    }
+    @Test void independentNativeWitnessesCanValidateTwoDisconnectedAreas(){
+        var result=BilateralContactSurface.reconstructAll(
+                List.of(anchoredAt(.2),anchoredAt(1.8)),disconnectedFace(0),100);
+        assertFalse(result.incomplete(),result.gate());
+        assertEquals(2,result.matches().size());
+        assertTrue(result.matches().contains(new BilateralContactSurface.Match(target(0,0,0),target(1,0,0))));
+        assertTrue(result.matches().contains(new BilateralContactSurface.Match(target(0,1,0),target(1,1,0))));
     }
     @Test void pairedAreaMergesIntoSingleOriginalCreditWithoutNewNativeExactPairs(){
         var matches=area(frame(IDENTITY),reader(5,5,false,false)).matches();
