@@ -1,12 +1,14 @@
-# PDD 0.6.1 superFix-buildFix — Physical Destructive and Deforming
+# PDD 0.6.1 superFix-buildFix2 — Physical Destructive and Deforming
 
 Minecraft 1.21.1 · Java 21 · NeoForge 21.1.228 · Sable 2.0.6 · Create 6.0.10 · Aeronautics 1.3.2. 선택 호환: Copycats+ 3.0.11.
 
 [통합설계서 1.0.9](.github/workflows/PDD-1.0.9-Integrated-Design-Specification.md) · [0.6.0 릴리스 검증](docs/verification/PDD-0.6.0-Release-Verification.md)
 
+[0.6.1 superFix-buildFix2 JUnit 수정·CI 계약 점검](docs/verification/PDD-0.6.1-superFix-buildFix2.md). 기준 main SHA `3fef89e0636f51e969a6e334b42cb9994c5fb250`. 2026-11-25 Actions: 기존 Java 컴파일 성공, JUnit 781건 중 1건의 상충된 테스트 기대값 수정. 기존 superFix 양측 접촉면/F/Q/저장 알고리즘은 변경하지 않음. 새 설치 대상은 `physical-destroy-deform-0.6.1-superFix-buildFix2.jar` 하나만 사용한다.
+
 [0.6.1 superFix-buildFix 컴파일 수정 및 재발 방지](docs/verification/PDD-0.6.1-superFix-buildFix.md). 기준 main SHA `02063617f0c7d92a10c7e0484a9fa68f15ab776f`. 이전 JAR 대신 `physical-destroy-deform-0.6.1-superFix-buildFix.jar`만 설치한다. 기존 접촉면 검증 알고리즘·F/Q·저장·JUnit 기대값은 변경하지 않는다.
 
-[0.6.1 superFix 접촉면 복구 및 회귀 검증](docs/verification/PDD-0.6.1-superFix.md). 기준 main SHA `eb25244f133442550449ece88b3ff87128ad84fc`. 기존 `0.6.1-optiFix3-buildFix`의 물리·저장·진단 계약은 보존하고, 양측 동일 프레임 접촉 증명이 확인된 실제 면 셀만 추가 F를 배정한다. 이전 버전의 구현·설계 검증 내용이다. 현재 설치 대상 JAR는 위의 superFix-buildFix 파일이다.
+[0.6.1 superFix 접촉면 복구 및 회귀 검증](docs/verification/PDD-0.6.1-superFix.md). 기준 main SHA `eb25244f133442550449ece88b3ff87128ad84fc`. 기존 `0.6.1-optiFix3-buildFix`의 물리·저장·진단 계약은 보존하고, 양측 동일 프레임 접촉 증명이 확인된 실제 면 셀만 추가 F를 배정한다. 이전 버전의 구현·설계 검증 내용이다. 현재 설치 대상 JAR는 위의 superFix-buildFix2 파일이다.
 
 [0.6.1 optiFix3-buildFix 컴파일 수정 안내](docs/verification/PDD-0.6.1-optiFix3-buildFix.md). 이번 수정 기준 main SHA `57e19941da4716c78745ab15813935f6f690d97a`.
 

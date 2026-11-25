@@ -47,17 +47,24 @@ sourceSets.test.runtimeClasspath += sourceSets.main.runtimeClasspath
 // Plain JUnit also needs them at runtime to instantiate BlockPos and Vector3d.
 sourceSets.test.runtimeClasspath += sourceSets.main.compileClasspath
 
-tasks.named('test', Test).configure { useJUnitPlatform() }
+tasks.named('test', Test).configure {
+    useJUnitPlatform()
+    // CI retains the same JUnit gate; print the expected/actual assertion detail on failure.
+    testLogging {
+        events 'failed'
+        exceptionFormat = 'full'
+    }
+}
 jar {
     // Keep existing mod/save version; distinguish the fix release artifact.
-    archiveClassifier.set('superFix-buildFix')
+    archiveClassifier.set('superFix-buildFix2')
     manifest {
         attributes([
             'Specification-Title': 'Physical Destruction and Deforming',
             'Specification-Version': '0.6.1',
             'Implementation-Title': project.name,
             'Implementation-Version': project.version,
-            'PDD-Revision': '0.6.1-superFix-buildFix'
+            'PDD-Revision': '0.6.1-superFix-buildFix2'
         ])
     }
 }

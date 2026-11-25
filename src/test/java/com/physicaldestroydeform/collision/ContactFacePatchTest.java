@@ -75,7 +75,8 @@ class ContactFacePatchTest {
         assertTrue(patch.covers(new FrameMath.Vec(.5,65,2.5)));
         assertFalse(patch.covers(new FrameMath.Vec(-.5,65,2.5)));
         assertTrue(patch.covers(new FrameMath.Vec(2.5,65,2.5)));
-        assertFalse(patch.covers(new FrameMath.Vec(.5,65,2.5)),"polygon edge alone is not strict coverage");
+        assertFalse(patch.covers(new FrameMath.Vec(5.5,65,2.5)),
+                "a cell entirely outside the witnessed face must not be approved");
         assertFalse(patch.covers(new FrameMath.Vec(2.5,65.001,2.5)),"nearby plane is not the same surface");
         assertTrue(visited.contains("2,2"));
         var all=new HashSet<>(onlyFour);all.addAll(patch.added());
