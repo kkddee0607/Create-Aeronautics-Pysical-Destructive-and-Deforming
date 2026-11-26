@@ -53,4 +53,24 @@ class RogTraceTest {
         s.begin(2);assertTrue(s.sample(R12,"SNAPSHOT_MISSING"));
         assertEquals(101,s.seen(R12,"SNAPSHOT_MISSING"));
     }
+    @Test void aggregateEventsShareGlobalCapAndKeepSuppressionCount(){
+        var s=new RogTrace.State("s",4,4,8,100,2);s.begin(1);
+        assertTrue(s.sample(R04,"DETAIL"));assertTrue(s.sample(R04,"DETAIL"));
+        assertFalse(s.sample(R04,"DETAIL"));
+        assertTrue(s.event(R06,"F_CREDIT_SUMMARY"));assertTrue(s.event(R06,"F_CREDIT_SUMMARY"));
+        assertFalse(s.event(R06,"F_CREDIT_SUMMARY"));
+        assertEquals(3,s.seen(R06,"F_CREDIT_SUMMARY"));assertEquals(2,s.selected(R06,"F_CREDIT_SUMMARY"));
+        s.begin(2);assertTrue(s.event(R06,"F_CREDIT_SUMMARY"));
+    }
+    @Test void selectedEvidenceCannotSpendAggregateReserve(){
+        var s=new RogTrace.State("s",4,4,8,100,2);s.begin(1);
+        assertTrue(s.evidence(R04,"SEED"));assertTrue(s.evidence(R04,"SEED"));assertFalse(s.evidence(R04,"SEED"));
+        assertTrue(s.event(R06,"F_CREDIT_SUMMARY"));assertTrue(s.event(R06,"CONTACT_SIDE_SEAL"));
+        assertEquals(3,s.seen(R04,"SEED"));assertEquals(2,s.selected(R04,"SEED"));
+    }
+    @Test void aggregateEventCapZeroStillCounts(){
+        var s=new RogTrace.State("s",0,0,1,100,0);s.begin(1);
+        assertFalse(s.event(R06,"SEAL"));assertEquals(1,s.seen(R06,"SEAL"));
+        assertEquals(0,s.selected(R06,"SEAL"));
+    }
 }

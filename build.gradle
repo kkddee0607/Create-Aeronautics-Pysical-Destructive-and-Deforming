@@ -4,7 +4,7 @@ plugins {
 }
 
 group = 'com.physicaldestroydeform'
-version = '0.6.1-finalLastFix'
+version = '0.6.1-rogFix'
 base { archivesName = 'physical-destroy-deform' }
 java.toolchain.languageVersion = JavaLanguageVersion.of(21)
 neoForge {
@@ -49,9 +49,15 @@ sourceSets.test.runtimeClasspath += sourceSets.main.compileClasspath
 
 tasks.named('test', Test).configure {
     useJUnitPlatform()
+    reports.junitXml.required = true
+    afterSuite { descriptor, result ->
+        if (!descriptor.parent) logger.lifecycle("PDD JUnit: total=${result.testCount} passed=${result.successfulTestCount} failed=${result.failedTestCount} skipped=${result.skippedTestCount}")
+    }
     // CI retains the same JUnit gate; print the expected/actual assertion detail on failure.
     testLogging {
-        events 'failed'
+        events 'failed', 'skipped'
+        showExceptions = true
+        showCauses = true
         exceptionFormat = 'full'
     }
 }
@@ -64,7 +70,7 @@ jar {
             'Specification-Version': '0.6.1',
             'Implementation-Title': project.name,
             'Implementation-Version': project.version,
-            'PDD-Revision': '0.6.1-finalLastFix'
+            'PDD-Revision': '0.6.1-rogFix'
         ])
     }
 }

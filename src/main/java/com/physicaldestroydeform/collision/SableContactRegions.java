@@ -244,6 +244,18 @@ public final class SableContactRegions {
                     var sample=nativeBatch.inspectCell(owners[side],pos).result();
                     return !OwnerResolver.knownNoShape(sample);
                 }
+                @Override public List<BilateralContactSurface.Cell> exteriorCells(int side,BilateralContactSurface.Cell cell,
+                        net.minecraft.world.phys.AABB face,com.physicaldestroydeform.deform.MovePlan.SignedAxes inward){
+                    var positions=BilateralContactSurface.exteriorCellPositions(cell,face,inward);
+                    if(positions==null){exteriorUnknown=true;return null;}
+                    var neighbors=new ArrayList<BilateralContactSurface.Cell>();
+                    for(var pos:positions){
+                        var candidate=get(side,pos);
+                        if(surfaceReadLimited[side]||candidate==null&&unresolvedCell(side,pos)){exteriorUnknown=true;return null;}
+                        if(candidate!=null)neighbors.add(candidate);
+                    }
+                    return neighbors;
+                }
                 @Override public boolean exposed(int side,FrameMath.Vec point,
                         com.physicaldestroydeform.deform.MovePlan.SignedAxes inward){
                     // A face between two blocks of the SAME structure is not
@@ -308,18 +320,13 @@ public final class SableContactRegions {
                         t.detail()+" bilateralPairs="+surfaceMatches+" surfaceChecks="+surfacePairChecks+" surfaceRejected="+surfaceRejected+
                                 " surfaceBudgetA="+surfaceReadLimited[0]+" surfaceBudgetB="+surfaceReadLimited[1]),
                 collected.ambiguousA(),collected.ambiguousB(),collected.unknownA(),collected.unknownB(),collected.groupsA(),collected.groupsB());
-        if((long)a.size()+next.reservedA()>ContactCreditLedger.MAX_TARGETS_PER_SIDE||
-                (long)b.size()+next.reservedB()>ContactCreditLedger.MAX_TARGETS_PER_SIDE)return withStats(new Result(collected.regions(),collected.status(),ca,cb,collected.rejected(),collected.methodA(),collected.methodB(),collected.trace(),collected.ambiguousA(),collected.ambiguousB(),collected.unknownA(),collected.unknownB(),collected.groupsA(),collected.groupsB()),nativeBatch);
+        int reservedA=next.reservedA(),reservedB=next.reservedB();
+        if((long)a.size()+reservedA>ContactCreditLedger.MAX_TARGETS_PER_SIDE||
+                (long)b.size()+reservedB>ContactCreditLedger.MAX_TARGETS_PER_SIDE)return withStats(new Result(collected.regions(),collected.status(),ca,cb,collected.rejected(),collected.methodA(),collected.methodB(),collected.trace(),collected.ambiguousA(),collected.ambiguousB(),collected.unknownA(),collected.unknownB(),collected.groupsA(),collected.groupsB()),nativeBatch);
         // Expanded blocks are material/force seeds, not independently proved move axes.
         for(var r:merged){if(r.a()!=null)directions.seed(r.a());if(r.b()!=null)directions.seed(r.b());}
         RogTrace.event(Stage.R04,"CONTACT_COVERAGE","baseRegions={} finalRegions={} bilateralPairs={} surfaceChecks={} rejected={} reservedA={} reservedB={} speculativeDamageSeeds=0 authority=NONE",
-                collected.regions().size(),merged.size(),surfaceMatches,surfacePairChecks,surfaceRejected,next.reservedA(),next.reservedB());
-        if(DiagnosticMode.debug()&&RogTrace.sample(Stage.R04,"CONTACT_SEED_SEALED")){
-            var seedA=a.stream().map(GameImpactCredit.Target::localBlock).sorted().limit(32).toList();
-            var seedB=b.stream().map(GameImpactCredit.Target::localBlock).sorted().limit(32).toList();
-            RogTrace.detail(Stage.R04,"CONTACT_SEED_SEALED","ownerA={} ownerB={} directA={} directB={} finalA={} finalB={} localA={} localB={} reservedA={} reservedB={}",
-                    owners[0],owners[1],collected.trace().verifiedTargetsA(),collected.trace().verifiedTargetsB(),a.size(),b.size(),seedA,seedB,next.reservedA(),next.reservedB());
-        }
+                collected.regions().size(),merged.size(),surfaceMatches,surfacePairChecks,surfaceRejected,reservedA,reservedB);
         return withStats(next,nativeBatch);
     }
     private static Result withStats(Result r,OwnerResolver.NativeAuditBatch batch){
@@ -598,6 +605,7 @@ public final class SableContactRegions {
      * An iterative augmenting path avoids stack growth on adversarial inputs. */
     static int additionalReservation(List<List<GameImpactCredit.Target>> groups,Set<GameImpactCredit.Target> confirmed){
         var matched=new HashMap<GameImpactCredit.Target,Integer>();
+        int work=0,cap=RUNTIME_MAX_UNIQUE_CELLS_PER_SIDE*SableConsumerTargets.MAX_CANDIDATES;
         for(int start=0;start<groups.size();start++){
             var queue=new java.util.ArrayDeque<Integer>();queue.add(start);
             var visited=new HashSet<Integer>();visited.add(start);
@@ -607,6 +615,15 @@ public final class SableContactRegions {
             while(!queue.isEmpty()&&end==null){
                 int node=queue.removeFirst();
                 for(var candidate:groups.get(node)){
+                    if(++work>cap){
+                        // A partial maximum matching is a lower bound, not a
+                        // safe reservation. Fall back to the proved upper bound.
+                        var union=new HashSet<GameImpactCredit.Target>();
+                        for(var group:groups)for(var target:group)if(!confirmed.contains(target))union.add(target);
+                        int bound=Math.min(groups.size(),union.size());
+                        if(RogTrace.sample(Stage.R04,"RESERVATION_MATCH_BOUND"))RogTrace.detail(Stage.R04,"RESERVATION_MATCH_BOUND","work={} cap={} groups={} union={} partialMatching={} reserveUpperBound={}",work,cap,groups.size(),union.size(),matched.size(),bound);
+                        return bound;
+                    }
                     if(confirmed.contains(candidate)||parent.putIfAbsent(candidate,node)!=null)continue;
                     var prior=matched.get(candidate);
                     if(prior==null){end=candidate;break;}

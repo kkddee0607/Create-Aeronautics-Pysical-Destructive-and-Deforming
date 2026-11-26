@@ -55,6 +55,13 @@ class OriginLastFixContactTest {
         assertEquals(2,SableContactRegions.additionalReservation(groups,java.util.Set.of()));
         assertEquals(1,SableContactRegions.additionalReservation(groups,java.util.Set.of(target(0,0))));
     }
+    @Test void adversarialMatchingBudgetFallsBackToConservativeUpperBound(){
+        var groups=new java.util.ArrayList<List<GameImpactCredit.Target>>();
+        int n=800;
+        for(int i=0;i<n-1;i++)groups.add(List.of(target(0,i),target(0,i+1)));
+        for(int i=0;i<n;i++)groups.add(List.of(target(0,0)));
+        assertEquals(n,SableContactRegions.additionalReservation(groups,java.util.Set.of()));
+    }
     @Test void unresolvedNativeEvidenceIsNotErasedByUnrelatedSurface(){
         var nativeRegion=new ContactCreditLedger.Region(target(0,0),null);
         var merged=SableContactRegions.mergeBilateralPairs(List.of(nativeRegion),

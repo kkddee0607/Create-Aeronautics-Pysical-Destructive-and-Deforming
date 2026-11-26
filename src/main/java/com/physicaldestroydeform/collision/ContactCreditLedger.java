@@ -24,7 +24,7 @@ import java.util.function.Function;
 public final class ContactCreditLedger {
     public static final String LEGACY_ALGORITHM_REVISION = "PDD-IDS-1.0.7/0.4.1-spreadFix-MULTIFACE-70-30";
     public static final String PREVIOUS_ALGORITHM_REVISION = "PDD-IDS-1.0.9/0.6.1-CONTACT-ELASTIC-CHAIN";
-    public static final String ALGORITHM_REVISION = "PDD-IDS-1.0.9/0.6.1-finalLastFix-BILATERAL-SEEDS-ALPHA04";
+    public static final String ALGORITHM_REVISION = "PDD-IDS-1.0.9/0.6.1-rogFix-BILATERAL-SEEDS-ALPHA04";
     // Bounded but large enough for a 100x100 fully verified planar contact patch.
     public static final int MAX_TARGETS_PER_SIDE = 16_384;
     public static final int MAX_REGIONS = 2 * MAX_TARGETS_PER_SIDE;
@@ -302,6 +302,7 @@ public final class ContactCreditLedger {
         }
         List<ForcePropagation.Trace> traces=trace==null?null:new ArrayList<>();
         Grant issued;
+        List<SeedAudit> seedAudits=bilateral&&RogTrace.enabled()?new ArrayList<>(2):null;
         planning.add(validated.id());
         try {
             List<GameImpactCredit.Target> seedsA=!materialOnly&&decision.allocation().sideA()==0?List.of():validated.a().stream().sorted(CONTACT_ORDER).toList();
@@ -316,7 +317,7 @@ public final class ContactCreditLedger {
             }
             var pa=bilateral?contactPlan(pair.a().stableKey(),seedsA,sideF,reservedA,evidence,true,neighbors,materials,forces,
                     damage,directions.getOrDefault(pair.a().stableKey(),ForcePropagation.Orientation.unknown()),
-                    traces==null?null:traces::add,crossOwner==null?null:crossOwner.forSide(pair.a().stableKey(),pair.b().stableKey()))
+                    traces==null?null:traces::add,crossOwner==null?null:crossOwner.forSide(pair.a().stableKey(),pair.b().stableKey()),seedAudits)
                     :directions==null
                     ?ForcePropagation.plan(pair.a().stableKey(),seedsA,sideF,neighbors,legacyMaterials,forces,damage)
                     :ForcePropagation.planTargets(pair.a().stableKey(),seedsA,sideF,neighbors,materials,forces,damage,
@@ -324,7 +325,7 @@ public final class ContactCreditLedger {
                             traces==null?null:traces::add);
             var pb=bilateral?contactPlan(pair.b().stableKey(),seedsB,sideF,reservedB,evidence,false,neighbors,materials,forces,
                     damage,directions.getOrDefault(pair.b().stableKey(),ForcePropagation.Orientation.unknown()),
-                    traces==null?null:traces::add,crossOwner==null?null:crossOwner.forSide(pair.b().stableKey(),pair.a().stableKey()))
+                    traces==null?null:traces::add,crossOwner==null?null:crossOwner.forSide(pair.b().stableKey(),pair.a().stableKey()),seedAudits)
                     :directions==null
                     ?ForcePropagation.plan(pair.b().stableKey(),seedsB,sideF,neighbors,legacyMaterials,forces,damage)
                     :ForcePropagation.planTargets(pair.b().stableKey(),seedsB,sideF,neighbors,materials,forces,damage,
@@ -335,12 +336,13 @@ public final class ContactCreditLedger {
             // with just the uncertain boundary held, without minting Credit/F.
             if(bilateral&&crossOwner!=null&&!crossValid(pair,pa,pb,crossOwner)){
                 if(traces!=null)traces.clear();
+                if(seedAudits!=null)seedAudits.clear();
                 pa=contactPlan(pair.a().stableKey(),seedsA,sideF,reservedA,evidence,true,neighbors,materials,forces,damage,
                         directions.getOrDefault(pair.a().stableKey(),ForcePropagation.Orientation.unknown()),
-                        traces==null?null:traces::add,holdCross(crossOwner.forSide(pair.a().stableKey(),pair.b().stableKey())));
+                        traces==null?null:traces::add,holdCross(crossOwner.forSide(pair.a().stableKey(),pair.b().stableKey())),seedAudits);
                 pb=contactPlan(pair.b().stableKey(),seedsB,sideF,reservedB,evidence,false,neighbors,materials,forces,damage,
                         directions.getOrDefault(pair.b().stableKey(),ForcePropagation.Orientation.unknown()),
-                        traces==null?null:traces::add,holdCross(crossOwner.forSide(pair.b().stableKey(),pair.a().stableKey())));
+                        traces==null?null:traces::add,holdCross(crossOwner.forSide(pair.b().stableKey(),pair.a().stableKey())),seedAudits);
             }
             // An independently certified late expansion may recover a formerly
             // missing side. It can spend only its ORIGINAL half, never the other half.
@@ -387,7 +389,23 @@ public final class ContactCreditLedger {
         if(traces!=null)for(var event:traces) {
             try {trace.accept(event);}catch(RuntimeException ignored) {break;}
         }
+        if(seedAudits!=null)try{for(var audit:seedAudits)audit.emit(issued.id());}catch(RuntimeException|LinkageError ignored){}
         return issued;
+    }
+
+    private record SeedAudit(String owner,List<GameImpactCredit.Target> seeds,Map<GameImpactCredit.Target,Double> effective,double split,double sideF,int reserved,double unresolved,double damped,int exact,int consensus,int withheld,int missingMaterial,int mixedMaterial,int unproved){
+        void emit(CreditId credit){
+            RogTrace.event(Stage.R06,"CONTACT_SIDE_SEAL","credit={} owner={} sideF={} forwardF={} contactDampedF={} unresolvedF={} exact={} consensus={} withheld={} missingMaterial={} mixedE={} unproved={} seedCount={} reservedUnknown={} effectiveCount={}",credit,owner,sideF,sideF-damped-unresolved,damped,unresolved,exact,consensus,withheld,missingMaterial,mixedMaterial,unproved,seeds.size(),reserved,effective.size());
+            if(!RogTrace.traceSelected())return;
+            int count=Math.min(seeds.size(),RogTrace.seedLimit());
+            RogTrace.event(Stage.R06,"CONTACT_SEED_EFFECTIVE_SUMMARY","credit={} owner={} seedCount={} effectiveCount={} sideF={} preContactSeedF={} reservedUnknown={} unresolvedF={} contactDampedF={} listedLimit={} truncated={}",credit,owner,seeds.size(),effective.size(),sideF,split,reserved,unresolved,damped,count,count<seeds.size());
+            for(int offset=0;offset<count;offset+=16){
+                if(!RogTrace.evidenceSlot(Stage.R06,"CONTACT_SEED_EFFECTIVE"))break;
+                var entries=new ArrayList<String>();int end=Math.min(count,offset+16);
+                for(int i=offset;i<end;i++){var seed=seeds.get(i);entries.add(seed.localBlock()+"="+effective.getOrDefault(seed,0.0));}
+                RogTrace.detail(Stage.R06,"CONTACT_SEED_EFFECTIVE","credit={} owner={} offset={} end={} total={} retainedInitialF={} authority=NONE",credit,owner,offset,end,seeds.size(),entries);
+            }
+        }
     }
 
     private static final Comparator<GameImpactCredit.Target> CONTACT_ORDER=Comparator
@@ -426,7 +444,7 @@ public final class ContactCreditLedger {
              List<Region> evidence,boolean onA,ForcePropagation.NeighborReader neighbors,
              Function<GameImpactCredit.Target,MaterialProperties> materials,GameImpactCredit.Settings forces,
              DamageModel.Settings damage,ForcePropagation.Orientation direction,
-             java.util.function.Consumer<ForcePropagation.Trace> trace,ForcePropagation.CrossOwnerContext crossOwner) {
+             java.util.function.Consumer<ForcePropagation.Trace> trace,ForcePropagation.CrossOwnerContext crossOwner,List<SeedAudit> seedAudits) {
         if(!Double.isFinite(sideF)||sideF<0)throw new IllegalArgumentException("invalid contact F");
         var opponents=new HashMap<GameImpactCredit.Target,Set<List<GameImpactCredit.Target>>>();
         for(var region:evidence){
@@ -466,7 +484,7 @@ public final class ContactCreditLedger {
         double tolerance=Math.max(1e-7,sideF*1e-7);
         if(!Double.isFinite(forwardF)||Math.abs(sideF-forwardF-contactDamped-unresolved)>tolerance)
             throw new IllegalStateException("direct contact F ledger mismatch");
-        if(RogTrace.sample(Stage.R06,"CONTACT_SIDE_SEAL"))RogTrace.detail(Stage.R06,"CONTACT_SIDE_SEAL","owner={} sideF={} forwardF={} contactDampedF={} unresolvedF={} exact={} consensus={} withheld={} missingMaterial={} mixedE={} unproved={} seedCount={} reservedUnknown={} effectiveCount={}",owner,sideF,forwardF,contactDamped,unresolved,exact,consensus,withheld,missingMaterial,mixedMaterial,unproved,seeds.size(),reserved,effective.size());
+        if(seedAudits!=null)seedAudits.add(new SeedAudit(owner,seeds,effective,split,sideF,reserved,unresolved,contactDamped,exact,consensus,withheld,missingMaterial,mixedMaterial,unproved));
         var plan=ForcePropagation.planTargets(owner,effective,neighbors,materials,forces,damage,direction,trace,crossOwner);
         if(Math.abs(plan.inputF()-forwardF)>tolerance)throw new IllegalStateException("seed F budget mismatch");
         return new ForcePropagation.Result(plan.shares(),sideF,plan.assignedF(),plan.dampedF(),

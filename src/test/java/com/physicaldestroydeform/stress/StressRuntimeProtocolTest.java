@@ -207,6 +207,9 @@ class StressRuntimeProtocolTest {
         var deferred=new StressReservationJournal(path.resolve("stress")).get(r.creditId());
         assertTrue(deferred.ledger().finished());assertEquals(12.5,deferred.ledger().pendingQ(),1e-12);
         assertEquals(session.partialPlans(),deferred.plans());
+        assertFalse(StressResidualWait.readyForResidualWait(deferred,false,deferred.plans().size()));
+        assertFalse(StressResidualWait.readyForResidualWait(deferred,true,-1));
+        assertTrue(StressResidualWait.readyForResidualWait(deferred,true,deferred.plans().size()));
         assertThrows(IllegalStateException.class,()->journal.acknowledgeHandoff(r.creditId()));
         assertEquals(100,deferred.reservation().createdGameTick());
         journal.closeResidual(r.creditId(),"ORIGINAL_TTL_UNUSED");

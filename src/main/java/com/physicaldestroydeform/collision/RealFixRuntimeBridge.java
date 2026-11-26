@@ -928,8 +928,9 @@ public final class RealFixRuntimeBridge {
                             }:null;
                     long propagationStart=System.nanoTime();
                     var propagationReader=result.credited()?OwnerResolver.propagationSnapshot(server,stamp.dimension):null;
+                    int reserveA=result.credited()?damageRegions.reservedA():0,reserveB=result.credited()?damageRegions.reservedB():0;
                     ContactCreditLedger.Grant grant=result.credited()?regionLedger.issueContactSeeds(
-                            pair,result,ContactCreditLedger.Source.SABLE_POST_EFFECT,damageRegions.regions(),damageRegions.reservedA(),damageRegions.reservedB(),
+                            pair,result,ContactCreditLedger.Source.SABLE_POST_EFFECT,damageRegions.regions(),reserveA,reserveB,
                             propagationReader,
                             target->OwnerResolver.matchesSnapshot(propagationReader,target)?targetMaterials.material(target):null,credit.settings(),damageSettings,
                             nativeNormal.owners(),targetDirections.hasProvenSeed()||fTrace!=null
@@ -950,7 +951,7 @@ public final class RealFixRuntimeBridge {
                                 grant==null?"NULL":grant.status(),regionLedger.lastPropagationFailure(),aborted);
                     }
                     if(granted) {
-                        RogTrace.event(Stage.R06,"CONTACT_SEED_SEALED","credit={} directRegions={} finalRegions={} reservedA={} reservedB={} speculativeDamageSeeds=0",grant.id(),directRegions.regions().size(),damageRegions.regions().size(),damageRegions.reservedA(),damageRegions.reservedB());
+                        RogTrace.event(Stage.R06,"CONTACT_SEED_SEALED","credit={} directRegions={} finalRegions={} reservedA={} reservedB={} speculativeDamageSeeds=0",grant.id(),directRegions.regions().size(),damageRegions.regions().size(),reserveA,reserveB);
                         if(RogTrace.sample(Stage.R06,"SEALED_CREDIT"))RogTrace.detail(Stage.R06,"SEALED_CREDIT","credit={} propagationA={} propagationB={} owners={} rawF={} cappedF={} Q={}",grant.id(),grant.propagationA()==null?"NONE":grant.propagationA().endReason(),grant.propagationB()==null?"NONE":grant.propagationB().endReason(),nativeNormal.owners(),currentPeak,result.peakForce(),grant.issuedQ());
                         targetDirections.bind(grant,credit.settings(),targetMaterials::material);
                         if(DETAIL_ENABLED)log.info("[PDD-DEFORM-EVIDENCE] credit={} {}",grant.id(),targetDirections.summary());
@@ -1040,6 +1041,7 @@ public final class RealFixRuntimeBridge {
                                     grant.propagationA().audit().thresholdDiscardF()+grant.propagationB().audit().thresholdDiscardF(),
                                     grant.propagationA().candidateQ(),grant.propagationB().candidateQ(),grant.propagationA().finalQ(),grant.propagationB().finalQ(),
                                     grant.issuedQ(),grant.allocatedA(),grant.allocatedB(),grant.unused(),fError,qError,grant.propagationA().endReason(),grant.propagationB().endReason());
+                            traceSealedContact(grant.id(),records,directRegions,damageRegions);
                             log.info("[PDD-F-INVARIANT] credit={} FInput={} FAccounted={} FError={} " +
                                             "issuedQ={} reservedA={} reservedB={} unusedQ={} QError={} " +
                                             "FStatus={} QStatus={} mutation=OFF",
@@ -1345,6 +1347,34 @@ public final class RealFixRuntimeBridge {
                         WorldClearanceVerifier.MAX_CELLS,WorldClearanceVerifier.MAX_CONFIRM_PER_TICK);
             }
         }
+    }
+
+    private static void traceSealedContact(ContactCreditLedger.CreditId creditId,List<NativeCollisionTelemetry.Contact> records,
+                                           SableContactRegions.Result direct,SableContactRegions.Result sealed){
+        if(!RogTrace.traceSelected())return;
+        try{
+            int cap=Math.min(records.size(),RogTrace.seedLimit());
+            RogTrace.event(Stage.R01,"NATIVE_CAPTURE_AUDIT","credit={} rawRecords={} listedLimit={} stride={} exactSubstep=UNAVAILABLE posePhase=POST_EFFECT truncated={}",creditId,records.size(),cap,NativeCollisionTelemetry.FIELDS,cap<records.size());
+            for(int i=0;i<cap;i++){
+                if(!RogTrace.evidenceSlot(Stage.R01,"NATIVE_CONTACT_RECORD"))break;
+                var c=records.get(i);
+                RogTrace.detail(Stage.R01,"NATIVE_CONTACT_RECORD","credit={} index={} ids={}/{} scalar={} localA={}/{}/{} localB={}/{}/{} normalA={}/{}/{} normalB={}/{}/{} frameA={} frameB={} nativeTick={} captureTick={} saturated={}",creditId,i,c.idA(),c.idB(),c.rawImpactScalar(),c.contactAX(),c.contactAY(),c.contactAZ(),c.contactBX(),c.contactBY(),c.contactBZ(),c.ax(),c.ay(),c.az(),c.bx(),c.by(),c.bz(),c.frameA(),c.frameB(),c.serverTick(),c.captureServerTick(),c.capSaturated());
+            }
+            for(boolean onA:new boolean[]{true,false}){
+                var initial=new HashSet<GameImpactCredit.Target>();var confirmed=new HashSet<GameImpactCredit.Target>();
+                for(var region:direct.regions()){var target=onA?region.a():region.b();if(target!=null)initial.add(target);}
+                for(var region:sealed.regions()){var target=onA?region.a():region.b();if(target!=null)confirmed.add(target);}
+                var sorted=confirmed.stream().sorted(java.util.Comparator.comparing(GameImpactCredit.Target::localBlock)).toList();
+                int count=Math.min(sorted.size(),RogTrace.seedLimit());
+                RogTrace.event(Stage.R04,"CONTACT_SEED_COORD_SUMMARY","credit={} side={} directCount={} sealedCount={} listedLimit={} truncated={}",creditId,onA?"A":"B",initial.size(),sorted.size(),count,count<sorted.size());
+                for(int offset=0;offset<count;offset+=32){
+                    if(!RogTrace.evidenceSlot(Stage.R04,"CONTACT_SEED_COORDS"))break;
+                    var cells=new ArrayList<String>();int end=Math.min(count,offset+32);
+                    for(int i=offset;i<end;i++){var target=sorted.get(i);cells.add(target.localBlock()+"|"+(initial.contains(target)?"DIRECT_NATIVE":"BILATERAL_SURFACE"));}
+                    RogTrace.detail(Stage.R04,"CONTACT_SEED_COORDS","credit={} side={} offset={} end={} total={} cells={}",creditId,onA?"A":"B",offset,end,sorted.size(),cells);
+                }
+            }
+        }catch(RuntimeException|LinkageError ignored){/* diagnostic only */}
     }
 
     private int recordPreview(ContactCreditLedger.Grant grant,MaterialRegistry.Snapshot materials,

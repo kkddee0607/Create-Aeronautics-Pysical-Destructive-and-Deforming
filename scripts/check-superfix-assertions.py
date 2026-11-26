@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only finalLastFix contact routing guard; not compilation or JUnit."""
+"""Read-only rogFix contact routing guard; not compilation or JUnit."""
 from pathlib import Path
 import re
 root=Path(__file__).resolve().parents[1]
@@ -11,5 +11,11 @@ bridge=(main/'RealFixRuntimeBridge.java').read_text()
 for term in ('SableContactRegions.prepare(', 'prepared.expand()', 'regionLedger.issueContactSeeds(', 'damageRegions.reservedA()', 'damageRegions.reservedB()', 'OwnerResolver.matchesSnapshot('):
     if term not in bridge:errors.append(f'missing live direct-seed wiring: {term}')
 if bridge.find('var damageRegions=')>bridge.find('regionLedger.issueContactSeeds('):errors.append('expansion must precede sealing')
+surface=(main/'BilateralContactSurface.java').read_text()
+stress=(main.parent/'stress/StressRuntime.java').read_text()
+for term in ('clipHalfPlane(', 'exteriorFaces(', 'Overlap.UNKNOWN'):
+    if term not in surface:errors.append(f'missing bilateral geometry: {term}')
+for term in ('wakeIndex.wake(', 'StressResidualWait.readyForResidualWait(', 'releasePlanning(job)', '"RESIDUAL"'):
+    if term not in stress:errors.append(f'missing stress residual scheduling: {term}')
 if errors:raise SystemExit('\n'.join(errors))
-print('FinalLastFix static contact routing guard PASS: obsolete paths absent, direct/expansion/sealing wiring present')
+print('RogFix static contact routing guard PASS: obsolete paths absent, direct/expansion/sealing wiring present')

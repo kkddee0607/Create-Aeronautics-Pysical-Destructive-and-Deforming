@@ -1,10 +1,10 @@
-# PDD 0.6.1-finalLastFix — Physical Destructive and Deforming
+# PDD 0.6.1-rogFix — Physical Destructive and Deforming
 
 Minecraft 1.21.1 · Java 21 · NeoForge 21.1.228 · Sable 2.0.6 · Create 6.0.10 · Aeronautics 1.3.2. 선택 호환: Copycats+ 3.0.11.
 
 [통합설계서 1.0.9](.github/workflows/PDD-1.0.9-Integrated-Design-Specification.md) · [originFix-buildFix 검증 보고](docs/verification/PDD-0.6.1-originFix-buildFix.md) · [originFix 구현 이력](docs/verification/PDD-0.6.1-originFix.md).
 
-**현재 검증 후보: 0.6.1-finalLastFix.** Native anchor 기반 실제 양측 면 클리핑, 관측된 동일 틱 법선 변위 범위, 접촉 증거 단위 F 보류, Plot 경계 및 Stress Root 대기 개선. 기존 F/Q·콜백·저장 계약 유지. 설치 대상: `build/libs/physical-destroy-deform-0.6.1-finalLastFix.jar`. 실제 Gradle/JUnit/Actions/인게임 미검증. [검증 보고](docs/verification/PDD-0.6.1-finalLastFix.md).
+**현재 검증 후보: 0.6.1-rogFix.** 실제 양측 교차 영역 깊이 클리핑, 외부 면 검사, Stress 잔여 정산 대기 분리, 상한 있는 사건 진단. 기존 F/Q·콜백·저장 계약 유지. 설치 대상: `build/libs/physical-destroy-deform-0.6.1-rogFix.jar`. 실제 Gradle/JUnit/Actions/인게임 미검증. [검증 보고](docs/verification/PDD-0.6.1-rogFix.md).
 
 **직전 배포판: 0.6.1-originlastFix.** [검증 보고](docs/verification/PDD-0.6.1-originlastFix.md).
 

@@ -23,6 +23,7 @@ final class BilateralContactSurface {
     private static final double EPS=1.0e-5;
     private static final double MIN_AREA=1.0e-10;
     private static final int MAX_PAIRS=ContactCreditLedger.MAX_REGIONS;
+    private static final int MAX_FACE_PIECES=128, MAX_FACE_WORK=4096;
     private static final int MAX_CANDIDATE_CELLS=64; // Existing transformed-face budget; not Native contact records
     private static final FrameMath.Vec ZERO=new FrameMath.Vec(0,0,0);
     private static final FrameMath.Pose WORLD=new FrameMath.Pose(ZERO,ZERO,new FrameMath.Vec(1,1,1),0,0,0,1);
@@ -35,6 +36,9 @@ final class BilateralContactSurface {
         /** An unknown neighbor is not evidence of empty space. */
         boolean exposed(int side,FrameMath.Vec point,MovePlan.SignedAxes inward);
         default boolean takeUncertainExterior(){return false;}
+        /** Other owner-local cells that can cover this actual face. Null means unknown.
+         * The cell itself is always checked for internal composite-shape occlusion. */
+        default List<Cell> exteriorCells(int side,Cell cell,AABB face,MovePlan.SignedAxes inward){return List.of();}
         /** Distinguish an unknown cell caused by exhausted read budget from real air. */
         default boolean budgetExhausted(){return false;}
         /** A failed/unloaded cell read is NOT proof that the face terminates. */
@@ -63,6 +67,12 @@ final class BilateralContactSurface {
     }
     private record Pair(BlockPos a,BlockPos b) {}
     private record Point(double x,double y) {}
+    private record Rect(double u0,double v0,double u1,double v1) {}
+    private enum Overlap { MATCH, NONE, UNKNOWN }
+    private static final class FaceBudget {
+        int remaining=MAX_FACE_WORK;
+        boolean charge(){return remaining-->0;}
+    }
 
     /** Each *single* native record carries both effect-phase poses. Never mix
      * its transform with a different contact's pose or penetration delta. */
@@ -119,27 +129,39 @@ final class BilateralContactSurface {
      * relative orientation must be invariant in every observed same-tick pose.
      * A measured change along the normal can bracket a planar contact. */
     private static Sweep observedSweep(Frame frame,Contact record,boolean first,List<CollisionFrame.Snapshot> pre){
-        if(pre==null||pre.isEmpty())return null;
+        if(pre==null||pre.isEmpty())return sweepRejected("NO_PRE_CAPTURE",0);
         var n=outward(frame.inwardA());
         var other=frame.a().toLocalNormal(frame.b().toWorldNormal(outward(frame.inwardB())));
-        if(other.plus(n).squareLength()>EPS*EPS)return null;
+        if(other.plus(n).squareLength()>EPS*EPS)return sweepRejected("NORMAL_MISMATCH",other.plus(n).squareLength());
         var baseline=relativePoint(frame.a(),frame.b(),frame.contactB());
         double min=0,max=0;int samples=0;
         var basis=List.of(new FrameMath.Vec(1,0,0),new FrameMath.Vec(0,1,0),new FrameMath.Vec(0,0,1));
         for(var snapshot:pre){
             if(snapshot==null||snapshot.phase()!=CollisionFrame.Phase.PRE_SOLVER
                     ||snapshot.serverTick()!=record.serverTick()||!record.dimension().equals(snapshot.dimension()))continue;
-            if(!snapshot.containerAvailable()||record.runtimeStamp().known()&&!record.runtimeStamp().sameCapture(snapshot.runtimeStamp()))return null;
+            if(!snapshot.containerAvailable()||record.runtimeStamp().known()&&!record.runtimeStamp().sameCapture(snapshot.runtimeStamp()))return sweepRejected("CAPTURE_EPOCH_MISMATCH",samples);
             var a=prePose(record,first,snapshot);var b=prePose(record,!first,snapshot);
-            if(a==null||b==null)return null;
-            for(var e:basis)if(a.toLocalVector(b.toWorldVector(e)).minus(
-                    frame.a().toLocalVector(frame.b().toWorldVector(e))).squareLength()>EPS*EPS)return null;
+            if(a==null||b==null)return sweepRejected("BODY_POSE_MISSING",samples);
+            for(var e:basis){
+                double rotation=a.toLocalVector(b.toWorldVector(e)).minus(
+                    frame.a().toLocalVector(frame.b().toWorldVector(e))).squareLength();
+                if(rotation>EPS*EPS)return sweepRejected("ROTATION_CHANGED",rotation);
+            }
             var delta=relativePoint(a,b,frame.contactB()).minus(baseline);
             double shift=delta.dot(n);
-            if(!Double.isFinite(shift)||delta.minus(n.times(shift)).squareLength()>EPS*EPS)return null;
+            if(!Double.isFinite(shift))return sweepRejected("INVALID_NUMERIC",shift);
+            double tangent=delta.minus(n.times(shift)).squareLength();
+            if(tangent>EPS*EPS)return sweepRejected("TANGENTIAL_MOTION",tangent);
             min=Math.min(min,shift);max=Math.max(max,shift);samples++;
         }
-        return samples>0&&max-min>EPS?new Sweep(min,max):null;
+        if(samples==0)return sweepRejected("NO_MATCHING_PRE_CAPTURE",0);
+        if(max-min<=EPS)return sweepRejected("ZERO_SWEEP",max-min);
+        if(RogTrace.sample(Stage.R03,"SWEEP_VALID"))RogTrace.detail(Stage.R03,"SWEEP_VALID","samples={} minShift={} maxShift={} exactSubstep=false",samples,min,max);
+        return new Sweep(min,max);
+    }
+    private static Sweep sweepRejected(String reason,double value){
+        if(RogTrace.sample(Stage.R03,"SWEEP_"+reason))RogTrace.detail(Stage.R03,"SWEEP_"+reason,"value={} exactSubstep=false",value);
+        return null;
     }
     private static FrameMath.Pose pose(Contact c,boolean first){
         if((first?c.idA():c.idB())==-1)return WORLD;
@@ -215,17 +237,35 @@ final class BilateralContactSurface {
         final Set<Pair> queued=new HashSet<>();
         final Set<Pair> failedComponents=new HashSet<>();
         final Map<BlockPos,Cell> cellsA=new HashMap<>(),cellsB=new HashMap<>();
+        final Map<BlockPos,List<AABB>> exteriorA=new HashMap<>(),exteriorB=new HashMap<>();
         final ArrayDeque<Pair> frontier=new ArrayDeque<>();
         int checks;
         boolean incomplete,anyIncomplete;
         Search(Frame frame,ShapeReader source,int maxChecks,int maxPairs){
             this.frame=frame;this.source=source;this.maxChecks=maxChecks;this.maxPairs=maxPairs;
         }
+        Cell anchorCell(int side,BlockPos pos){
+            var cache=side==0?cellsA:cellsB;
+            if(!cache.containsKey(pos))cache.put(pos,source.get(side,pos));
+            if(source.budgetExhausted())incomplete=true;
+            else if(cache.get(pos)==null&&source.unresolvedCell(side,pos))anyIncomplete=true;
+            return cache.get(pos);
+        }
         Cell cell(int side,BlockPos pos){
             var cache=side==0?cellsA:cellsB;
             if(!cache.containsKey(pos))cache.put(pos,source.get(side,pos));
             if(source.budgetExhausted()||cache.get(pos)==null&&source.unresolvedCell(side,pos)){incomplete=true;if(RogTrace.sample(Stage.R04,"SHAPE_UNKNOWN_OR_BUDGET"))RogTrace.detail(Stage.R04,"SHAPE_UNKNOWN_OR_BUDGET","side={} allocated={} checks={} maxChecks={}",side,pos,checks,maxChecks);}
             return cache.get(pos);
+        }
+        List<AABB> exterior(int side,Cell cell){
+            var cache=side==0?exteriorA:exteriorB;
+            if(!cache.containsKey(cell.allocated())){
+                List<AABB> faces;
+                try{faces=exteriorFaces(frame,source,cell,side,new FaceBudget());}
+                catch(RuntimeException unsafe){faces=null;}
+                cache.put(cell.allocated(),faces);
+            }
+            return cache.get(cell.allocated());
         }
         boolean enqueue(Pair p){
             if(incomplete||complete.containsKey(p)||queued.contains(p))return false;
@@ -237,8 +277,10 @@ final class BilateralContactSurface {
                 if(a==null||b==null){evaluated.put(p,Boolean.FALSE);return false;}
                 if(checks>=maxChecks){incomplete=true;if(RogTrace.sample(Stage.R04,"PAIR_CHECK_CAP"))RogTrace.detail(Stage.R04,"PAIR_CHECK_CAP","pair={} checked={} max={}",p,checks,maxChecks);return false;}
                 checks++;
-                pass=positiveOverlap(frame,source,a,b);
-                if(source.takeUncertainExterior()||source.budgetExhausted()){incomplete=true;return false;}
+                var verdict=overlap(frame,source,a,b,exterior(0,a),exterior(1,b));
+                boolean uncertain=source.takeUncertainExterior();
+                if(verdict==Overlap.UNKNOWN||uncertain||source.budgetExhausted()){incomplete=true;return false;}
+                pass=verdict==Overlap.MATCH;
                 evaluated.put(p,pass);
             }
             if(pass){queued.add(p);frontier.add(p);}
@@ -257,10 +299,10 @@ final class BilateralContactSurface {
                 }
                 for(var pa:SableConsumerTargets.cells(witness.contactA())){
                     if(incomplete)break;
-                    if(!anchorFace(witness,cell(0,pa),0)){if(RogTrace.sample(Stage.R04,"ANCHOR_A_REJECTED"))RogTrace.detail(Stage.R04,"ANCHOR_A_REJECTED","allocated={} witness={} axis={}",pa,witness.contactA(),witness.inwardA());continue;}
+                    if(!anchorFace(witness,anchorCell(0,pa),0)){if(RogTrace.sample(Stage.R04,"ANCHOR_A_REJECTED"))RogTrace.detail(Stage.R04,"ANCHOR_A_REJECTED","allocated={} witness={} axis={}",pa,witness.contactA(),witness.inwardA());continue;}
                     for(var pb:SableConsumerTargets.cells(witness.contactB())){
                         if(incomplete)break;
-                        if(!anchorFace(witness,cell(1,pb),1)){if(RogTrace.sample(Stage.R04,"ANCHOR_B_REJECTED"))RogTrace.detail(Stage.R04,"ANCHOR_B_REJECTED","allocated={} witness={} axis={}",pb,witness.contactB(),witness.inwardB());continue;}
+                        if(!anchorFace(witness,anchorCell(1,pb),1)){if(RogTrace.sample(Stage.R04,"ANCHOR_B_REJECTED"))RogTrace.detail(Stage.R04,"ANCHOR_B_REJECTED","allocated={} witness={} axis={}",pb,witness.contactB(),witness.inwardB());continue;}
                         active.clear();queued.clear();frontier.clear();
                         var anchor=new Pair(pa,pb);
                         if(failedComponents.contains(anchor)){anyIncomplete=true;continue;}
@@ -361,6 +403,11 @@ final class BilateralContactSurface {
             for(int i=0;i<3;i++){bounds[i]=Math.min(bounds[i],cs[i]);bounds[i+3]=Math.max(bounds[i+3],cs[i]);}
         }
         if(!Double.isFinite(bounds[0]))return List.of();
+        var depthAxis=f.pose(1-side).toLocalVector(f.a().toWorldNormal(outward(f.inwardA())));
+        for(int i=0;i<3;i++){
+            double margin=Math.abs(coordinate(depthAxis,i))*PENETRATION;
+            bounds[i]-=margin;bounds[i+3]+=margin;
+        }
         var low=new int[3];var high=new int[3];long count=1;
         int opposingNormal=axis(f.inward(1-side));
         for(int i=0;i<3;i++){
@@ -381,6 +428,8 @@ final class BilateralContactSurface {
                 // Tangential zero-area intersections (only a shared grid
                 // edge) cannot receive F. Removing them here avoids the
                 // expensive 3x3 candidate fan-out for every full cube.
+                // Preserve the existing numerical seam tolerance; tilted
+                // normal-depth displacement was already included above.
                 low[i]=(int)Math.floor(bounds[i]+EPS);
                 high[i]=(int)Math.ceil(bounds[i+3]-EPS)-1;
                 if(high[i]<low[i]){
@@ -390,8 +439,9 @@ final class BilateralContactSurface {
                     high[i]=(int)Math.floor(bounds[i+3]+EPS);
                 }
             }
-            count*=high[i]-low[i]+1L;
-            if(count>MAX_CANDIDATE_CELLS)return null;
+            long span=(long)high[i]-low[i]+1;
+            if(span<=0||span>MAX_CANDIDATE_CELLS||count>MAX_CANDIDATE_CELLS/span)return null;
+            count*=span;
         }
         var out=new ArrayList<BlockPos>();
         for(int x=low[0];x<=high[0];x++)for(int y=low[1];y<=high[1];y++)for(int z=low[2];z<=high[2];z++)
@@ -426,58 +476,146 @@ final class BilateralContactSurface {
             if(inside)return true;
         }return false;
     }
-    static boolean positiveOverlap(Frame f,ShapeReader source,Cell a,Cell b){
-        if(f==null||a==null||b==null||a.boxes().isEmpty()||b.boxes().isEmpty())return false;
-        var outwardA=new FrameMath.Vec(-f.inwardA().x(),-f.inwardA().y(),-f.inwardA().z());
-        var outwardB=new FrameMath.Vec(-f.inwardB().x(),-f.inwardB().y(),-f.inwardB().z());
+    static boolean positiveOverlap(Frame f,ShapeReader source,Cell a,Cell b){return overlap(f,source,a,b)==Overlap.MATCH;}
+    private static double lo(AABB b,int a){return a==0?b.minX:a==1?b.minY:b.minZ;}
+    private static double hi(AABB b,int a){return a==0?b.maxX:a==1?b.maxY:b.maxZ;}
+    private static int coord(BlockPos p,int a){return a==0?p.getX():a==1?p.getY():p.getZ();}
+    private static void addRect(List<Rect> out,double u0,double v0,double u1,double v1){
+        if(u1>u0&&v1>v0)out.add(new Rect(u0,v0,u1,v1));
+    }
+    /** Disjoint rectangle subtraction in owner-local coordinates. Work/fragment
+     * exhaustion is UNKNOWN, not an empty exterior. No synthetic surface is added. */
+    private static List<AABB> exteriorFaces(Frame f,ShapeReader source,Cell cell,int side,FaceBudget budget){
+        var out=new ArrayList<AABB>();int ax=axis(f.inward(side)),u=(ax+1)%3,v=(ax+2)%3;
+        boolean low=coordinate(outward(f.inward(side)),ax)<0;
+        for(var box:cell.boxes()){
+            if(!budget.charge())return null;
+            double plane=low?lo(box,ax):hi(box,ax);
+            if(hi(box,u)<=lo(box,u)||hi(box,v)<=lo(box,v)||hi(box,ax)<=lo(box,ax))continue;
+            var cover=source==null?List.<Cell>of():source.exteriorCells(side,cell,box,f.inward(side));
+            if(cover==null)return null;
+            var cells=new ArrayList<Cell>(cover.size()+1);cells.add(cell);cells.addAll(cover);
+            List<Rect> pieces=List.of(new Rect(lo(box,u),lo(box,v),hi(box,u),hi(box,v)));
+            for(var other:cells){
+                if(other==null)return null;
+                double da=(long)coord(other.allocated(),ax)-coord(cell.allocated(),ax);
+                double du=(long)coord(other.allocated(),u)-coord(cell.allocated(),u);
+                double dv=(long)coord(other.allocated(),v)-coord(cell.allocated(),v);
+                for(var blocker:other.boxes()){
+                    if(pieces.isEmpty())break;
+                    if(!budget.charge())return null;
+                    double a0=lo(blocker,ax)+da,a1=hi(blocker,ax)+da;
+                    if(low?!(a0<plane&&a1>=plane):!(a1>plane&&a0<=plane))continue;
+                    double u0=lo(blocker,u)+du,u1=hi(blocker,u)+du,v0=lo(blocker,v)+dv,v1=hi(blocker,v)+dv;
+                    var next=new ArrayList<Rect>();
+                    for(var r:pieces){
+                        if(!budget.charge())return null;
+                        double l=Math.max(r.u0(),u0),h=Math.min(r.u1(),u1),b=Math.max(r.v0(),v0),t=Math.min(r.v1(),v1);
+                        if(l>=h||b>=t){next.add(r);continue;}
+                        addRect(next,r.u0(),r.v0(),l,r.v1());addRect(next,h,r.v0(),r.u1(),r.v1());
+                        addRect(next,l,r.v0(),h,b);addRect(next,l,t,h,r.v1());
+                    }
+                    if(next.size()>MAX_FACE_PIECES)return null;
+                    pieces=next;
+                }
+                if(pieces.isEmpty())break;
+            }
+            for(var r:pieces){
+                double[] l=new double[3],h=new double[3];l[ax]=h[ax]=plane;
+                l[u]=r.u0();h[u]=r.u1();l[v]=r.v0();h[v]=r.v1();
+                out.add(new AABB(l[0],l[1],l[2],h[0],h[1],h[2]));
+                if(out.size()>MAX_FACE_PIECES)return null;
+            }
+        }
+        return out;
+    }
+    /** Find cells immediately outside the face's true footprint. The caller
+     * verifies owner and loaded state. No whole Plot scan or guessed air. */
+    static List<BlockPos> exteriorCellPositions(Cell cell,AABB face,MovePlan.SignedAxes inward){
+        int ax=axis(inward);boolean low=coordinate(outward(inward),ax)<0;
+        double plane=coord(cell.allocated(),ax)+(low?lo(face,ax):hi(face,ax));
+        double outside=Math.nextAfter(plane,low?Double.NEGATIVE_INFINITY:Double.POSITIVE_INFINITY);
+        int[] min=new int[3],max=new int[3];long count=1;
+        for(int i=0;i<3;i++){
+            double l=i==ax?Math.floor(outside):Math.floor(coord(cell.allocated(),i)+lo(face,i));
+            double h=i==ax?l:Math.ceil(coord(cell.allocated(),i)+hi(face,i))-1;
+            if(!Double.isFinite(l)||!Double.isFinite(h)||l<Integer.MIN_VALUE+1||h>Integer.MAX_VALUE-1||h<l)return null;
+            min[i]=(int)l;max[i]=(int)h;long span=(long)max[i]-min[i]+1;
+            if(span>MAX_CANDIDATE_CELLS||count>MAX_CANDIDATE_CELLS/span)return null;count*=span;
+        }
+        var out=new ArrayList<BlockPos>();
+        for(int x=min[0];x<=max[0];x++)for(int y=min[1];y<=max[1];y++)for(int z=min[2];z<=max[2];z++){
+            var p=new BlockPos(x,y,z);if(!p.equals(cell.allocated()))out.add(p);
+        }
+        return out;
+    }
+    private static Overlap overlap(Frame f,ShapeReader source,Cell a,Cell b){
+        if(f==null||a==null||b==null||a.boxes().isEmpty()||b.boxes().isEmpty())return Overlap.NONE;
+        try{return overlap(f,source,a,b,exteriorFaces(f,source,a,0,new FaceBudget()),exteriorFaces(f,source,b,1,new FaceBudget()));}
+        catch(RuntimeException invalid){return Overlap.UNKNOWN;}
+    }
+    private static Overlap overlap(Frame f,ShapeReader source,Cell a,Cell b,List<AABB> boxesA,List<AABB> boxesB){
         try{
-            var n=f.a().toWorldNormal(outwardA);
-            double dot=n.dot(f.b().toWorldNormal(outwardB));
-            if(dot>-FACE_OPPOSITION){if(RogTrace.sample(Stage.R04,"FACE_OPPOSITION"))RogTrace.detail(Stage.R04,"FACE_OPPOSITION","a={} b={} dot={} limit={}",a.allocated(),b.allocated(),dot,-FACE_OPPOSITION);return false;}
+            var n=f.a().toWorldNormal(outward(f.inwardA()));
+            var nb=f.b().toWorldNormal(outward(f.inwardB()));
+            double denom=n.dot(nb);
+            if(denom>-FACE_OPPOSITION){if(RogTrace.sample(Stage.R04,"FACE_OPPOSITION"))RogTrace.detail(Stage.R04,"FACE_OPPOSITION","a={} b={} dot={} limit={}",a.allocated(),b.allocated(),denom,-FACE_OPPOSITION);return Overlap.NONE;}
+            var budget=new FaceBudget();
+            if(boxesA==null||boxesB==null){if(RogTrace.sample(Stage.R04,"EXTERIOR_UNKNOWN_OR_COMPLEXITY_CAP"))RogTrace.detail(Stage.R04,"EXTERIOR_UNKNOWN_OR_COMPLEXITY_CAP","a={} b={} perCellFaceWorkCap={}",a.allocated(),b.allocated(),MAX_FACE_WORK);return Overlap.UNKNOWN;}
+            boolean parallel=nb.plus(n).squareLength()<=EPS*EPS;
             int ax=axis(f.inwardA()),bx=axis(f.inwardB());
-            for(var boxA:a.boxes())for(var boxB:b.boxes()){
+            for(var boxA:boxesA)for(var boxB:boxesB){
+                if(!budget.charge())return Overlap.UNKNOWN;
                 var fa=faceCorners(boxA,a.allocated(),ax,f.inwardA());
                 var fb=faceCorners(boxB,b.allocated(),bx,f.inwardB());
                 boolean swept=f.sweep()!=null&&onAnchorPlane(f,fa,0)&&onAnchorPlane(f,fb,1);
                 var pa=fa.stream().map(f.a()::toWorldPoint).toList();
                 var pb=fb.stream().map(f.b()::toWorldPoint).toList();
-                var u=pa.get(1).minus(pa.get(0)).unit();var v=n.cross(u).unit();
-                var areaA=project(pa,pa.getFirst(),u,v);
-                var areaB=project(pb,pa.getFirst(),u,v);
-                boolean close=true;
-                for(var p:pb){
-                    double depth=p.minus(pa.getFirst()).dot(n);
-                    if(!contactDepth(f,depth,swept)){if(RogTrace.sample(Stage.R04,"FACE_GAP_OR_PENETRATION"))RogTrace.detail(Stage.R04,"FACE_GAP_OR_PENETRATION","a={} b={} depth={} maxGap={} minDepth={}",a.allocated(),b.allocated(),depth,EPS,-PENETRATION);close=false;break;}
+                var origin=pa.getFirst();var u=pa.get(1).minus(origin).unit();var v=n.cross(u).unit();
+                var intersection=clip(ccw(project(pb,origin,u,v)),ccw(project(pa,origin,u,v)));
+                double before=polygonArea(intersection);
+                if(before<=MIN_AREA){if(RogTrace.sample(Stage.R04,"CLIPPED_AREA"))RogTrace.detail(Stage.R04,"CLIPPED_AREA","a={} b={} area={} minArea={}",a.allocated(),b.allocated(),before,MIN_AREA);continue;}
+                // Signed distance is affine on the common projection. Clip
+                // the overlap, not irrelevant distant corners of the whole face.
+                double lower=-PENETRATION,upper=parallel?EPS:0;
+                if(swept){lower=Math.min(lower,-f.sweep().maxShift()-EPS);upper=Math.max(upper,-f.sweep().minShift()+EPS);}
+                double low=lower,high=upper;
+                java.util.function.ToDoubleFunction<Point> depth=p->-nb.dot(origin.plus(u.times(p.x())).plus(v.times(p.y())).minus(pb.getFirst()))/denom;
+                var valid=clipHalfPlane(intersection,p->depth.applyAsDouble(p)-low);
+                valid=clipHalfPlane(valid,p->high-depth.applyAsDouble(p));
+                double area=polygonArea(valid);
+                if(RogTrace.sample(Stage.R04,"FACE_DEPTH_CLIP"))RogTrace.detail(Stage.R04,"FACE_DEPTH_CLIP","a={} b={} projectedArea={} validArea={} minDepth={} maxDepth={} swept={} facePiecesA={} facePiecesB={}",a.allocated(),b.allocated(),before,area,low,high,swept,boxesA.size(),boxesB.size());
+                if(area<=MIN_AREA){if(RogTrace.sample(Stage.R04,"FACE_GAP_OR_PENETRATION"))RogTrace.detail(Stage.R04,"FACE_GAP_OR_PENETRATION","a={} b={} projectedArea={} validArea={} minDepth={} maxGap={}",a.allocated(),b.allocated(),before,area,low,high);continue;}
+                double cx=0,cy=0;for(var p:valid){cx+=p.x();cy+=p.y();}
+                var center=new Point(cx/valid.size(),cy/valid.size());
+                double distance=depth.applyAsDouble(center);
+                if(!contactDepth(f,distance,swept))continue;
+                var centerA=origin.plus(u.times(center.x())).plus(v.times(center.y()));
+                var localA=f.a().toLocalPoint(centerA);var localB=f.b().toLocalPoint(centerA.plus(n.times(distance)));
+                // Live reader also performs the existing independent point
+                // check; synthetic geometry tests do not authorize mutations.
+                if(source==null||(source.exposed(0,localA,f.inwardA())&&source.exposed(1,localB,f.inwardB()))){
+                    if(RogTrace.sample(Stage.R04,"FACE_PROVED"))RogTrace.detail(Stage.R04,"FACE_PROVED","a={} b={} area={} localA={} localB={} depth={} swept={}",a.allocated(),b.allocated(),area,localA,localB,distance,swept);
+                    return Overlap.MATCH;
                 }
-                if(!close)continue;
-                var intersection=clip(ccw(areaB),ccw(areaA));
-                double area=polygonArea(intersection);
-                if(area<=MIN_AREA){if(RogTrace.sample(Stage.R04,"CLIPPED_AREA"))RogTrace.detail(Stage.R04,"CLIPPED_AREA","a={} b={} area={} minArea={}",a.allocated(),b.allocated(),area,MIN_AREA);continue;}
-                double cx=0,cy=0;for(var p:intersection){cx+=p.x();cy+=p.y();}
-                var centerA=pa.getFirst().plus(u.times(cx/intersection.size())).plus(v.times(cy/intersection.size()));
-                // The two independently verified faces may have shallow
-                // native penetration. Check each body's *own* exterior face,
-                // not the A plane projected into the interior of body B.
-                var nb=f.b().toWorldNormal(outwardB);
-                double denom=nb.dot(n);
-                if(Math.abs(denom)<FACE_OPPOSITION){if(RogTrace.sample(Stage.R04,"PROJECTION_OPPOSITION"))RogTrace.detail(Stage.R04,"PROJECTION_OPPOSITION","a={} b={} denom={} limit={}",a.allocated(),b.allocated(),denom,FACE_OPPOSITION);continue;}
-                double distance=-nb.dot(centerA.minus(pb.getFirst()))/denom;
-                if(!contactDepth(f,distance,swept)){if(RogTrace.sample(Stage.R04,"PROJECTED_DISTANCE"))RogTrace.detail(Stage.R04,"PROJECTED_DISTANCE","a={} b={} distance={} maxGap={} minDepth={}",a.allocated(),b.allocated(),distance,EPS,-PENETRATION);continue;}
-                var centerB=centerA.plus(n.times(distance));
-                var localA=f.a().toLocalPoint(centerA);
-                var localB=f.b().toLocalPoint(centerB);
-                if(source==null||(source.exposed(0,localA,f.inwardA())&&source.exposed(1,localB,f.inwardB()))){if(RogTrace.sample(Stage.R04,"FACE_PROVED"))RogTrace.detail(Stage.R04,"FACE_PROVED","a={} b={} area={} localA={} localB={} depth={}",a.allocated(),b.allocated(),area,localA,localB,distance);return true;}
                 if(RogTrace.sample(Stage.R04,"EXTERIOR_REJECTED"))RogTrace.detail(Stage.R04,"EXTERIOR_REJECTED","a={} b={} localA={} localB={}",a.allocated(),b.allocated(),localA,localB);
             }
-        }catch(RuntimeException invalid){if(RogTrace.sample(Stage.R04,"OVERLAP_EXCEPTION"))RogTrace.detail(Stage.R04,"OVERLAP_EXCEPTION","type={}",invalid.getClass().getName());return false;}
-        return false;
+        }catch(RuntimeException invalid){if(RogTrace.sample(Stage.R04,"OVERLAP_EXCEPTION"))RogTrace.detail(Stage.R04,"OVERLAP_EXCEPTION","type={}",invalid.getClass().getName());return Overlap.UNKNOWN;}
+        return Overlap.NONE;
     }
     private static boolean contactDepth(Frame f,double gap,boolean swept){
         if(!Double.isFinite(gap))return false;
         if(gap<=EPS&&gap>=-PENETRATION)return true;
-        // All projected points must cross the actual contact plane in the
-        // measured relative normal range. Persistent gaps stay rejected.
         return swept&&gap+f.sweep().minShift()<=EPS&&gap+f.sweep().maxShift()>=-EPS;
+    }
+    private static List<Point> clipHalfPlane(List<Point> input,java.util.function.ToDoubleFunction<Point> distance){
+        if(input.isEmpty())return List.of();
+        var out=new ArrayList<Point>();Point last=input.getLast();double prev=distance.applyAsDouble(last);
+        for(var curr:input){double d=distance.applyAsDouble(curr);boolean inside=d>=0,prior=prev>=0;
+            if(inside!=prior){double t=prev/(prev-d);if(Double.isFinite(t))out.add(new Point(last.x()+t*(curr.x()-last.x()),last.y()+t*(curr.y()-last.y())));}
+            if(inside)out.add(curr);last=curr;prev=d;
+        }
+        return out;
     }
     /** Geometry-only hook for pure algorithm tests. Live pairing also requires
      * a separate read-only exterior audit of neighboring blocks. */
@@ -502,7 +640,7 @@ final class BilateralContactSurface {
         for(int i=0;i<boundary.size()&&!out.isEmpty();i++){
             Point a=boundary.get(i),b=boundary.get((i+1)%boundary.size());
             var next=new ArrayList<Point>();Point last=out.getLast();double prev=cross(a,b,last);
-            for(var curr:out){double d=cross(a,b,curr);boolean inside=d>=-EPS,prior=prev>=-EPS;
+            for(var curr:out){double d=cross(a,b,curr);boolean inside=d>=0,prior=prev>=0;
                 if(inside!=prior){double t=prev/(prev-d);
                     if(Double.isFinite(t))next.add(new Point(last.x()+t*(curr.x()-last.x()),last.y()+t*(curr.y()-last.y())));
                 }

@@ -12,6 +12,7 @@ final class StressProbeCursor {
     private record Read(Cell cell,Probe probe) {}
     private final List<Read> reads=new ArrayList<>(7);
     private boolean charged;
+    void clear(){reads.clear();charged=false;}
     int advance(Session session,Graph frozen,long tick,Runnable chargeOperation) {
         if(!charged){chargeOperation.run();charged=true;}
         int[] index={0};

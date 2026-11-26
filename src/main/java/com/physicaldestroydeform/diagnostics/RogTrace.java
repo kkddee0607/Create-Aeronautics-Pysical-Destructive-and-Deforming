@@ -16,6 +16,10 @@ public final class RogTrace {
     private static final int INTERVAL=Math.max(20,Math.min(1200,Integer.getInteger("pdd.rog.summaryTicks",100)));
     private static final ThreadLocal<State> SERVER=new ThreadLocal<>();
     private static final int MAX_REASONS=64;
+    private static final int CHAR_CAP=Math.max(0,Math.min(1_048_576,Integer.getInteger("pdd.rog.maxCharsPerTick",131072)));
+    private static final int LINE_CAP=8192;
+    private static final int SEED_LIMIT=Math.max(0,Math.min(4096,Integer.getInteger("pdd.rog.seedLimit",128)));
+    private static final long TRACE_EPISODE=Long.getLong("pdd.rog.traceEpisode",-1L);
     private RogTrace(){}
 
     private record HoldKey(String dimension,String owner,long generation) {}
@@ -32,23 +36,25 @@ public final class RogTrace {
     /** Package-visible pure accounting, tested without Minecraft. */
     static final class State {
         final String session;
-        final int cap,perStage,repeat;
+        final int cap,perStage,repeat,aggregateReserve;
         final long interval;
         final EnumMap<Stage,Map<String,Count>> counts=new EnumMap<>(Stage.class);
         final LinkedHashMap<HoldKey,Hold> holds=new LinkedHashMap<>(16,.75f,true);
         final int[] stageLines=new int[Stage.values().length];
         long tick=Long.MIN_VALUE,lastSummary=Long.MIN_VALUE;
-        int lines;
-        long loggingFailures;
+        int lines,characters;
+        long loggingFailures,emittedLines,truncatedLines,characterSuppressed;
         Object dimension,runtimePair,pair;
         long nativeTick=-1,episode=-1;
-        State(String session,int cap,int perStage,int repeat,long interval){
+        State(String session,int cap,int perStage,int repeat,long interval){this(session,cap,perStage,repeat,interval,0);}
+        State(String session,int cap,int perStage,int repeat,long interval,int aggregateReserve){
             this.session=session;this.cap=cap;this.perStage=perStage;this.repeat=repeat;this.interval=interval;
+            this.aggregateReserve=Math.max(0,Math.min(cap,aggregateReserve));
             for(var s:Stage.values())counts.put(s,new LinkedHashMap<>());
         }
-        void begin(long next){if(tick!=next){tick=next;lines=0;Arrays.fill(stageLines,0);clearContext();}}
+        void begin(long next){if(tick!=next){tick=next;lines=0;characters=0;Arrays.fill(stageLines,0);clearContext();}}
         void clearContext(){dimension=null;runtimePair=null;pair=null;nativeTick=-1;episode=-1;}
-        boolean sample(Stage s,String reason){
+        private Count count(Stage s,String reason){
             var map=counts.get(s);
             var c=map.get(reason);
             if(c==null){
@@ -56,9 +62,21 @@ public final class RogTrace {
                 String key=reason!=null&&reason.length()<=96&&map.size()<MAX_REASONS-1?reason:"OTHER_REASONS";
                 c=map.computeIfAbsent(key,k->new Count());
             }
-            c.seen++;
-            int stage=s.ordinal();
-            if(lines>=cap||stageLines[stage]>=perStage)return false;
+            c.seen++;return c;
+        }
+        boolean event(Stage s,String reason){
+            var c=count(s,reason);
+            if(lines>=cap)return false;
+            c.selected++;lines++;return true;
+        }
+        boolean evidence(Stage s,String reason){
+            var c=count(s,reason);
+            if(lines>=cap-aggregateReserve||characters>=CHAR_CAP-CHAR_CAP/4)return false;
+            c.selected++;lines++;return true;
+        }
+        boolean sample(Stage s,String reason){
+            var c=count(s,reason);int stage=s.ordinal();
+            if(lines>=cap-aggregateReserve||stageLines[stage]>=perStage||characters>=CHAR_CAP-CHAR_CAP/4)return false;
             if(c.last!=tick){
                 if(repeat==1&&c.last!=Long.MIN_VALUE&&tick>=c.last&&tick-c.last<interval)return false;
                 c.inWindow=0;
@@ -78,9 +96,9 @@ public final class RogTrace {
     public static void start(){
         if(!ENABLED)return;
         try{
-            var s=new State(UUID.randomUUID().toString(),CAP,Math.min(CAP,Math.min(32,Math.max(1,CAP/Stage.values().length))),DiagnosticMode.debug()?8:1,INTERVAL);
+            var s=new State(UUID.randomUUID().toString(),CAP,Math.min(CAP,Math.min(32,Math.max(1,CAP/Stage.values().length))),DiagnosticMode.debug()?8:1,INTERVAL,CAP==0?0:Math.max(1,CAP/4));
             SERVER.set(s);s.begin(0);
-            LOG.info("[PDD-ROG-R13] phase=START session={} cap={} perStage={} repeat={} summaryTicks={} mode={} authority=NONE",s.session,CAP,s.perStage,s.repeat,INTERVAL,DiagnosticMode.current());
+            LOG.info("[PDD-ROG-R13] phase=START session={} cap={} aggregateReserve={} perStage={} repeat={} summaryTicks={} mode={} charCap={} seedLimit={} traceEpisode={} authority=NONE",s.session,CAP,s.aggregateReserve,s.perStage,s.repeat,INTERVAL,DiagnosticMode.current(),CHAR_CAP,SEED_LIMIT,TRACE_EPISODE);
         }catch(RuntimeException|LinkageError ignored){SERVER.remove();}
     }
     public static void begin(long tick){if(ENABLED){var s=SERVER.get();if(s!=null)s.begin(tick);}}
@@ -108,11 +126,25 @@ public final class RogTrace {
     /** One compact aggregate per already bounded authorization audit or credit.
      * Never use for per-cell or per-edge loops. */
     public static boolean enabled(){return ENABLED&&SERVER.get()!=null;}
-    public static void event(Stage stage,String reason,String format,Object... args){
-        if(!ENABLED)return;
-        try{var s=SERVER.get();if(s!=null&&LOG.isInfoEnabled())emit(s,stage,reason,format,args);}
-        catch(RuntimeException|LinkageError ignored){}
+    public static boolean eventSlot(Stage stage,String reason){
+        if(!ENABLED)return false;
+        try{var s=SERVER.get();return s!=null&&s.event(stage,reason)&&LOG.isInfoEnabled();}
+        catch(RuntimeException|LinkageError ignored){return false;}
     }
+    public static boolean evidenceSlot(Stage stage,String reason){
+        if(!ENABLED)return false;
+        try{var s=SERVER.get();return s!=null&&s.evidence(stage,reason)&&LOG.isInfoEnabled();}
+        catch(RuntimeException|LinkageError ignored){return false;}
+    }
+    public static void event(Stage stage,String reason,String format,Object... args){
+        if(eventSlot(stage,reason))detail(stage,reason,format,args);
+    }
+    /** Only controls detailed evidence output, never physics or ledger state. */
+    public static boolean traceSelected(){
+        if(!ENABLED||!DiagnosticMode.debug())return false;
+        var s=SERVER.get();return s!=null&&(TRACE_EPISODE<0||s.episode==TRACE_EPISODE);
+    }
+    public static int seedLimit(){return SEED_LIMIT;}
     public static boolean sample(Stage stage,String reason){
         if(!ENABLED)return false;
         try{var s=SERVER.get();return s!=null&&s.sample(stage,reason)&&LOG.isInfoEnabled();}
@@ -126,13 +158,27 @@ public final class RogTrace {
         try{
             Object[] values=new Object[7+args.length];values[0]=s.session;values[1]=s.tick;values[2]=s.dimension;values[3]=s.nativeTick;values[4]=s.runtimePair;values[5]=s.pair;values[6]=s.episode;
             System.arraycopy(args,0,values,7,args.length);
-            LOG.info("[PDD-ROG-"+stage+"] reason="+reason+" session={} windowTick={} dim={} nativeTick={} runtimePair={} pair={} episode={} "+format,values);
+            // SLF4J is already a dependency. Bound serialized diagnostic text as
+            // well as line slots; summaries disclose every suppressed/truncated line.
+            if(s.characters>=CHAR_CAP){s.characterSuppressed++;return;}
+            String message=org.slf4j.helpers.MessageFormatter.arrayFormat(
+                    "[PDD-ROG-"+stage+"] reason="+reason+" session={} windowTick={} dim={} nativeTick={} runtimePair={} pair={} episode={} "+format,values).getMessage();
+            int available=Math.min(LINE_CAP,CHAR_CAP-s.characters);
+            if(message.length()>available){
+                String suffix=" truncated=true";
+                if(available<256){s.characterSuppressed++;return;}
+                message=message.substring(0,available-suffix.length())+suffix;s.truncatedLines++;
+            }
+            s.characters+=message.length();LOG.info("{}",message);s.emittedLines++;
         }catch(RuntimeException|LinkageError ignored){s.loggingFailures++;}
     }
     private static void report(State s,String phase){
         try{
             for(var stage:Stage.values())if(!s.counts.get(stage).isEmpty())
                 LOG.info("[PDD-ROG-{}] phase={} session={} windowTick={} counts=seen/selected/suppressed {} loggingFailures={} authority=NONE",stage,phase,s.session,s.tick,s.summary(stage),s.loggingFailures);
+            long seen=0,selected=0;
+            for(var map:s.counts.values())for(var count:map.values()){seen+=count.seen;selected+=count.selected;}
+            LOG.info("[PDD-ROG-R13] reason=DIAGNOSTIC_COVERAGE_SUMMARY phase={} session={} windowTick={} seen={} selected={} suppressed={} emitted={} characterSuppressed={} truncatedLines={} loggingFailures={} authority=NONE",phase,s.session,s.tick,seen,selected,seen-selected,s.emittedLines,s.characterSuppressed,s.truncatedLines,s.loggingFailures);
             s.lastSummary=s.tick;
         }catch(RuntimeException|LinkageError ignored){s.loggingFailures++;}
     }
