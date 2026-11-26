@@ -14,7 +14,12 @@
     "SablePlotTickWitnessMixin"
   ],
   "client": [
-    "SableSnapshotPacketDiagnosticMixin"
+    "SableSnapshotPacketDiagnosticMixin",
+    "SableStartTrackingPacketDiagnosticMixin",
+    "SableStopTrackingPacketDiagnosticMixin",
+    "SableFinalizePacketDiagnosticMixin",
+    "SableRecentlySplitPacketDiagnosticMixin",
+    "SableClientContainerDiagnosticMixin"
   ],
   "injectors": {
     "defaultRequire": 1

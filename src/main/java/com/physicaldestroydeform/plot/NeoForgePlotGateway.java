@@ -1,5 +1,7 @@
 package com.physicaldestroydeform.plot;
 
+import com.physicaldestroydeform.diagnostics.RogTrace;
+import com.physicaldestroydeform.diagnostics.RogTrace.Stage;
 import com.mojang.authlib.GameProfile;
 import com.physicaldestroydeform.DamageModel;
 import com.physicaldestroydeform.collision.FrameMath;
@@ -296,12 +298,14 @@ public final class NeoForgePlotGateway implements WorldCommitCore.WorldGateway,M
                     if(proof&&fence.resume(owner,stamp(sub),false)){
                         suspendedContainers.remove(owner);
                         changedTicks.put(owner,(long)server.getTickCount());
+                        if(RogTrace.sample(Stage.R12,"SERVER_REBOUND"))RogTrace.detail(Stage.R12,"SERVER_REBOUND","dimension={} owner={} generation={} runtimeId={}",dim,owner.uuid(),owner.generation(),sub.getRuntimeId());
                         LOG.info("[PDD-PLOT-LIFECYCLE] phase=REBOUND dim={} owner={} generation={} runtimeBodyId={} proof=UNLOAD_ADD_SAME_CENTER",dim,owner.uuid(),owner.generation(),sub.getRuntimeId());
                         continue;
                     }
                 }
                 // A newly bound split CHILD is independent; only its parent is quarantined above.
                 if(!fence.verify(owner,stamp(sub),false)){
+                    if(RogTrace.sample(Stage.R12,"OWNER_EPOCH_MISMATCH"))RogTrace.detail(Stage.R12,"OWNER_EPOCH_MISMATCH","owner={} runtimeId={} splitFrom={}",owner,sub.getRuntimeId(),sub.getSplitFromSubLevel());
                     LOG.warn("[PDD-PLOT-LIFECYCLE] sessionId={} phase=OWNER_EPOCH_MISMATCH dim={} owner={} " +
                             "generation={} runtimeBodyId={} splitFrom={} action=ORPHAN_QUARANTINE",
                             PlotPhysicsProbe.sessionId(),owner.dimension(),owner.uuid(),owner.generation(),sub.getRuntimeId(),sub.getSplitFromSubLevel());
@@ -334,9 +338,10 @@ public final class NeoForgePlotGateway implements WorldCommitCore.WorldGateway,M
     }
     private String deferBreakReason(Cell cell,boolean forceLive) {
         try {
-            if(cell.sub().isRemoved())return "PLOT_OWNER_NOT_READY";
+            if(cell.sub().isRemoved()){if(RogTrace.sample(Stage.R09,"PLOT_REMOVED"))RogTrace.detail(Stage.R09,"PLOT_REMOVED","key={} forceLive={}",cell.real(),forceLive);return "PLOT_OWNER_NOT_READY";}
             var heat=cell.sub().getHeatMapManager();
             if(!(heat instanceof SableHeatMapSafetyAccessor s)) {
+                if(RogTrace.sample(Stage.R09,"HEATMAP_ACCESSOR_UNAVAILABLE"))RogTrace.detail(Stage.R09,"HEATMAP_ACCESSOR_UNAVAILABLE","key={} forceLive={}",cell.real(),forceLive);
                 if(++heatMapHolds==1 || heatMapHolds%256==0)
                     LOG.warn("[PDD-PLOT-SAFE] phase=HEATMAP_UNVERIFIED owner={} " +
                                     "runtimeBodyId={} holdCount={} action=DEFER_BEFORE_PREPARED",
@@ -348,6 +353,8 @@ public final class NeoForgePlotGateway implements WorldCommitCore.WorldGateway,M
                     ?witness.pdd$heatMapReadCache().pending(tick,forceLive,()->readPendingHeatMap(s))
                     :readPendingHeatMap(s);
             if(pending!=null) {
+                RogTrace.plotGate(cell.real().dimension(),cell.real().ownerId(),cell.real().ownerGeneration(),"HEATMAP_PENDING",tick,pending,forceLive);
+                if(RogTrace.sample(Stage.R09,"HEATMAP_PENDING"))RogTrace.detail(Stage.R09,"HEATMAP_PENDING","key={} serverTick={} forceLive={} pending={}",cell.real(),tick,forceLive,pending);
                 if(++heatMapHolds==1 || heatMapHolds%256==0)
                     LOG.warn("[PDD-PLOT-SAFE] phase=WAIT_SABLE_HEATMAP " +
                                     "owner={} generation={} runtimeBodyId={} initialized={} " +
@@ -360,7 +367,10 @@ public final class NeoForgePlotGateway implements WorldCommitCore.WorldGateway,M
             var owner=PlotOwnerFence.Owner.of(cell.real());
             long completed=(Object)cell.sub() instanceof PlotHeatMapTickWitness witness
                     ?witness.pdd$completedHeatMapServerTick():-1;
-            String hold=PlotBreakPacing.holdReason(tick,completed,lastBreakAttempt.get(owner),breakSpacingTicks);
+            var lastAttempt=lastBreakAttempt.get(owner);
+            String hold=PlotBreakPacing.holdReason(tick,completed,lastAttempt,breakSpacingTicks);
+            RogTrace.plotGate(cell.real().dimension(),cell.real().ownerId(),cell.real().ownerGeneration(),hold,tick,null,forceLive);
+            if(RogTrace.sample(Stage.R09,hold==null?"PLOT_GATE_CLEAR":hold))RogTrace.detail(Stage.R09,hold==null?"PLOT_GATE_CLEAR":hold,"key={} serverTick={} completedTick={} lastAttempt={} spacing={} forceLive={}",cell.real(),tick,completed,lastAttempt,breakSpacingTicks,forceLive);
             if("PLOT_BREAK_SPACING".equals(hold)) spacingHolds++;
             else if(hold!=null) {
                 if(++tickWitnessHolds==1 || tickWitnessHolds%256==0)
@@ -370,6 +380,7 @@ public final class NeoForgePlotGateway implements WorldCommitCore.WorldGateway,M
             }
             return hold;
         } catch(RuntimeException|LinkageError unsafe) {
+            if(RogTrace.sample(Stage.R09,"HEATMAP_EXCEPTION"))RogTrace.detail(Stage.R09,"HEATMAP_EXCEPTION","key={} forceLive={} type={} message={}",cell.real(),forceLive,unsafe.getClass().getName(),unsafe.getMessage());
             heatMapHolds++;
             // A failed observation cannot grant a destructive mutation.
             return "SABLE_HEATMAP_UNVERIFIED";
@@ -453,18 +464,18 @@ public final class NeoForgePlotGateway implements WorldCommitCore.WorldGateway,M
      * from a World transform: use the frozen signed owner-lattice steps. */
     public MoveTransactionJournal.BeforeImage planMove(WorldCommitCore.Intent intent,MovePlan plan,
             WorldReceiptJournal.State current,DamageModel.Settings settings,long gameTick){
-        if(!isServerThread()||plan.status()!=MovePlan.Status.CANDIDATE_ONLY||current==null)return null;
+        if(!isServerThread()||plan.status()!=MovePlan.Status.CANDIDATE_ONLY||current==null){if(RogTrace.sample(Stage.R08,"PLOT_PLAN_ENTRY_REJECTED"))RogTrace.detail(Stage.R08,"PLOT_PLAN_ENTRY_REJECTED","intent={} plan={} currentPresent={}",intent,plan,current!=null);return null;}
         try{
             var source=intent.key();
-            if(!source.equals(plan.source())&&!PlotKeyCodec.real(source).equals(plan.source()))return null;
+            if(!source.equals(plan.source())&&!PlotKeyCodec.real(source).equals(plan.source())){if(RogTrace.sample(Stage.R08,"PLOT_PLAN_SOURCE_MISMATCH"))RogTrace.detail(Stage.R08,"PLOT_PLAN_SOURCE_MISMATCH","id={} key={} planned={}",intent.applyId(),source,plan.source());return null;}
             Cell a=locate(source,false);
             if(a==null||!source.fingerprint().equals(fp(state(a)))||!current.key().equals(source)
-                    ||!current.incarnation().equals(intent.expectedIncarnation()))return null;
+                    ||!current.incarnation().equals(intent.expectedIncarnation())){if(RogTrace.sample(Stage.R08,"PLOT_PLAN_SOURCE_CAS"))RogTrace.detail(Stage.R08,"PLOT_PLAN_SOURCE_CAS","id={} source={} located={} expectedIncarnation={} current={}",intent.applyId(),source,a!=null,intent.expectedIncarnation(),current);return null;}
             BlockPos destination=a.local();
             for(var step:plan.steps())destination=new BlockPos(Math.addExact(destination.getX(),step.dx()),
                     Math.addExact(destination.getY(),step.dy()),Math.addExact(destination.getZ(),step.dz()));
             Cell b=locate(at(source,destination,"PDD:MOVE_PROBE"),false);
-            if(b!=null&&!sameOwner(a,b))return null;
+            if(b!=null&&!sameOwner(a,b)){if(RogTrace.sample(Stage.R08,"PLOT_PLAN_DEST_OWNER_MISMATCH"))RogTrace.detail(Stage.R08,"PLOT_PLAN_DEST_OWNER_MISMATCH","id={} source={} destination={}",intent.applyId(),source,destination);return null;}
             var before=at(source,destination,b==null?UNOBSERVED_DEST:fp(state(b)));
             var after=at(source,destination,source.fingerprint());
             long ar=service.moveRevision(source),br=service.moveRevision(before);
@@ -479,7 +490,7 @@ public final class NeoForgePlotGateway implements WorldCommitCore.WorldGateway,M
             return new MoveTransactionJournal.BeforeImage(intent.applyId()+"/move",intent.applyId(),source,before,current,moved,
                     ar,br,gameTick,gameTick>Long.MAX_VALUE-WorldCommitCore.MAX_DEFER_TICKS?Long.MAX_VALUE:gameTick+WorldCommitCore.MAX_DEFER_TICKS,plan.directionEpoch(),plan.reservedQ(),
                     intent.material(),intent.materialRevision(),bytes,candidate,applied,DamageModel.blockedFixedIncrement(applied,intent.material(),settings));
-        }catch(RuntimeException|LinkageError invalid){return null;}
+        }catch(RuntimeException|LinkageError invalid){if(RogTrace.sample(Stage.R08,"PLOT_PLAN_EXCEPTION"))RogTrace.detail(Stage.R08,"PLOT_PLAN_EXCEPTION","id={} key={} type={} message={}",intent.applyId(),intent.key(),invalid.getClass().getName(),invalid.getMessage());return null;}
     }
     private static PlotOwnerFence.Owner owner(MoveTransactionJournal.BeforeImage b){return PlotOwnerFence.Owner.of(PlotKeyCodec.real(b.source()));}
     @Override public boolean acquire(MoveTransactionJournal.BeforeImage b){
@@ -487,6 +498,7 @@ public final class NeoForgePlotGateway implements WorldCommitCore.WorldGateway,M
         ownerMoves.put(owner(b),b.id());return true;
     }
     private MoveTransactionExecutor.Gate gate(MoveTransactionJournal.BeforeImage b,MoveTransactionExecutor.Gate result,String reason){
+        if(RogTrace.sample(Stage.R08,reason))RogTrace.detail(Stage.R08,reason,"moveId={} directId={} source={} target={} gate={} epoch={} reservedQ={}",b.id(),b.directApplyId(),b.source(),b.destinationBefore(),result,b.transformEpoch(),b.reservedQ());
         if(TRACE_MOVES&&(result==MoveTransactionExecutor.Gate.BLOCKED||result==MoveTransactionExecutor.Gate.UNKNOWN))
             LOG.info("[PDD-DEFORM] phase=PLOT_GATE moveId={} owner={} source={} target={} result={} reason={} reservedQ={} blockedCandidateQ={} blockedAppliedQ={}",
                     b.id(),owner(b).uuid(),b.source(),b.destinationBefore(),result,reason,b.reservedQ(),b.blockedCandidateQ(),b.blockedAppliedQ());
@@ -550,32 +562,34 @@ public final class NeoForgePlotGateway implements WorldCommitCore.WorldGateway,M
         var pose=new FrameMath.Pose(new FrameMath.Vec(t.x(),t.y(),t.z()),new FrameMath.Vec(r.x(),r.y(),r.z()),
                 new FrameMath.Vec(s.x(),s.y(),s.z()),q.x(),q.y(),q.z(),q.w());
         if(!pose.valid()||Math.abs(s.x()-1)>1e-5||Math.abs(s.y()-1)>1e-5||Math.abs(s.z()-1)>1e-5)
-            return MoveTransactionExecutor.Gate.UNKNOWN;
+            {if(RogTrace.sample(Stage.R08,"PHYSICAL_POSE_INVALID"))RogTrace.detail(Stage.R08,"PHYSICAL_POSE_INVALID","cell={} pose={}",c.real(),pose);return MoveTransactionExecutor.Gate.UNKNOWN;}
         double minX=Double.POSITIVE_INFINITY,minY=minX,minZ=minX,maxX=Double.NEGATIVE_INFINITY,maxY=maxX,maxZ=maxX;
         for(int dx=0;dx<=1;dx++)for(int dy=0;dy<=1;dy++)for(int dz=0;dz<=1;dz++){
             var p=pose.toWorldPoint(new FrameMath.Vec(c.allocated().getX()+dx,c.allocated().getY()+dy,c.allocated().getZ()+dz));
             if(!p.finite()||Math.abs(p.x())>=Integer.MAX_VALUE-2d||Math.abs(p.y())>=Integer.MAX_VALUE-2d||Math.abs(p.z())>=Integer.MAX_VALUE-2d)
-                return MoveTransactionExecutor.Gate.UNKNOWN;
+                {if(RogTrace.sample(Stage.R08,"PHYSICAL_TRANSFORM_INVALID"))RogTrace.detail(Stage.R08,"PHYSICAL_TRANSFORM_INVALID","cell={} point={}",c.real(),p);return MoveTransactionExecutor.Gate.UNKNOWN;}
             minX=Math.min(minX,p.x());minY=Math.min(minY,p.y());minZ=Math.min(minZ,p.z());
             maxX=Math.max(maxX,p.x());maxY=Math.max(maxY,p.y());maxZ=Math.max(maxZ,p.z());
         }
         var area=new AABB(minX,minY,minZ,maxX,maxY,maxZ).deflate(1e-7);
         var container=SubLevelContainer.getContainer(c.level());
-        if(container==null)return MoveTransactionExecutor.Gate.UNKNOWN;
-        for(var other:container.queryIntersecting(new BoundingBox3d(area)))if(other!=c.sub())return MoveTransactionExecutor.Gate.UNKNOWN;
+        if(container==null){if(RogTrace.sample(Stage.R08,"PHYSICAL_CONTAINER_MISSING"))RogTrace.detail(Stage.R08,"PHYSICAL_CONTAINER_MISSING","cell={}",c.real());return MoveTransactionExecutor.Gate.UNKNOWN;}
+        for(var other:container.queryIntersecting(new BoundingBox3d(area)))if(other!=c.sub()){if(RogTrace.sample(Stage.R08,"PHYSICAL_OTHER_PLOT_OVERLAP"))RogTrace.detail(Stage.R08,"PHYSICAL_OTHER_PLOT_OVERLAP","cell={} area={}",c.real(),area);return MoveTransactionExecutor.Gate.UNKNOWN;}
         for(int x=(int)Math.floor(area.minX);x<Math.ceil(area.maxX);x++)
             for(int y=(int)Math.floor(area.minY);y<Math.ceil(area.maxY);y++)
                 for(int z=(int)Math.floor(area.minZ);z<Math.ceil(area.maxZ);z++){
                     var pos=new BlockPos(x,y,z);var chunk=new ChunkPos(pos);
                     if(!c.level().isInWorldBounds(pos)||container.inBounds(chunk)||container.getPlot(chunk)!=null)
-                        return MoveTransactionExecutor.Gate.UNKNOWN;
-                    if(c.level().getChunkSource().getChunkNow(chunk.x,chunk.z)==null)return MoveTransactionExecutor.Gate.DEFERRED;
+                        {if(RogTrace.sample(Stage.R08,"PHYSICAL_WORLD_OR_ALLOCATION_BOUNDARY"))RogTrace.detail(Stage.R08,"PHYSICAL_WORLD_OR_ALLOCATION_BOUNDARY","cell={} position={} chunk={}",c.real(),pos,chunk);return MoveTransactionExecutor.Gate.UNKNOWN;}
+                    if(c.level().getChunkSource().getChunkNow(chunk.x,chunk.z)==null){if(RogTrace.sample(Stage.R08,"PHYSICAL_CHUNK_UNLOADED"))RogTrace.detail(Stage.R08,"PHYSICAL_CHUNK_UNLOADED","cell={} chunk={}",c.real(),chunk);return MoveTransactionExecutor.Gate.DEFERRED;}
                     var state=c.level().getBlockState(pos);
-                    if(!state.isAir()||!state.getFluidState().isEmpty())return MoveTransactionExecutor.Gate.UNKNOWN;
+                    if(!state.isAir()||!state.getFluidState().isEmpty()){if(RogTrace.sample(Stage.R08,"PHYSICAL_STATIC_BLOCK"))RogTrace.detail(Stage.R08,"PHYSICAL_STATIC_BLOCK","cell={} position={} state={}",c.real(),pos,state);return MoveTransactionExecutor.Gate.UNKNOWN;}
                 }
-        return c.level().getEntitiesOfClass(Entity.class,area,e->!e.isSpectator()
-                &&plotEntityGate(c,e)!=MoveTransactionExecutor.Gate.APPROVED).isEmpty()
-                ?MoveTransactionExecutor.Gate.APPROVED:MoveTransactionExecutor.Gate.UNKNOWN;
+        boolean clear=c.level().getEntitiesOfClass(Entity.class,area,e->!e.isSpectator()
+                &&plotEntityGate(c,e)!=MoveTransactionExecutor.Gate.APPROVED).isEmpty();
+        String reason=clear?"PHYSICAL_CLEAR":"PHYSICAL_ENTITY_OVERLAP";
+        if(RogTrace.sample(Stage.R08,reason))RogTrace.detail(Stage.R08,reason,"cell={} area={}",c.real(),area);
+        return clear?MoveTransactionExecutor.Gate.APPROVED:MoveTransactionExecutor.Gate.UNKNOWN;
     }
     private boolean registeredMaterialMatches(MoveTransactionJournal.BeforeImage b){
         var snapshot=MaterialRegistry.snapshot();

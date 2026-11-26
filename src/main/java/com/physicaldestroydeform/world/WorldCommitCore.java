@@ -1,5 +1,7 @@
 package com.physicaldestroydeform.world;
 
+import com.physicaldestroydeform.diagnostics.RogTrace;
+import com.physicaldestroydeform.diagnostics.RogTrace.Stage;
 import com.physicaldestroydeform.BlockDamageState;
 import com.physicaldestroydeform.DamageModel;
 import com.physicaldestroydeform.MaterialProperties;
@@ -199,21 +201,21 @@ public final class WorldCommitCore {
     }
     private Decision enqueue(Intent intent,DamageModel.Settings settings,long gameTick,
                              long deadline,boolean sealedHandoff,boolean expired) {
-        if(ioFault)return new Decision(Outcome.QUARANTINED,"IO_FAULT",null);
+        if(ioFault)return traceDecision(intent,new Decision(Outcome.QUARANTINED,"IO_FAULT",null),"OFFER");
         var existing=journal.receipt(intent.applyId());
         if(existing!=null && (existing.status()!=WorldReceiptJournal.Status.DEFERRED
                 || existing.pending()!=null
                 || journal.recoveredUncertain(intent.applyId())))
-            return new Decision(Outcome.DUPLICATE,"EXISTING_"+existing.status(),existing);
-        if(queuedIds.contains(intent.applyId()))return new Decision(Outcome.DUPLICATE,"ALREADY_QUEUED",existing);
+            return traceDecision(intent,new Decision(Outcome.DUPLICATE,"EXISTING_"+existing.status(),existing),"OFFER");
+        if(queuedIds.contains(intent.applyId()))return traceDecision(intent,new Decision(Outcome.DUPLICATE,"ALREADY_QUEUED",existing),"OFFER");
         if(sealedHandoff && existing!=null && existing.pending()==null)
-            return new Decision(Outcome.QUARANTINED,"MISSING_SEALED_PENDING_PAYLOAD",existing);
+            return traceDecision(intent,new Decision(Outcome.QUARANTINED,"MISSING_SEALED_PENDING_PAYLOAD",existing),"OFFER");
         if(existing==null && journal.admissionRejectReason()!=null){
             // No more durable Receipt IDs can be created. Halt, do not reuse or
             // evict old IDs to fake success; source Credit is never re-issued.
             ioFault=true;
-            return new Decision(Outcome.QUARANTINED,
-                    "SAVE_PRESSURE_"+journal.admissionRejectReason(),null);
+            return traceDecision(intent,new Decision(Outcome.QUARANTINED,
+                    "SAVE_PRESSURE_"+journal.admissionRejectReason(),null),"OFFER");
         }
         if(expired)
             return finish(intent,WorldReceiptJournal.Status.ABORTED,Outcome.ABORTED,
@@ -225,18 +227,18 @@ public final class WorldCommitCore {
                 var refused=new WorldReceiptJournal.Receipt(intent.applyId(),intent.key(),
                         WorldReceiptJournal.Status.ABORTED,"QUEUE_CAP_EXCEEDED",intent.eventTick());
                 journal.transition(refused,null);
-                return new Decision(Outcome.ABORTED,"QUEUE_CAP_EXCEEDED",refused);
+                return traceDecision(intent,new Decision(Outcome.ABORTED,"QUEUE_CAP_EXCEEDED",refused),"OFFER");
             }catch(IOException failure){
-                ioFault=true;return new Decision(Outcome.QUARANTINED,"QUEUE_CAP_JOURNAL_FAILED",null);
+                ioFault=true;return traceDecision(intent,new Decision(Outcome.QUARANTINED,"QUEUE_CAP_JOURNAL_FAILED",null),"OFFER");
             }
         }
         try {
             if(existing==null){
                 journal.enqueue(intent,settings,deadline);
             }
-        } catch(IOException failed){ioFault=true;return new Decision(Outcome.QUARANTINED,"DURABLE_ENQUEUE_FAILED",null);}
+        } catch(IOException failed){ioFault=true;return traceDecision(intent,new Decision(Outcome.QUARANTINED,"DURABLE_ENQUEUE_FAILED",null),"OFFER");}
         queue.addLast(intent);queuedIds.add(intent.applyId());
-        return new Decision(Outcome.DEFERRED,"QUEUED",journal.receipt(intent.applyId()));
+        return traceDecision(intent,new Decision(Outcome.DEFERRED,"QUEUED",journal.receipt(intent.applyId())),"OFFER");
     }
     /** At most breakCapPerTick actual break attempts; bounded non-break budget as well. */
     public synchronized List<Decision> tick(WorldGateway world,long tick) {
@@ -267,12 +269,12 @@ public final class WorldCommitCore {
             // A terminal receipt must NEVER be re-executed from an older in-memory queue.
             var terminal=journal.receipt(intent.applyId());
             if(terminal!=null && terminal.status()!=WorldReceiptJournal.Status.DEFERRED){
-                results.add(new Decision(Outcome.DUPLICATE,"TERMINAL_RECEIPT_"+terminal.status(),terminal));
+                results.add(traceDecision(intent,new Decision(Outcome.DUPLICATE,"TERMINAL_RECEIPT_"+terminal.status(),terminal),"QUEUE_VISIT"));
                 continue;
             }
             if(rollbackHold.test(intent)){
                 queue.addLast(intent);queuedIds.add(intent.applyId());
-                results.add(new Decision(Outcome.DEFERRED,"STRESS_CLOCK_ROLLBACK_HOLD",terminal));
+                results.add(traceDecision(intent,new Decision(Outcome.DEFERRED,"STRESS_CLOCK_ROLLBACK_HOLD",terminal),"QUEUE_VISIT"));
                 continue;
             }
             var pending=terminal==null?null:terminal.pending();
@@ -292,14 +294,15 @@ public final class WorldCommitCore {
             }
             if(executionHold.test(intent)) {
                 queue.addFirst(intent);queuedIds.add(intent.applyId());
-                results.add(new Decision(Outcome.DEFERRED,"RESERVATION_PLANNING_HOLD",terminal));
+                results.add(traceDecision(intent,new Decision(Outcome.DEFERRED,"RESERVATION_PLANNING_HOLD",terminal),"QUEUE_VISIT"));
                 break;
             }
             var observation=restored?world.readRecoveredIfLoaded(intent):world.readIfLoaded(intent.key());
+            if(RogTrace.sample(Stage.R10,"OBSERVATION"))RogTrace.detail(Stage.R10,"OBSERVATION","applyId={} key={} restored={} expectedIncarnation={} observation={}",intent.applyId(),intent.key(),restored,intent.expectedIncarnation(),observation);
             if(observation==null||!observation.loaded()) {
                 if(intent.deformationEvidence()!=null)queue.addFirst(intent);else queue.addLast(intent);
                 queuedIds.add(intent.applyId());
-                results.add(new Decision(Outcome.DEFERRED,"CHUNK_NOT_LOADED",journal.receipt(intent.applyId())));
+                results.add(traceDecision(intent,new Decision(Outcome.DEFERRED,"CHUNK_NOT_LOADED",journal.receipt(intent.applyId())),"QUEUE_VISIT"));
                 if(intent.deformationEvidence()!=null)break;
                 continue;
             }
@@ -312,6 +315,7 @@ public final class WorldCommitCore {
             // saved incarnation against the currently loaded block.
             String invalid=preflight(intent,observation);
             if(invalid!=null){
+                if(RogTrace.sample(Stage.R10,invalid))RogTrace.detail(Stage.R10,invalid,"applyId={} key={} expectedIncarnation={} observed={} material={}",intent.applyId(),intent.key(),intent.expectedIncarnation(),observation,intent.material());
                 results.add(finish(intent,WorldReceiptJournal.Status.ABORTED,Outcome.ABORTED,invalid,null,tick));
                 continue;
             }
@@ -327,8 +331,8 @@ public final class WorldCommitCore {
             BlockDamageState before=new BlockDamageState();
             if(prior!=null && !prior.incarnation().equals(intent.expectedIncarnation())) {
                 try {journal.discardStale(prior.key());}
-                catch(IOException failure){ioFault=true;results.add(new Decision(Outcome.QUARANTINED,
-                        "STALE_STATE_TOMBSTONE_FAILED",null));break;}
+                catch(IOException failure){ioFault=true;results.add(traceDecision(intent,new Decision(Outcome.QUARANTINED,
+                        "STALE_STATE_TOMBSTONE_FAILED",null),"QUEUE_VISIT"));break;}
                 results.add(finish(intent,WorldReceiptJournal.Status.ABORTED,Outcome.ABORTED,
                         "STALE_STORED_INCARNATION",null,tick));
                 continue;
@@ -340,9 +344,10 @@ public final class WorldCommitCore {
             DamageModel.Plan plan=intent.fFirstPreDamped()
                     ?DamageModel.planPreDamped(intent.sealedQ(),intent.material(),before,settings)
                     :DamageModel.plan(intent.sealedQ(),intent.material(),before,settings);
+            if(RogTrace.sample(Stage.R10,"DAMAGE_PLAN"))RogTrace.detail(Stage.R10,"DAMAGE_PLAN","applyId={} key={} Q={} material={} materialGeneration={} materialRevision={} beforeDamage={} beforeRemainder={} plan={}",intent.applyId(),intent.key(),intent.sealedQ(),intent.material(),intent.materialGeneration(),intent.materialRevision(),before.damage(),before.remainder(),plan);
             if(plan.thresholdReached() && breakAttempts>=breakCapPerTick) {
                 queue.addFirst(intent);queuedIds.add(intent.applyId());
-                results.add(new Decision(Outcome.DEFERRED,"BREAK_CAP",journal.receipt(intent.applyId())));
+                results.add(traceDecision(intent,new Decision(Outcome.DEFERRED,"BREAK_CAP",journal.receipt(intent.applyId())),"QUEUE_VISIT"));
                 break;
             }
             if(plan.thresholdReached()) {
@@ -350,7 +355,7 @@ public final class WorldCommitCore {
                 if(hold!=null) {
                     if(intent.deformationEvidence()!=null)queue.addFirst(intent);else queue.addLast(intent);
                     queuedIds.add(intent.applyId());
-                    results.add(new Decision(Outcome.DEFERRED,hold,journal.receipt(intent.applyId())));
+                    results.add(traceDecision(intent,new Decision(Outcome.DEFERRED,hold,journal.receipt(intent.applyId())),"QUEUE_VISIT"));
                     if(intent.deformationEvidence()!=null)break;
                     continue;
                 }
@@ -360,6 +365,7 @@ public final class WorldCommitCore {
                     intent.deformationEvidence()==null?0:intent.deformationEvidence().sourceF(),
                     plan.plasticQ(),intent.deformationEvidence()==null?null:intent.deformationEvidence().direction()):null;
             Decision result=apply(world,intent,observation,plan,tick);
+            traceDecision(intent,result,"APPLY");
             if(result.result()==Outcome.DEFERRED && result.reason().startsWith("AFTER_EVENTS_PLOT_GATE_")) {
                 // A protection callback may itself change Sable's HeatMap.
                 // Defer with the original unprepared ApplyId instead of
@@ -375,6 +381,7 @@ public final class WorldCommitCore {
             if(ioFault||result.result()==Outcome.DEFERRED&&intent.deformationEvidence()!=null)break;
             if(plan.thresholdReached() && result.result()!=Outcome.DEFERRED)breakAttempts++;
         }
+        if(RogTrace.sample(Stage.R13,"COMMIT_QUEUE"))RogTrace.detail(Stage.R13,"COMMIT_QUEUE","gameTick={} candidatesRemaining={} operations={} cap={} queueAfter={} breakAttempts={} breakCap={} ioFault={}",gameTick,candidates,operations,limit,queue.size(),breakAttempts,breakCapPerTick,ioFault);
         return List.copyOf(results);
     }
     /** Terminalize an old-owner queue before split/orphan state cleanup, with WAL durability. */
@@ -542,6 +549,7 @@ public final class WorldCommitCore {
             // Accept its lost readback ONLY with a matching RETURN-of-setBlockState
             // witness. API=true alone does not prove the intended block changed.
             boolean witnessed=confirmedMutationWitness(world,intent.key());
+            if(RogTrace.sample(Stage.R10,"BREAK_READBACK"))RogTrace.detail(Stage.R10,"BREAK_READBACK","applyId={} key={} apiResult={} reread={} readback={} witnessed={}",intent.applyId(),intent.key(),apiResult,reread,readback,witnessed);
             if(apiResult && readback==BreakReadback.OWNER_OR_CHUNK_UNAVAILABLE && witnessed)
                 readback=BreakReadback.CONFIRMED_AIR_MUTATION_WITNESS;
             if((reread!=null && reread.loaded() && reread.isAir() && !original.isAir())
@@ -589,7 +597,7 @@ public final class WorldCommitCore {
     }
     private static String preflight(Intent intent,Observation read) {
         SparseStateKey k=intent.key();
-        if(!read.loaded()||read.isAir())return "EMPTY_OR_UNLOADED";
+        if(!read.loaded()||read.isAir()){if(RogTrace.sample(Stage.R10,"AIR_OR_UNLOADED_DETAIL"))RogTrace.detail(Stage.R10,"AIR_OR_UNLOADED_DETAIL","applyId={} key={} loaded={} isAir={} observed={}",intent.applyId(),k,read.loaded(),read.isAir(),read);return "EMPTY_OR_UNLOADED";}
         if(intent.material().unbreakable() || read.unbreakable())return "UNBREAKABLE";
         if(read.hasBlockEntity() || read.unsafeMultiblock())return "BE_OR_MULTIBLOCK";
         if(!k.dimension().equals(read.dimension()) || k.ownerGeneration()!=read.ownerGeneration())return "OWNER_CHANGED";
@@ -598,10 +606,17 @@ public final class WorldCommitCore {
         if(read.unsafePhysicsPhase())return "PHYSICS_STEPPING";
         return null;
     }
+    private static Decision traceDecision(Intent intent,Decision decision,String phase){
+        if(RogTrace.sample(Stage.R10,decision.reason()))RogTrace.detail(Stage.R10,decision.reason(),
+                "phase={} applyId={} key={} outcome={} receiptStatus={} eventTick={} sealedQ={}",phase,intent.applyId(),intent.key(),decision.result(),decision.receipt()==null?"NONE":decision.receipt().status(),intent.eventTick(),intent.sealedQ());
+        return decision;
+    }
     private Decision finish(Intent intent,WorldReceiptJournal.Status status,Outcome result,String reason,
                             WorldReceiptJournal.State state,long tick) {
         var receipt=new WorldReceiptJournal.Receipt(intent.applyId(),intent.key(),status,reason,tick);
-        try {journal.transition(receipt,state);return new Decision(result,reason,receipt);}
-        catch(IOException|IllegalArgumentException e){ioFault=true;return new Decision(Outcome.QUARANTINED,"JOURNAL_WRITE_FAILED_"+e.getClass().getSimpleName(),null);}
+        try {journal.transition(receipt,state);
+            if(RogTrace.sample(Stage.R10,reason))RogTrace.detail(Stage.R10,reason,"phase=DURABLE_RECEIPT applyId={} key={} result={} receiptStatus={} state={} tick={} eventTick={} sealedQ={}",intent.applyId(),intent.key(),result,status,state,tick,intent.eventTick(),intent.sealedQ());
+            return new Decision(result,reason,receipt);}
+        catch(IOException|IllegalArgumentException e){ioFault=true;if(RogTrace.sample(Stage.R10,"JOURNAL_WRITE_FAILED"))RogTrace.detail(Stage.R10,"JOURNAL_WRITE_FAILED","applyId={} key={} intendedStatus={} type={} message={}",intent.applyId(),intent.key(),status,e.getClass().getName(),e.getMessage());return new Decision(Outcome.QUARANTINED,"JOURNAL_WRITE_FAILED_"+e.getClass().getSimpleName(),null);}
     }
 }

@@ -104,4 +104,13 @@ class FinalFixContactSurfaceTest {
         assertTrue(result.incomplete());
         assertTrue(result.matches().isEmpty());
     }
+    @Test void rogTraceDoesNotChangeCertifiedComponentsOrBudget(){
+        var frames=List.of(frame(.5),frame(2.5));
+        var expected=BilateralContactSurface.reconstructAll(frames,twoComponents(),3);
+        com.physicaldestroydeform.diagnostics.RogTrace.start();
+        try{
+            com.physicaldestroydeform.diagnostics.RogTrace.begin(1);
+            assertEquals(expected,BilateralContactSurface.reconstructAll(frames,twoComponents(),3));
+        }finally{com.physicaldestroydeform.diagnostics.RogTrace.stop();}
+    }
 }

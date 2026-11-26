@@ -1,5 +1,7 @@
 package com.physicaldestroydeform.deform;
 
+import com.physicaldestroydeform.diagnostics.RogTrace;
+import com.physicaldestroydeform.diagnostics.RogTrace.Stage;
 import com.physicaldestroydeform.MaterialProperties;
 import com.physicaldestroydeform.state.SparseStateKey;
 import java.util.List;
@@ -101,6 +103,7 @@ public record MovePlan(String creditId,SparseStateKey source,long damageBeforeFi
         else if(normalIncrementFixed<Math.ceil(remaining*k))status=Status.BELOW_YIELD;
         else if(provenDirection==null || !provenDirection.verified())status=Status.DIRECTION_UNKNOWN;
         else status=Status.CANDIDATE_ONLY;
+        if(RogTrace.sample(Stage.R08,status.name()))RogTrace.detail(Stage.R08,status.name(),"applyId={} key={} beforeFixed={} normalFixed={} threshold={} remainingFixed={} yieldFixed={} K={} ductility={} axes={} sourceF={} reservedQ={}",creditId,key,beforeFixed,normalIncrementFixed,material.threshold(),remaining,Math.ceil(remaining*k),k,material.ductilityPercent(),provenDirection,sourceF,reservedQ);
         return new MovePlan(creditId,key,beforeFixed,normalIncrementFixed,material.threshold(),
                 key.ownerGeneration(),status==Status.CANDIDATE_ONLY?provenDirection.transformEpoch():-1,
                 k,sourceF,reservedQ,

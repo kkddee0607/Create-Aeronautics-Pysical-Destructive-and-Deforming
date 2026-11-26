@@ -1,5 +1,7 @@
 package com.physicaldestroydeform.collision;
 
+import com.physicaldestroydeform.diagnostics.RogTrace;
+import com.physicaldestroydeform.diagnostics.RogTrace.Stage;
 import com.physicaldestroydeform.DamageModel;
 import com.physicaldestroydeform.MaterialProperties;
 import java.util.ArrayList;
@@ -435,6 +437,7 @@ public final class ForcePropagation {
                     discardF+=node.incoming;
                     node.discarded=node.incoming;
                     node.decision="F_BELOW_ONE";
+                    if(RogTrace.sample(Stage.R06,"NODE_F_BELOW_ONE"))RogTrace.detail(Stage.R06,"NODE_F_BELOW_ONE","target={} layer={} incomingF={} threshold={}",node.target,depth,node.incoming,MIN_PROPAGATED_F);
                     belowFloor=true;
                     if(trace!=null)trace.accept(new Cutoff(node.target,null,depth,node.incoming,"NODE_F_BELOW_ONE"));
                     continue;
@@ -455,6 +458,7 @@ public final class ForcePropagation {
                     unresolved+=withheld;
                     blockedNodes++;
                     node.decision="SAFETY_"+blocked.get(node);
+                    if(RogTrace.sample(Stage.R06,node.decision))RogTrace.detail(Stage.R06,node.decision,"target={} layer={} receivedF={} retainedF={} withheldF={}",node.target,depth,node.incoming,node.localF,withheld);
                     if(trace!=null)trace.accept(new Cutoff(node.target,null,depth,withheld,node.decision));
                     continue;
                 }
@@ -479,6 +483,7 @@ public final class ForcePropagation {
                     // to the remaining children or invent a physical terminal.
                     if(part<MIN_PROPAGATED_F){
                         discardF+=part;node.discarded+=part;belowFloor=true;
+                        if(RogTrace.sample(Stage.R06,"EDGE_F_BELOW_ONE"))RogTrace.detail(Stage.R06,"EDGE_F_BELOW_ONE","from={} to={} layer={} F={} threshold={}",node.target,child.target,depth,part,MIN_PROPAGATED_F);
                         if(trace!=null)trace.accept(new Cutoff(node.target,child.target,
                                 depth,part,"EDGE_F_BELOW_ONE"));
                         continue;
@@ -486,6 +491,7 @@ public final class ForcePropagation {
                     child.incoming+=part;
                     child.parents.merge(node,part,Double::sum);
                     node.forwarded+=part;node.paidChildren++;paidEdges++;
+                    if(RogTrace.sample(Stage.R06,"EDGE_PAID"))RogTrace.detail(Stage.R06,"EDGE_PAID","from={} to={} layer={} incomingF={} localF={} outgoingF={} weight={} sentF={}",node.target,child.target,depth,node.incoming,node.localF,forward,weights[i],part);
                     if(trace!=null)trace.accept(new Edge(node.target,child.target,depth,
                             node.incoming,node.localF,forward,weights[i],part));
                 }
@@ -522,6 +528,7 @@ public final class ForcePropagation {
             if(n.finalQ<MIN_ISSUED_Q){discardQ+=n.finalQ;n.finalQ=0;}
             finalQ+=n.finalQ;
             shares.add(new Share(n.target,n.localF,n.rawQ,n.finalQ,n.depth,n.elasticity));
+            if(RogTrace.sample(Stage.R06,"NODE_SETTLED"))RogTrace.detail(Stage.R06,"NODE_SETTLED","target={} layer={} incomingF={} localF={} forwardedF={} dampedF={} discardedF={} rawQ={} finalQ={} elasticity={} decision={}",n.target,n.depth,n.incoming,n.localF,n.forwarded,n.damped,n.discarded,n.rawQ,n.finalQ,n.elasticity,n.decision);
             if(trace!=null)trace.accept(new Node(n.target,n.depth,n.incoming,
                     n.localF,n.forwarded,n.damped,n.terminalBonus,n.discarded,
                     n.rawQ,n.finalQ,n.eligibleChildren,n.paidChildren,n.decision));
@@ -531,9 +538,10 @@ public final class ForcePropagation {
         if(!Double.isFinite(accounted)||Math.abs(accounted-inputF)>tolerance||
                 !Double.isFinite(finalQ)||Math.abs(candidateQ-finalQ-dampedQ-discardQ)>tolerance||
                 candidateQ<0||finalQ<0||discardF<0||unresolved<0)
-            throw new IllegalStateException("duperFix F/Q ledger mismatch");
+            { if(RogTrace.sample(Stage.R06,"CONSERVATION_FAIL"))RogTrace.detail(Stage.R06,"CONSERVATION_FAIL","FInput={} FAccounted={} candidateQ={} finalQ={} dampedQ={} discardQ={} tolerance={}",inputF,accounted,candidateQ,finalQ,dampedQ,discardQ,tolerance);throw new IllegalStateException("duperFix F/Q ledger mismatch");}
         String end=capped?"NODE_WORK_BUDGET":unknown?"UNVERIFIED_BOUNDARY":
                 unresolved>0?"SAFETY_BOUNDARY":belowFloor?"F_BELOW_ONE":"VERIFIED_TERMINAL";
+        if(RogTrace.sample(Stage.R06,end))RogTrace.detail(Stage.R06,end,"FInput={} FAssigned={} FInternalDamped={} FContactDamped={} FDiscard={} FUnresolved={} FError={} QCandidate={} QFinal={} QDamped={} QDiscard={} QError={} nodes={} edges={}",inputF,assigned,dampedF,contactDampedF,discardF,unresolved,inputF-accounted,candidateQ,finalQ,dampedQ,discardQ,candidateQ-finalQ-dampedQ-discardQ,shares.size(),paidEdges);
         return new Result(shares,inputF,assigned,dampedF,unresolved,candidateQ,finalQ,dampedQ,
                 end,new Audit(discardF,discardQ,terminalF,terminalNodes,maxDepth,
                         paidEdges,mergedNodes,blockedNodes,crossEdges),contactDampedF);

@@ -1,5 +1,7 @@
 package com.physicaldestroydeform.deform;
 
+import com.physicaldestroydeform.diagnostics.RogTrace;
+import com.physicaldestroydeform.diagnostics.RogTrace.Stage;
 import com.physicaldestroydeform.world.WorldPersistentJournal;
 import com.physicaldestroydeform.world.WorldReceiptJournal;
 import java.io.IOException;
@@ -48,17 +50,18 @@ public final class MoveTransactionExecutor {
     public boolean recorded(String id){return moves.get(id)!=null;}
     public Outcome execute(MoveTransactionJournal.BeforeImage before,Gateway gateway,long gameTick) {
         Objects.requireNonNull(before);Objects.requireNonNull(gateway);
-        if(!gateway.serverThread()||faulted())return Outcome.UNKNOWN;
+        if(!gateway.serverThread()||faulted()){if(RogTrace.sample(Stage.R08,"EXECUTOR_THREAD_OR_FAULT"))RogTrace.detail(Stage.R08,"EXECUTOR_THREAD_OR_FAULT","id={} source={}",before.id(),before.source());return Outcome.UNKNOWN;}
         var prior=moves.get(before.id());
-        if(prior!=null)return prior.before().equals(before)?Outcome.DUPLICATE:Outcome.UNKNOWN;
-        if(gameTick<before.createdGameTick()||gameTick>before.expiresGameTick())return Outcome.UNKNOWN;
+        if(prior!=null){if(RogTrace.sample(Stage.R08,"EXISTING_MOVE_RECORD"))RogTrace.detail(Stage.R08,"EXISTING_MOVE_RECORD","id={} phase={}",before.id(),prior.phase());return prior.before().equals(before)?Outcome.DUPLICATE:Outcome.UNKNOWN;}
+        if(gameTick<before.createdGameTick()||gameTick>before.expiresGameTick()){if(RogTrace.sample(Stage.R08,"MOVE_EXPIRED"))RogTrace.detail(Stage.R08,"MOVE_EXPIRED","id={} gameTick={} created={} expiry={}",before.id(),gameTick,before.createdGameTick(),before.expiresGameTick());return Outcome.UNKNOWN;}
         var direct=damage.receipt(before.directApplyId());
         if(direct==null||direct.status()!=WorldReceiptJournal.Status.APPLIED
-                ||!direct.key().equals(before.source())||!sourceUnchanged(before))return Outcome.UNKNOWN;
-        if(!gateway.acquire(before))return Outcome.DEFERRED;
+                ||!direct.key().equals(before.source())||!sourceUnchanged(before)){if(RogTrace.sample(Stage.R08,"DIRECT_RECEIPT_OR_SOURCE_INVALID"))RogTrace.detail(Stage.R08,"DIRECT_RECEIPT_OR_SOURCE_INVALID","id={} source={} directReceipt={} expectedSourceState={}",before.id(),before.source(),direct,before.sourceState());return Outcome.UNKNOWN;}
+        if(!gateway.acquire(before)){if(RogTrace.sample(Stage.R08,"MOVE_FENCE_BUSY"))RogTrace.detail(Stage.R08,"MOVE_FENCE_BUSY","id={} source={} target={}",before.id(),before.source(),before.destinationBefore());return Outcome.DEFERRED;}
         boolean prepared=false;
         try {
             Gate gate=gateway.validate(before);
+            if(RogTrace.sample(Stage.R08,"FIRST_GATE"))RogTrace.detail(Stage.R08,"FIRST_GATE","id={} source={} target={} gate={}",before.id(),before.source(),before.destinationBefore(),gate);
             if(gate==Gate.BLOCKED&&before.material()!=null){
                 moves.block(before);gateway.release(before);
                 blockedAwaiting.put(before.id(),before);
@@ -79,6 +82,7 @@ public final class MoveTransactionExecutor {
                     before.sourceRevision(),before.destinationRevision());
             trace(before,"PREPARED");
             Gate revalidated=gateway.validate(before);
+            if(RogTrace.sample(Stage.R08,"SECOND_GATE"))RogTrace.detail(Stage.R08,"SECOND_GATE","id={} gate={}",before.id(),revalidated);
             if(revalidated==Gate.BLOCKED)return restored(before,gateway,"PRE_MUTATION_BLOCKED",gameTick);
             if(revalidated!=Gate.APPROVED)
                 return uncertain(before,gateway,"PRE_MUTATION_REVALIDATION_FAILED");
@@ -110,6 +114,7 @@ public final class MoveTransactionExecutor {
                     continue;
                 }
                 Readback r=gateway.readback(b);
+                if(RogTrace.sample(Stage.R08,"READBACK_POLL"))RogTrace.detail(Stage.R08,"READBACK_POLL","id={} result={} gameTick={} expires={}",b.id(),r,gameTick,b.expiresGameTick());
                 if(r==Readback.CONFIRMED)applied(b,gateway);
                 else if(r==Readback.RESTORED_BEFORE_IMAGE)restored(b,gateway,"DEFERRED_BEFORE_IMAGES_VERIFIED",gameTick);
                 else if(r==Readback.UNCERTAIN||gameTick>b.expiresGameTick()||gameTick<b.createdGameTick())
@@ -208,6 +213,7 @@ public final class MoveTransactionExecutor {
         return Outcome.BLOCKED;
     }
     private static void trace(MoveTransactionJournal.BeforeImage b,String result){
+        if(RogTrace.sample(Stage.R08,result))RogTrace.detail(Stage.R08,result,"moveId={} directId={} source={} destination={} epoch={} reservedQ={} candidateQ={} allocatedQ={} fixedIncrement={}",b.id(),b.directApplyId(),b.source(),b.destinationBefore(),b.transformEpoch(),b.reservedQ(),b.blockedCandidateQ(),b.blockedAppliedQ(),b.blockedFixedIncrement());
         if(TRACE)LOG.info("[PDD-MOVE] id={} source={} destination={} result={} epoch={} reservedQ={} candidateQ={} allocatedQ={} shortfallQ={} fixedIncrement={}",
                 b.id(),b.source(),b.destinationBefore(),result,b.transformEpoch(),b.reservedQ(),b.blockedCandidateQ(),
                 b.blockedAppliedQ(),Math.max(0,b.blockedCandidateQ()-b.blockedAppliedQ()),b.blockedFixedIncrement());

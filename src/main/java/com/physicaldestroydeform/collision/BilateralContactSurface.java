@@ -1,5 +1,7 @@
 package com.physicaldestroydeform.collision;
 
+import com.physicaldestroydeform.diagnostics.RogTrace;
+import com.physicaldestroydeform.diagnostics.RogTrace.Stage;
 import com.physicaldestroydeform.deform.MovePlan;
 import com.physicaldestroydeform.diagnostics.NativeCollisionTelemetry.Contact;
 import net.minecraft.core.BlockPos;
@@ -58,30 +60,35 @@ final class BilateralContactSurface {
     /** Each *single* native record carries both effect-phase poses. Never mix
      * its transform with a different contact's pose or penetration delta. */
     static Frame fromRecord(GameImpactCredit.Pair pair,Contact record,long tick) {
-        if(pair==null||record==null||record.serverTick()!=tick||record.rawImpactScalar()<=0
-                ||!pair.dimension().equals(record.dimension())||!SableConsumerTargets.sourceRecordValid(record))return null;
+        if(pair==null||record==null){if(RogTrace.sample(Stage.R03,"RECORD_MISSING"))RogTrace.detail(Stage.R03,"RECORD_MISSING","pair={} recordPresent={}",pair,record!=null);return null;}
+        if(record.serverTick()!=tick){if(RogTrace.sample(Stage.R03,"RECORD_TICK_MISMATCH"))RogTrace.detail(Stage.R03,"RECORD_TICK_MISMATCH","actual={} expected={}",record.serverTick(),tick);return null;}
+        if(record.rawImpactScalar()<=0){if(RogTrace.sample(Stage.R03,"RECORD_NONPOSITIVE"))RogTrace.detail(Stage.R03,"RECORD_NONPOSITIVE","scalar={}",record.rawImpactScalar());return null;}
+        if(!pair.dimension().equals(record.dimension())){if(RogTrace.sample(Stage.R03,"RECORD_DIMENSION_MISMATCH"))RogTrace.detail(Stage.R03,"RECORD_DIMENSION_MISMATCH","expected={} actual={}",pair.dimension(),record.dimension());return null;}
+        if(!SableConsumerTargets.sourceRecordValid(record)){if(RogTrace.sample(Stage.R03,"RECORD_SOURCE_INVALID"))RogTrace.detail(Stage.R03,"RECORD_SOURCE_INVALID","runtimeA={} runtimeB={}",record.idA(),record.idB());return null;}
         try {
             int aSide=SableConsumerTargets.sourceSide(pair.a().stableKey(),record,pair.dimension());
             int bSide=SableConsumerTargets.sourceSide(pair.b().stableKey(),record,pair.dimension());
-            if(aSide==0||bSide==0||aSide==bSide)return null;
+            if(aSide==0||bSide==0||aSide==bSide){if(RogTrace.sample(Stage.R03,"SIDE_MAPPING"))RogTrace.detail(Stage.R03,"SIDE_MAPPING","aSide={} bSide={} runtimeA={} runtimeB={}",aSide,bSide,record.idA(),record.idB());return null;}
             FrameMath.Pose a=pose(record,aSide==1),b=pose(record,bSide==1);
-            if(!unit(a)||!unit(b))return null;
+            if(!unit(a)||!unit(b)){if(RogTrace.sample(Stage.R03,"POSE_NOT_UNIT"))RogTrace.detail(Stage.R03,"POSE_NOT_UNIT","poseA={} poseB={}",a,b);return null;}
             var localA=SableConsumerTargets.candidate(record,aSide==1);
             var localB=SableConsumerTargets.candidate(record,bSide==1);
-            if(localA==null||localB==null||!localA.finite()||!localB.finite())return null;
+            if(localA==null||localB==null||!localA.finite()||!localB.finite()){if(RogTrace.sample(Stage.R03,"LOCAL_POINT_INVALID"))RogTrace.detail(Stage.R03,"LOCAL_POINT_INVALID","localA={} localB={}",localA,localB);return null;}
             var rawA=normal(record,aSide==1).unit();var rawB=normal(record,bSide==1).unit();
             var worldA=a.toWorldNormal(rawA);var worldB=b.toWorldNormal(rawB);
-            if(worldA.dot(worldB)>-.80)return null; // Candidate hint, not face proof.
+            double opposition=worldA.dot(worldB);
+            if(opposition>-.80){if(RogTrace.sample(Stage.R03,"NATIVE_NORMAL_OPPOSITION"))RogTrace.detail(Stage.R03,"NATIVE_NORMAL_OPPOSITION","dot={} limit=-0.80 normalA={} normalB={}",opposition,worldA,worldB);return null;} // Candidate hint, not face proof.
             var aa=axis(rawA,tick);var bb=axis(rawB,tick);
-            if(aa==null||bb==null)return null;
+            if(aa==null||bb==null){if(RogTrace.sample(Stage.R03,"DOMINANT_AXIS"))RogTrace.detail(Stage.R03,"DOMINANT_AXIS","localNormalA={} localNormalB={} min=0.75",rawA,rawB);return null;}
             // Effect consumer witness is only an anchor. Significant separation
             // or lateral drift cannot certify its surrounding block geometry.
             var d=b.toWorldPoint(localB).minus(a.toWorldPoint(localA));
             double along=d.dot(worldA);
             var lateral=d.minus(worldA.times(along));
-            if(!d.finite()||Math.abs(along)>WITNESS_TOLERANCE||lateral.squareLength()>WITNESS_TOLERANCE*WITNESS_TOLERANCE)return null;
+            if(!d.finite()||Math.abs(along)>WITNESS_TOLERANCE||lateral.squareLength()>WITNESS_TOLERANCE*WITNESS_TOLERANCE){if(RogTrace.sample(Stage.R03,"WITNESS_DELTA"))RogTrace.detail(Stage.R03,"WITNESS_DELTA","localA={} localB={} along={} lateralSquared={} tolerance={}",localA,localB,along,lateral.squareLength(),WITNESS_TOLERANCE);return null;}
+            if(RogTrace.sample(Stage.R03,"FRAME_VERIFIED"))RogTrace.detail(Stage.R03,"FRAME_VERIFIED","aSide={} bSide={} localA={} localB={} axisA={} axisB={} dot={} along={} lateralSquared={}",aSide,bSide,localA,localB,aa,bb,opposition,along,lateral.squareLength());
             return new Frame(a,b,aa,bb,localA,localB);
-        } catch(RuntimeException invalid){return null;}
+        } catch(RuntimeException invalid){if(RogTrace.sample(Stage.R03,"FRAME_EXCEPTION"))RogTrace.detail(Stage.R03,"FRAME_EXCEPTION","type={}",invalid.getClass().getName());return null;}
     }
     private static FrameMath.Pose pose(Contact c,boolean first){
         if((first?c.idA():c.idB())==-1)return WORLD;
@@ -129,7 +136,7 @@ final class BilateralContactSurface {
         int checked=0;boolean incomplete=false;
         for(var group:groups.values()){
             if(checked>=maxChecks||completed.size()>=MAX_PAIRS||source.budgetExhausted()){
-                incomplete=true;break;
+                incomplete=true;if(RogTrace.sample(Stage.R04,"SURFACE_GROUP_BUDGET"))RogTrace.detail(Stage.R04,"SURFACE_GROUP_BUDGET","checked={} maxChecks={} completedPairs={} maxPairs={}",checked,maxChecks,completed.size(),MAX_PAIRS);break;
             }
             var search=new Search(group.getFirst(),source,maxChecks-checked,MAX_PAIRS-completed.size());
             completed.addAll(search.run(group));
@@ -159,7 +166,7 @@ final class BilateralContactSurface {
         Cell cell(int side,BlockPos pos){
             var cache=side==0?cellsA:cellsB;
             if(!cache.containsKey(pos))cache.put(pos,source.get(side,pos));
-            if(source.budgetExhausted()||cache.get(pos)==null&&source.unresolvedCell(side,pos))incomplete=true;
+            if(source.budgetExhausted()||cache.get(pos)==null&&source.unresolvedCell(side,pos)){incomplete=true;if(RogTrace.sample(Stage.R04,"SHAPE_UNKNOWN_OR_BUDGET"))RogTrace.detail(Stage.R04,"SHAPE_UNKNOWN_OR_BUDGET","side={} allocated={} checks={} maxChecks={}",side,pos,checks,maxChecks);}
             return cache.get(pos);
         }
         boolean enqueue(Pair p){
@@ -169,7 +176,7 @@ final class BilateralContactSurface {
                 Cell a=cell(0,p.a()),b=cell(1,p.b());
                 if(incomplete)return false;
                 if(a==null||b==null){evaluated.put(p,Boolean.FALSE);return false;}
-                if(checks>=maxChecks){incomplete=true;return false;}
+                if(checks>=maxChecks){incomplete=true;if(RogTrace.sample(Stage.R04,"PAIR_CHECK_CAP"))RogTrace.detail(Stage.R04,"PAIR_CHECK_CAP","pair={} checked={} max={}",p,checks,maxChecks);return false;}
                 checks++;
                 pass=positiveOverlap(frame,source,a,b);
                 if(source.budgetExhausted()){incomplete=true;return false;}
@@ -185,14 +192,15 @@ final class BilateralContactSurface {
                 if(incomplete)break;
                 for(var pa:SableConsumerTargets.cells(witness.contactA())){
                     if(incomplete)break;
-                    if(!anchorFace(witness,cell(0,pa),0))continue;
+                    if(!anchorFace(witness,cell(0,pa),0)){if(RogTrace.sample(Stage.R04,"ANCHOR_A_REJECTED"))RogTrace.detail(Stage.R04,"ANCHOR_A_REJECTED","allocated={} witness={} axis={}",pa,witness.contactA(),witness.inwardA());continue;}
                     for(var pb:SableConsumerTargets.cells(witness.contactB())){
                         if(incomplete)break;
-                        if(!anchorFace(witness,cell(1,pb),1))continue;
+                        if(!anchorFace(witness,cell(1,pb),1)){if(RogTrace.sample(Stage.R04,"ANCHOR_B_REJECTED"))RogTrace.detail(Stage.R04,"ANCHOR_B_REJECTED","allocated={} witness={} axis={}",pb,witness.contactB(),witness.inwardB());continue;}
                         active.clear();queued.clear();frontier.clear();
                         if(!enqueue(new Pair(pa,pb)))continue;
                         drain();
-                        if(incomplete){active.clear();frontier.clear();break;}
+                        if(incomplete){if(RogTrace.sample(Stage.R04,"COMPONENT_DISCARDED"))RogTrace.detail(Stage.R04,"COMPONENT_DISCARDED","anchorA={} anchorB={} discardedPairs={} priorCertified={} checks={}",pa,pb,active.size(),complete.size(),checks);active.clear();frontier.clear();break;}
+                        if(RogTrace.sample(Stage.R04,"COMPONENT_CLOSED"))RogTrace.detail(Stage.R04,"COMPONENT_CLOSED","anchorA={} anchorB={} pairs={} checked={}",pa,pb,active.size(),checks);
                         complete.putAll(active); // ONLY a closed, fully inspected component.
                     }
                 }
@@ -205,7 +213,7 @@ final class BilateralContactSurface {
                 Cell a=cell(0,current.a()), b=cell(1,current.b());
                 if(incomplete)break;
                 if(a==null||b==null)continue;
-                if(complete.size()+active.size()>=maxPairs){incomplete=true;break;}
+                if(complete.size()+active.size()>=maxPairs){incomplete=true;if(RogTrace.sample(Stage.R04,"COMPONENT_PAIR_CAP"))RogTrace.detail(Stage.R04,"COMPONENT_PAIR_CAP","pairs={} max={}",complete.size()+active.size(),maxPairs);break;}
                 active.put(current,new Match(a.target(),b.target()));
                 // A real tangent seam on EACH changed owner is required.
                 for(int side=0;side<2&&!incomplete;side++){
@@ -220,7 +228,7 @@ final class BilateralContactSurface {
                         if(incomplete)break;
                         if(next==null||!touchingFaceCells(frame,old,next,side))continue;
                         var candidates=opposingCandidateCells(frame,next,side);
-                        if(candidates==null){incomplete=true;break;}
+                        if(candidates==null){incomplete=true;if(RogTrace.sample(Stage.R04,"OPPOSING_CANDIDATE_CAP_OR_INVALID"))RogTrace.detail(Stage.R04,"OPPOSING_CANDIDATE_CAP_OR_INVALID","side={} allocated={} cap={}",side,next.allocated(),MAX_CANDIDATE_CELLS);break;}
                         for(var other:candidates){
                             var p=side==0?new Pair(next.allocated(),other):new Pair(other,next.allocated());
                             if(!connectedTransition(current,p,a,b))continue;
@@ -350,7 +358,8 @@ final class BilateralContactSurface {
         var outwardB=new FrameMath.Vec(-f.inwardB().x(),-f.inwardB().y(),-f.inwardB().z());
         try{
             var n=f.a().toWorldNormal(outwardA);
-            if(n.dot(f.b().toWorldNormal(outwardB))>-FACE_OPPOSITION)return false;
+            double dot=n.dot(f.b().toWorldNormal(outwardB));
+            if(dot>-FACE_OPPOSITION){if(RogTrace.sample(Stage.R04,"FACE_OPPOSITION"))RogTrace.detail(Stage.R04,"FACE_OPPOSITION","a={} b={} dot={} limit={}",a.allocated(),b.allocated(),dot,-FACE_OPPOSITION);return false;}
             int ax=axis(f.inwardA()),bx=axis(f.inwardB());
             for(var boxA:a.boxes())for(var boxB:b.boxes()){
                 var pa=faceCorners(boxA,a.allocated(),ax,f.inwardA()).stream().map(f.a()::toWorldPoint).toList();
@@ -361,11 +370,12 @@ final class BilateralContactSurface {
                 boolean close=true;
                 for(var p:pb){
                     double depth=p.minus(pa.getFirst()).dot(n);
-                    if(depth>EPS||depth<-PENETRATION){close=false;break;}
+                    if(depth>EPS||depth<-PENETRATION){if(RogTrace.sample(Stage.R04,"FACE_GAP_OR_PENETRATION"))RogTrace.detail(Stage.R04,"FACE_GAP_OR_PENETRATION","a={} b={} depth={} maxGap={} minDepth={}",a.allocated(),b.allocated(),depth,EPS,-PENETRATION);close=false;break;}
                 }
                 if(!close)continue;
                 var intersection=clip(ccw(areaB),ccw(areaA));
-                if(polygonArea(intersection)<=MIN_AREA)continue;
+                double area=polygonArea(intersection);
+                if(area<=MIN_AREA){if(RogTrace.sample(Stage.R04,"CLIPPED_AREA"))RogTrace.detail(Stage.R04,"CLIPPED_AREA","a={} b={} area={} minArea={}",a.allocated(),b.allocated(),area,MIN_AREA);continue;}
                 double cx=0,cy=0;for(var p:intersection){cx+=p.x();cy+=p.y();}
                 var centerA=pa.getFirst().plus(u.times(cx/intersection.size())).plus(v.times(cy/intersection.size()));
                 // The two independently verified faces may have shallow
@@ -373,15 +383,16 @@ final class BilateralContactSurface {
                 // not the A plane projected into the interior of body B.
                 var nb=f.b().toWorldNormal(outwardB);
                 double denom=nb.dot(n);
-                if(Math.abs(denom)<FACE_OPPOSITION)continue;
+                if(Math.abs(denom)<FACE_OPPOSITION){if(RogTrace.sample(Stage.R04,"PROJECTION_OPPOSITION"))RogTrace.detail(Stage.R04,"PROJECTION_OPPOSITION","a={} b={} denom={} limit={}",a.allocated(),b.allocated(),denom,FACE_OPPOSITION);continue;}
                 double distance=-nb.dot(centerA.minus(pb.getFirst()))/denom;
-                if(distance>EPS||distance<-PENETRATION)continue;
+                if(distance>EPS||distance<-PENETRATION){if(RogTrace.sample(Stage.R04,"PROJECTED_DISTANCE"))RogTrace.detail(Stage.R04,"PROJECTED_DISTANCE","a={} b={} distance={} maxGap={} minDepth={}",a.allocated(),b.allocated(),distance,EPS,-PENETRATION);continue;}
                 var centerB=centerA.plus(n.times(distance));
                 var localA=f.a().toLocalPoint(centerA);
                 var localB=f.b().toLocalPoint(centerB);
-                if(source==null||(source.exposed(0,localA,f.inwardA())&&source.exposed(1,localB,f.inwardB())))return true;
+                if(source==null||(source.exposed(0,localA,f.inwardA())&&source.exposed(1,localB,f.inwardB()))){if(RogTrace.sample(Stage.R04,"FACE_PROVED"))RogTrace.detail(Stage.R04,"FACE_PROVED","a={} b={} area={} localA={} localB={} depth={}",a.allocated(),b.allocated(),area,localA,localB,distance);return true;}
+                if(RogTrace.sample(Stage.R04,"EXTERIOR_REJECTED"))RogTrace.detail(Stage.R04,"EXTERIOR_REJECTED","a={} b={} localA={} localB={}",a.allocated(),b.allocated(),localA,localB);
             }
-        }catch(RuntimeException invalid){return false;}
+        }catch(RuntimeException invalid){if(RogTrace.sample(Stage.R04,"OVERLAP_EXCEPTION"))RogTrace.detail(Stage.R04,"OVERLAP_EXCEPTION","type={}",invalid.getClass().getName());return false;}
         return false;
     }
     /** Geometry-only hook for pure algorithm tests. Live pairing also requires

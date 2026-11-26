@@ -1,5 +1,7 @@
 package com.physicaldestroydeform.world;
 
+import com.physicaldestroydeform.diagnostics.RogTrace;
+import com.physicaldestroydeform.diagnostics.RogTrace.Stage;
 import com.mojang.authlib.GameProfile;
 import com.physicaldestroydeform.DamageModel;
 import com.physicaldestroydeform.deform.MovePlan;
@@ -189,19 +191,19 @@ public final class NeoForgeWorldGateway implements WorldCommitCore.WorldGateway,
     /** Prepare from the actual block and post-direct sparse state. No setter or claim event. */
     public BeforeImage planMove(WorldCommitCore.Intent intent,MovePlan plan,WorldReceiptJournal.State sparse,
                                 DamageModel.Settings settings,long gameTick){
-        if(!isServerThread()||plan.status()!=MovePlan.Status.CANDIDATE_ONLY||!plan.source().equals(intent.key()))return null;
+        if(!isServerThread()||plan.status()!=MovePlan.Status.CANDIDATE_ONLY||!plan.source().equals(intent.key())){if(RogTrace.sample(Stage.R08,"WORLD_PLAN_ENTRY_REJECTED"))RogTrace.detail(Stage.R08,"WORLD_PLAN_ENTRY_REJECTED","intent={} plan={}",intent,plan);return null;}
         try {
             SparseStateKey key=intent.key();ServerLevel level=dimension(key.dimension());BlockPos from=pos(key);
-            if(level==null||worldCell(level,from)!=Gate.APPROVED||!materialMatches(intent))return null;
+            if(level==null||worldCell(level,from)!=Gate.APPROVED||!materialMatches(intent)){if(RogTrace.sample(Stage.R08,"WORLD_PLAN_SOURCE_GATE"))RogTrace.detail(Stage.R08,"WORLD_PLAN_SOURCE_GATE","id={} key={} dimensionAvailable={}",intent.applyId(),key,level!=null);return null;}
             BlockState source=level.getBlockState(from);
             if(!key.fingerprint().equals(fp(source))||source.isAir()
                     ||!lifecycle.incarnation(key.dimension(),from,key.fingerprint()).equals(intent.expectedIncarnation())
-                    ||sparse!=null&&(!sparse.key().equals(key)||!sparse.incarnation().equals(intent.expectedIncarnation())))return null;
+                    ||sparse!=null&&(!sparse.key().equals(key)||!sparse.incarnation().equals(intent.expectedIncarnation()))){if(RogTrace.sample(Stage.R08,"WORLD_PLAN_SOURCE_CAS"))RogTrace.detail(Stage.R08,"WORLD_PLAN_SOURCE_CAS","id={} key={} sourceState={} expectedIncarnation={} sparse={}",intent.applyId(),key,source,intent.expectedIncarnation(),sparse);return null;}
             BlockPos to=from;
             for(var step:plan.steps())to=new BlockPos(Math.addExact(to.getX(),step.dx()),Math.addExact(to.getY(),step.dy()),Math.addExact(to.getZ(),step.dz()));
             MoveSafety.path(from,to); // Require signed, bounded geometry even if endpoint is blocked.
             Gate endpoint=worldCell(level,to);
-            if(endpoint==Gate.UNKNOWN)return null;
+            if(endpoint==Gate.UNKNOWN){if(RogTrace.sample(Stage.R08,"WORLD_PLAN_ENDPOINT_UNKNOWN"))RogTrace.detail(Stage.R08,"WORLD_PLAN_ENDPOINT_UNKNOWN","id={} from={} to={}",intent.applyId(),from,to);return null;}
             String destFp=endpoint==Gate.BLOCKED?"PDD:WORLD_BOUNDARY":endpoint==Gate.DEFERRED?"PDD:UNLOADED":fp(level.getBlockState(to));
             SparseStateKey oldDest=at(key,to,destFp),newDest=at(key,to,key.fingerprint());
             long srcRev=lifecycle.moveRevision(key),dstRev=lifecycle.moveRevision(oldDest);
@@ -217,7 +219,7 @@ public final class NeoForgeWorldGateway implements WorldCommitCore.WorldGateway,
             return new BeforeImage(intent.applyId()+"/move",intent.applyId(),key,oldDest,sparse,next,srcRev,dstRev,
                     gameTick,expiry,plan.directionEpoch(),plan.reservedQ(),intent.material(),intent.materialRevision(),bytes,
                     candidate,applied,DamageModel.blockedFixedIncrement(applied,intent.material(),settings));
-        }catch(RuntimeException|LinkageError unsafe){if(TRACE)LOG.warn("[PDD-MOVE] phase=WORLD_PLAN reason=UNSAFE_OR_UNKNOWN source={}",intent.key(),unsafe);return null;}
+        }catch(RuntimeException|LinkageError unsafe){if(RogTrace.sample(Stage.R08,"WORLD_PLAN_EXCEPTION"))RogTrace.detail(Stage.R08,"WORLD_PLAN_EXCEPTION","id={} source={} type={} message={}",intent.applyId(),intent.key(),unsafe.getClass().getName(),unsafe.getMessage());if(TRACE)LOG.warn("[PDD-MOVE] phase=WORLD_PLAN reason=UNSAFE_OR_UNKNOWN source={}",intent.key(),unsafe);return null;}
     }
     @Override public boolean acquire(BeforeImage b){return lifecycle.acquireMove(b);}
     @Override public void release(BeforeImage b){lifecycle.releaseMove(b);}
@@ -251,6 +253,7 @@ public final class NeoForgeWorldGateway implements WorldCommitCore.WorldGateway,
                 &&level.getBlockEntity(to)==null;
     }
     private Gate reason(BeforeImage b,Gate gate,String reason){
+        if(RogTrace.sample(Stage.R08,reason))RogTrace.detail(Stage.R08,reason,"moveId={} directId={} source={} target={} gate={} epoch={} reservedQ={}",b.id(),b.directApplyId(),b.source(),b.destinationBefore(),gate,b.transformEpoch(),b.reservedQ());
         if(TRACE)LOG.info("[PDD-MOVE] phase=WORLD_VALIDATE id={} from={} to={} gate={} reason={}",
                 b.id(),pos(b.source()),pos(b.destinationBefore()),gate,reason);
         return gate;

@@ -1,5 +1,7 @@
 package com.physicaldestroydeform.collision;
 
+import com.physicaldestroydeform.diagnostics.RogTrace;
+import com.physicaldestroydeform.diagnostics.RogTrace.Stage;
 import com.physicaldestroydeform.diagnostics.NativeCollisionTelemetry;
 import net.minecraft.server.MinecraftServer;
 import java.util.ArrayList;
@@ -201,10 +203,10 @@ public final class SableContactRegions {
             var surfaceReader=new BilateralContactSurface.ShapeReader(){
                 @Override public BilateralContactSurface.Cell get(int side,net.minecraft.core.BlockPos pos){
                     String key=owners[side];
-                    if(!nativeBatch.cached(key,pos)&&remainingSurface[side]<=0){surfaceReadLimited[side]=true;return null;}
+                    if(!nativeBatch.cached(key,pos)&&remainingSurface[side]<=0){surfaceReadLimited[side]=true;if(RogTrace.sample(Stage.R04,"SHAPE_READ_CAP"))RogTrace.detail(Stage.R04,"SHAPE_READ_CAP","owner={} side={} allocated={} remaining={}",key,side,pos,remainingSurface[side]);return null;}
                     var item=nativeBatch.inspectCell(key,pos);
                     if(item.newCell())remainingSurface[side]--;
-                    if(!item.result().verified())return null;
+                    if(!item.result().verified()){if(RogTrace.sample(Stage.R04,"SHAPE_READ_REJECTED"))RogTrace.detail(Stage.R04,"SHAPE_READ_REJECTED","owner={} side={} allocated={} result={} detail={}",key,side,pos,item.result().status(),item.result().detail());return null;}
                     var id=item.result().key();
                     return new BilateralContactSurface.Cell(new GameImpactCredit.Target(key,
                             id.x()+","+id.y()+","+id.z(),id.fingerprint()),pos,nativeBatch.boxes(key,pos));
@@ -227,14 +229,14 @@ public final class SableContactRegions {
                         var observed=get(side,cell);
                         if(surfaceReadLimited[side])return false;
                         if(observed!=null){
-                            if(nativeBatch.contains(owners[side],cell,beyond,1e-6))return false;
+                            if(nativeBatch.contains(owners[side],cell,beyond,1e-6)){if(RogTrace.sample(Stage.R04,"EXTERIOR_OCCUPIED"))RogTrace.detail(Stage.R04,"EXTERIOR_OCCUPIED","side={} owner={} cell={} beyond={}",side,owners[side],cell,beyond);return false;}
                         } else {
                             // Absent/unloaded is NOT proof of air: only an
                             // authoritative empty shape may leave this exposed.
                             var sample=nativeBatch.inspectCell(owners[side],cell).result();
                             if(sample.status()!=OwnerResolver.Status.BLOCK_UNAVAILABLE||
                                     !java.util.Set.of("BLOCK_MISSING_OR_AIR","WORLD_SHAPE_EMPTY","PLOT_SHAPE_EMPTY")
-                                        .contains(sample.detail()))return false;
+                                        .contains(sample.detail())){if(RogTrace.sample(Stage.R04,"EXTERIOR_UNKNOWN"))RogTrace.detail(Stage.R04,"EXTERIOR_UNKNOWN","side={} owner={} cell={} status={} detail={}",side,owners[side],cell,sample.status(),sample.detail());return false;}
                         }
                     }
                     return true;
@@ -293,6 +295,7 @@ public final class SableContactRegions {
             boolean completeSurface=certifiedSurface&&surfaceRejected==0
                     &&!nativeSaturated&&!surfaceReadLimited[0]&&!surfaceReadLimited[1];
             int surfaceAdded=Math.max(0,updatedRegions.size()-baseRegions.size());
+            if(RogTrace.sample(Stage.R04,"SURFACE_MERGE"))RogTrace.detail(Stage.R04,"SURFACE_MERGE","pair={} base={} matches={} distinctA={} distinctB={} merged={} rejected={} certified={} complete={} nativeCap={} remainingA={} remainingB={}",pair,baseRegions.size(),surfaceEvidence.size(),distinctSurfaceA,distinctSurfaceB,updatedRegions.size(),surfaceRejected,certifiedSurface,completeSurface,nativeSaturated,remainingSurface[0],remainingSurface[1]);
             if(certifiedSurface)joined=new LinkedHashSet<>(updatedRegions);
             // For an incomplete result preserve the previous native/legacy
             // proof path. In particular do not seal a fragment of a large face.

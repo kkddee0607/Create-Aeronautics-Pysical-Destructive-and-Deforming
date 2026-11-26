@@ -1,5 +1,7 @@
 package com.physicaldestroydeform.world;
 
+import com.physicaldestroydeform.diagnostics.RogTrace;
+import com.physicaldestroydeform.diagnostics.RogTrace.Stage;
 import com.physicaldestroydeform.MaterialProperties;
 import com.physicaldestroydeform.collision.ContactCreditLedger;
 import com.physicaldestroydeform.collision.GameImpactCredit;
@@ -40,16 +42,18 @@ public final class WorldIntentMapper {
         for(var share:all(grant)) {
             var target=share.target();
             GameImpactCredit.Owner owner=ownerFor(grant,target);
-            if(owner==null){rejected+=share.q();continue;}
+            if(owner==null){rejected+=share.q();if(RogTrace.sample(Stage.R10,"PROJECTION_OWNER_MISSING"))RogTrace.detail(Stage.R10,"PROJECTION_OWNER_MISSING","credit={} target={} Q={}",grant.id(),target,share.q());continue;}
             SparseStateKey key=SparseStateKey.fromTarget(grant.id().pair().dimension(),owner,target);
             if(!"WORLD".equals(key.ownerSpace())){plot+=share.q();continue;}
             if(!visited.add(key)){rejected+=share.q();continue;}
             var material=materials.apply(target);
-            if(material==null){missingMat+=share.q();continue;}
+            if(material==null){missingMat+=share.q();if(RogTrace.sample(Stage.R10,"PROJECTION_MATERIAL_MISSING"))RogTrace.detail(Stage.R10,"PROJECTION_MATERIAL_MISSING","credit={} target={} Q={}",grant.id(),target,share.q());continue;}
             String tag=incarnation.apply(key);
-            if(tag==null||tag.isBlank()){missingInc+=share.q();continue;}
-            out.add(new WorldCommitCore.Intent(id(grant,key),key,tag,share.q(),material.material(),
-                    materialGeneration,grant.tick(),grant.propagated(),material.revision(),directions.apply(target)));
+            if(tag==null||tag.isBlank()){missingInc+=share.q();if(RogTrace.sample(Stage.R10,"PROJECTION_INCARNATION_MISSING"))RogTrace.detail(Stage.R10,"PROJECTION_INCARNATION_MISSING","credit={} key={} Q={}",grant.id(),key,share.q());continue;}
+            var intent=new WorldCommitCore.Intent(id(grant,key),key,tag,share.q(),material.material(),
+                    materialGeneration,grant.tick(),grant.propagated(),material.revision(),directions.apply(target));
+            if(RogTrace.sample(Stage.R10,"CREDIT_PROJECTED"))RogTrace.detail(Stage.R10,"CREDIT_PROJECTED","credit={} applyId={} ownerLocalKey={} storageKey={} Q={} expectedIncarnation={} direction={}",grant.id(),intent.applyId(),key,intent.key(),intent.sealedQ(),intent.expectedIncarnation(),intent.deformationEvidence());
+            out.add(intent);
         }
         double accounted=out.stream().mapToDouble(WorldCommitCore.Intent::sealedQ).sum()
                 +plot+missingMat+missingInc+rejected+grant.unused();

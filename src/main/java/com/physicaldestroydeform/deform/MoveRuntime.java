@@ -1,5 +1,7 @@
 package com.physicaldestroydeform.deform;
 
+import com.physicaldestroydeform.diagnostics.RogTrace;
+import com.physicaldestroydeform.diagnostics.RogTrace.Stage;
 import com.physicaldestroydeform.DamageModel;
 import com.physicaldestroydeform.state.SparseStateKey;
 import com.physicaldestroydeform.world.WorldCommitCore;
@@ -48,7 +50,7 @@ public final class MoveRuntime {
     }
     public void afterDamage(WorldCommitCore.Intent intent,MovePlan plan,WorldReceiptJournal.State state,
                             DamageModel.Settings settings,long gameTick,long deadline){
-        if(plan==null)return;
+        if(plan==null){if(RogTrace.sample(Stage.R08,"NO_PLAN"))RogTrace.detail(Stage.R08,"NO_PLAN","intent={}",intent);return;}
         if(plan.status()!=MovePlan.Status.CANDIDATE_ONLY){
             trace(gameTick,"NO_MOVE_"+plan.status(),plan,0,0);return;
         }
@@ -85,6 +87,7 @@ public final class MoveRuntime {
         }
     }
     private void trace(long tick,String status,MovePlan p,double candidate,double paid){
+        if(RogTrace.sample(Stage.R08,status))RogTrace.detail(Stage.R08,status,"gameTick={} applyId={} source={} steps={} epoch={} K={} F={} reservedQ={} candidateQ={} paidQ={} normalFixed={} priorFixed={}",tick,p.creditId(),p.source(),p.steps(),p.directionEpoch(),p.k(),p.sourceF(),p.reservedQ(),candidate,paid,p.eventNormalDamageFixed(),p.damageBeforeFixed());
         if(!TRACE)return;
         if(logTick!=tick){logTick=tick;logged=0;}
         if(status.startsWith("NO_MOVE_")&&logged++>=ROUTINE_TRACE_CAP){

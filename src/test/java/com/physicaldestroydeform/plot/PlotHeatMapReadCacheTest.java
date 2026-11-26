@@ -49,4 +49,15 @@ class PlotHeatMapReadCacheTest {
         assertThrows(IllegalStateException.class,()->cache.pending(50,false,()->{throw new IllegalStateException();}));
         assertEquals(BUSY,cache.pending(50,false,()->BUSY));
     }
+    @Test void rogTraceDoesNotTriggerExtraHeatMapReads(){
+        var cache=new PlotHeatMapReadCache();var reads=new AtomicInteger();
+        com.physicaldestroydeform.diagnostics.RogTrace.start();
+        try{
+            com.physicaldestroydeform.diagnostics.RogTrace.begin(50);
+            for(int i=0;i<100;i++)assertEquals(BUSY,cache.pending(50,false,()->{reads.incrementAndGet();return BUSY;}));
+            assertEquals(1,reads.get());
+            assertNull(cache.pending(50,true,()->{reads.incrementAndGet();return null;}));
+            assertEquals(2,reads.get());
+        }finally{com.physicaldestroydeform.diagnostics.RogTrace.stop();}
+    }
 }

@@ -261,4 +261,15 @@ class ForcePropagationTest {
                 ledger.issuePropagated(pair,d,ContactCreditLedger.Source.SABLE_POST_EFFECT,evidence,
                         graph(Set.of()),fp->material(60),FORCE,DAMAGE).status());
     }
+    @Test void rogTraceDoesNotChangeForceOrQAccounting(){
+        var seed=at(WORLD,0,0,0);
+        var expected=ForcePropagation.planTargets(WORLD,java.util.Map.of(seed,100d),graph(Set.of()),
+                t->material(40),FORCE,DAMAGE,ForcePropagation.Orientation.unknown(),null);
+        com.physicaldestroydeform.diagnostics.RogTrace.start();
+        try{
+            com.physicaldestroydeform.diagnostics.RogTrace.begin(1);
+            assertEquals(expected,ForcePropagation.planTargets(WORLD,java.util.Map.of(seed,100d),graph(Set.of()),
+                    t->material(40),FORCE,DAMAGE,ForcePropagation.Orientation.unknown(),null));
+        }finally{com.physicaldestroydeform.diagnostics.RogTrace.stop();}
+    }
 }

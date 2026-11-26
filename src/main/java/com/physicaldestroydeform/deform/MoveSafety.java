@@ -1,5 +1,7 @@
 package com.physicaldestroydeform.deform;
 
+import com.physicaldestroydeform.diagnostics.RogTrace;
+import com.physicaldestroydeform.diagnostics.RogTrace.Stage;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.List;
@@ -104,29 +106,40 @@ public final class MoveSafety {
     /** Plot-only caller may prove a glue region remains in the same allocation.
      * The World entry above retains the original unconditional glue veto. */
     public static Gate checkConnections(ServerLevel level,BlockPos pos,BlockState state,Function<Entity,Gate> glueGate) {
-        if(!loaded(level,pos))return Gate.DEFERRED;
-        for(Direction side:Direction.values())if(!loaded(level,pos.relative(side)))return Gate.DEFERRED;
+        if(!loaded(level,pos))return traceConnection(Gate.DEFERRED,"CONNECTION_SOURCE_UNLOADED",pos,null);
+        for(Direction side:Direction.values())if(!loaded(level,pos.relative(side)))return traceConnection(Gate.DEFERRED,"CONNECTION_NEIGHBOR_UNLOADED",pos,side);
         try {
-            if(!state.isAir()&&(state.getPistonPushReaction()!=PushReaction.NORMAL||state.getBlock() instanceof FallingBlock
-                    ||sticky(state)||!state.getFluidState().isEmpty()||!unitShape(level,pos,state)||CreateChecks.KINETIC.isInstance(level.getBlockEntity(pos))
-                    ||!((Boolean)CreateChecks.ALLOWED.invoke(null,state,level,pos))))return Gate.BLOCKED;
+            if(!state.isAir()){
+                if(state.getPistonPushReaction()!=PushReaction.NORMAL)return traceConnection(Gate.BLOCKED,"CONNECTION_PUSH_REACTION",pos,state);
+                if(state.getBlock() instanceof FallingBlock)return traceConnection(Gate.BLOCKED,"CONNECTION_FALLING",pos,state);
+                if(sticky(state))return traceConnection(Gate.BLOCKED,"CONNECTION_STICKY",pos,state);
+                if(!state.getFluidState().isEmpty())return traceConnection(Gate.BLOCKED,"CONNECTION_FLUID",pos,state);
+                if(!unitShape(level,pos,state))return traceConnection(Gate.BLOCKED,"CONNECTION_SHAPE",pos,state);
+                if(CreateChecks.KINETIC.isInstance(level.getBlockEntity(pos)))return traceConnection(Gate.BLOCKED,"CONNECTION_KINETIC",pos,state);
+                if(!((Boolean)CreateChecks.ALLOWED.invoke(null,state,level,pos)))return traceConnection(Gate.BLOCKED,"CONNECTION_CREATE_DISALLOWED",pos,state);
+            }
             // Query the real glue entities (collectCropped would create temporary entities).
             AABB area=new AABB(pos.getX(),pos.getY(),pos.getZ(),pos.getX()+1,pos.getY()+1,pos.getZ()+1);
             for(Entity glue:level.getEntitiesOfClass(CreateChecks.GLUE,area.inflate(0.001))){
                 Gate decision=glueGate.apply(glue);
-                if(decision==null)return Gate.UNKNOWN;
-                if(decision!=Gate.APPROVED)return decision;
+                if(decision==null)return traceConnection(Gate.UNKNOWN,"CONNECTION_GLUE_UNKNOWN",pos,null);
+                if(decision!=Gate.APPROVED)return traceConnection(decision,"CONNECTION_GLUE_VETO",pos,null);
             }
             for(Direction side:Direction.values()) {
                 BlockPos adjacent=pos.relative(side);BlockState neighbor=level.getBlockState(adjacent);
-                if(!state.isAir()&&((Boolean)CreateChecks.ATTACHED.invoke(null,state,level,pos,side)))return Gate.BLOCKED;
+                if(!state.isAir()&&((Boolean)CreateChecks.ATTACHED.invoke(null,state,level,pos,side)))return traceConnection(Gate.BLOCKED,"CONNECTION_SOURCE_ATTACHED",pos,side);
                 if(neighbor.isAir())continue;
-                if(sticky(neighbor)||neighbor.getBlock() instanceof FallingBlock
-                        ||CreateChecks.KINETIC.isInstance(level.getBlockEntity(adjacent))
-                        ||((Boolean)CreateChecks.ATTACHED.invoke(null,neighbor,level,adjacent,side.getOpposite())))return Gate.BLOCKED;
+                if(sticky(neighbor))return traceConnection(Gate.BLOCKED,"CONNECTION_NEIGHBOR_STICKY",pos,side);
+                if(neighbor.getBlock() instanceof FallingBlock)return traceConnection(Gate.BLOCKED,"CONNECTION_NEIGHBOR_FALLING",pos,side);
+                if(CreateChecks.KINETIC.isInstance(level.getBlockEntity(adjacent)))return traceConnection(Gate.BLOCKED,"CONNECTION_NEIGHBOR_KINETIC",pos,side);
+                if((Boolean)CreateChecks.ATTACHED.invoke(null,neighbor,level,adjacent,side.getOpposite()))return traceConnection(Gate.BLOCKED,"CONNECTION_NEIGHBOR_ATTACHED",pos,side);
             }
-            return Gate.APPROVED;
-        }catch(ReflectiveOperationException|RuntimeException|LinkageError unsafe){return Gate.UNKNOWN;}
+            return traceConnection(Gate.APPROVED,"CONNECTION_CLEAR",pos,null);
+        }catch(ReflectiveOperationException|RuntimeException|LinkageError unsafe){return traceConnection(Gate.UNKNOWN,"CONNECTION_EXCEPTION",pos,unsafe.getClass().getName());}
+    }
+    private static Gate traceConnection(Gate result,String reason,BlockPos pos,Object detail){
+        if(RogTrace.sample(Stage.R08,reason))RogTrace.detail(Stage.R08,reason,"allocatedPosition={} result={} detail={}",pos,result,detail);
+        return result;
     }
     private static boolean sticky(BlockState state){return state.is(Blocks.SLIME_BLOCK)||state.is(Blocks.HONEY_BLOCK);}
 }

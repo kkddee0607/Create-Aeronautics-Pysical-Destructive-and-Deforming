@@ -1,5 +1,7 @@
 package com.physicaldestroydeform.stress;
 
+import com.physicaldestroydeform.diagnostics.RogTrace;
+import com.physicaldestroydeform.diagnostics.RogTrace.Stage;
 import com.physicaldestroydeform.BlockDamageState;
 import com.physicaldestroydeform.DamageModel;
 import com.physicaldestroydeform.material.CopycatMaterial;
@@ -210,6 +212,7 @@ public final class StressRuntime {
                     ||prior.reservation().materialGeneration()!=materials.generation()
                     ||!prior.reservation().settings().equals(settings))
                 throw new IOException("stress source ID reused with changed payload");
+            if(RogTrace.sample(Stage.R11,"EXISTING_RESERVATION"))RogTrace.detail(Stage.R11,"EXISTING_RESERVATION","job={} phase={} rollback={} roots={}",id,prior.phase(),prior.clockRolledBack(),ordered.size());
             return !prior.clockRolledBack();
         }
         // A changed projection of the same Grant cannot reserve one of its origins again.
@@ -232,6 +235,7 @@ public final class StressRuntime {
             return false; // never resubmit a completed direct intent
         }
         journal.reserve(reservation);
+        if(RogTrace.sample(Stage.R11,"RESERVED"))RogTrace.detail(Stage.R11,"RESERVED","job={} roots={} Q={} created={} deadline={} materialGeneration={}",id,ordered.size(),reservation.reservedQ(),reservation.createdGameTick(),deadline(reservation),materials.generation());
         for(var origin:ordered)originJobs.put(origin.applyId(),id);
         add(journal.get(id));
         if(TRACE&&ordered.size()>8192)log.info("[PDD-STRESS-LEDGER] phase=LARGE_RESERVED id={} roots={} Q={} deadline={} activeBytes={} decodedBytes={} QReissue=false",
@@ -321,24 +325,25 @@ public final class StressRuntime {
             if(observation!=null)job.observedPlotOwners.add(cell.owner());
         }
         else observation=world==null?null:world.readStress(key);
-        if(observation==null||!observation.loaded())return Probe.unavailable();
-        if(observation.isAir())return Probe.empty();
+        if(observation==null||!observation.loaded()){if(RogTrace.sample(Stage.R11,"PROBE_UNAVAILABLE"))RogTrace.detail(Stage.R11,"PROBE_UNAVAILABLE","job={} cell={} key={} observation={}",job.id,cell,key,observation);return Probe.unavailable();}
+        if(observation.isAir()){if(RogTrace.sample(Stage.R11,"PROBE_AIR"))RogTrace.detail(Stage.R11,"PROBE_AIR","job={} cell={} key={}",job.id,cell,key);return Probe.empty();}
         if(observation.hasBlockEntity()||observation.unsafeMultiblock()||observation.unbreakable()
-                ||observation.unsafePhysicsPhase()||observation.ownerGeneration()!=key.ownerGeneration())return Probe.denied();
+                ||observation.unsafePhysicsPhase()||observation.ownerGeneration()!=key.ownerGeneration()){if(RogTrace.sample(Stage.R11,"PROBE_SAFETY_DENIED"))RogTrace.detail(Stage.R11,"PROBE_SAFETY_DENIED","job={} cell={} key={} observation={}",job.id,cell,key,observation);return Probe.denied();}
         var materials=MaterialRegistry.snapshot();
-        if(materials.generation()!=job.reservation.materialGeneration())return Probe.denied();
+        if(materials.generation()!=job.reservation.materialGeneration()){if(RogTrace.sample(Stage.R11,"PROBE_MATERIAL_GENERATION"))RogTrace.detail(Stage.R11,"PROBE_MATERIAL_GENERATION","job={} cell={} expected={} actual={}",job.id,cell,job.reservation.materialGeneration(),materials.generation());return Probe.denied();}
         // Owner/coordinates were already decoded and canonicalized above;
         // only the verified live fingerprint changes for material resolution.
         var materialKey=new SparseStateKey(key.dimension(),key.ownerSpace(),key.ownerId(),key.ownerGeneration(),
                 key.x(),key.y(),key.z(),observation.fingerprint());
         var resolved=materialLookup.resolve(materials,observation.fingerprint(),
                 ()->TargetMaterials.read(server,materialKey,materials));
-        if(resolved==null||resolved.material().unbreakable())return Probe.denied();
+        if(resolved==null||resolved.material().unbreakable()){if(RogTrace.sample(Stage.R11,"PROBE_MATERIAL_DENIED"))RogTrace.detail(Stage.R11,"PROBE_MATERIAL_DENIED","job={} cell={} key={} material={}",job.id,cell,materialKey,resolved);return Probe.denied();}
+        if(RogTrace.sample(Stage.R11,"PROBE_SOLID"))RogTrace.detail(Stage.R11,"PROBE_SOLID","job={} cell={} key={} material={} incarnation={}",job.id,cell,materialKey,resolved,observation.incarnation());
         return Probe.solid(new Node(cell,observation.fingerprint(),observation.incarnation(),resolved.material(),resolved.revision()));
     }
     private Probe frozen(Job job,Cell cell){
         Probe old=job.snapshot.get(cell);
-        if(old!=null&&old.state()!=State.UNAVAILABLE){charge();return old;}
+        if(old!=null&&old.state()!=State.UNAVAILABLE){charge();if(RogTrace.sample(Stage.R11,"FROZEN_PROBE_REUSED"))RogTrace.detail(Stage.R11,"FROZEN_PROBE_REUSED","job={} cell={} state={}",job.id,cell,old.state());return old;}
         Probe next=live(job,cell);job.snapshot.put(cell,next);return next;
     }
     public void tick(){
@@ -352,19 +357,21 @@ public final class StressRuntime {
                 String id=order.removeFirst();Job job=jobs.get(id);if(job==null)continue;
                 if(job.pressureBytes==journal.activeBytes()&&job.pressureLogical==journal.activeLogicalBytes()&&tick<job.pressureRetryAt){order.addLast(id);continue;}
                 job.pressureBytes=-1;
-                try{step(job,tick);}catch(BudgetEnd exhausted){/* exact shared allowance; preserve cursors */}
+                try{step(job,tick);}catch(BudgetEnd exhausted){if(RogTrace.sample(Stage.R11,"WORK_BUDGET"))RogTrace.detail(Stage.R11,"WORK_BUDGET","job={} tick={} used={} cap={}",job.id,tick,used,workCap);/* exact shared allowance; preserve cursors */}
                 catch(CapacityException pressure){
                     // Quota pressure is not a corrupt save. Retry the exact job,
                     // keep its immutable prefix, and allow other jobs to drain.
                     long created=job.reservation.createdGameTick(),ttl=job.reservation.policy().ttlTicks();
                     long deadline=created>Long.MAX_VALUE-ttl?Long.MAX_VALUE:created+ttl;
                     job.pressureBytes=journal.activeBytes();job.pressureLogical=journal.activeLogicalBytes();job.pressureRetryAt=Math.min(deadline,tick>Long.MAX_VALUE-20?Long.MAX_VALUE:tick+20);
+                    if(RogTrace.sample(Stage.R11,"CAPACITY_PRESSURE"))RogTrace.detail(Stage.R11,"CAPACITY_PRESSURE","job={} message={} activeBytes={} decodedBytes={} retryAt={}",job.id,pressure.getMessage(),job.pressureBytes,job.pressureLogical,job.pressureRetryAt);
                     if(++capacityRetries==1||capacityRetries%256==0)
                         log.warn("[PDD-STRESS-LEDGER] phase=PRESSURE id={} reason={} roots={} snapshot={} activeBytes={} decodedBytes={} activeRecords={} retries={} QReissue=false",
                                 id,pressure.getMessage(),job.reservation.seeds().size(),job.snapshot.size(),journal.activeBytes(),journal.activeLogicalBytes(),journal.activeCount(),capacityRetries);
                 }
                 if(jobs.containsKey(id))order.addLast(id);
             }
+            if(RogTrace.sample(Stage.R13,"STRESS_QUEUE"))RogTrace.detail(Stage.R13,"STRESS_QUEUE","gameTick={} jobs={} work={} cap={} activeBytes={} decodedBytes={} worldOriginJobs={} plotOriginJobs={}",tick,jobs.size(),used,workCap,journal.activeBytes(),journal.activeLogicalBytes(),worldOriginOrder.size(),plotOriginOrder.size());
             if(server.getTickCount()%100==0)log.info("[PDD-STRESS-LEDGER] phase=SUMMARY jobs={} work={} cap={} records={} fault=false seals={} handoffs={} unchangedSnapshotWritesAvoided={} unchangedSealWritesAvoided={} traceSuppressed={} activeRecords={} archivedRecords={} activeBytes={} decodedBytes={} worldOriginJobs={} plotOriginJobs={} pressureRetries={} archiveConflicts={} rollbackJobsReconciled={} {}",
                     jobs.size(),used,workCap,journal.size(),seals,handoffs,snapshotWritesAvoided,sealWritesAvoided,traceSuppressed,journal.activeCount(),journal.archivedCount(),journal.activeBytes(),journal.activeLogicalBytes(),worldOriginOrder.size(),plotOriginOrder.size(),capacityRetries,archiveConflicts,rollbackJobsReconciled,journal.cacheStatus());
         }catch(IOException|RuntimeException failure){
@@ -398,12 +405,15 @@ public final class StressRuntime {
         // it would consume a cap=1 allowance forever and starve delivery/acknowledgment.
         if(expired&&(entry.phase()==Phase.RESERVED||!entry.ledger().finished()||entry.ledger().pendingQ()!=0)){
             charge();journal.closeResidual(job.id,"ORIGINAL_TTL_UNUSED");job.finished=true;
+            if(RogTrace.sample(Stage.R11,"TTL_EXPIRED"))RogTrace.detail(Stage.R11,"TTL_EXPIRED","job={} tick={} created={} deadline={}",job.id,tick,r.createdGameTick(),deadline(r));
             entry=journal.get(job.id);
         }else if(MaterialRegistry.generation()!=r.materialGeneration()&&(!job.finished||entry.ledger()!=null&&entry.ledger().pendingQ()!=0)){
             charge();journal.closeResidual(job.id,"MATERIAL_GENERATION_CHANGED_UNUSED");job.finished=true;
+            if(RogTrace.sample(Stage.R11,"MATERIAL_CHANGED_UNUSED"))RogTrace.detail(Stage.R11,"MATERIAL_CHANGED_UNUSED","job={} expected={} tick={}",job.id,r.materialGeneration(),tick);
             entry=journal.get(job.id);
         }else if(job.invalidated&&!job.finished){
             charge();journal.deferResidual(job.id,"SNAPSHOT_REPLACED_DEFERRED_BOUNDED");job.finished=true;
+            if(RogTrace.sample(Stage.R11,"SNAPSHOT_INVALIDATED"))RogTrace.detail(Stage.R11,"SNAPSHOT_INVALIDATED","job={} tick={} snapshotCells={}",job.id,tick,job.snapshot.size());
             entry=journal.get(job.id);
         }
         boolean originsAttempted=!entry.holdsOrigins();
@@ -494,6 +504,7 @@ public final class StressRuntime {
                 if(sealed==beforeSeal)sealWritesAvoided++;
                 else{
                     seals++;
+                    if(RogTrace.sample(Stage.R11,"SEALED"))RogTrace.detail(Stage.R11,"SEALED","job={} reservedQ={} absorbedQ={} directQ={} plasticUnusedQ={} unusedQ={} pendingQ={} nodes={} deadline={}",job.id,sealed.ledger().reservedQ(),sealed.ledger().absorbedQ(),sealed.ledger().directQ(),sealed.ledger().plasticUnusedQ(),sealed.ledger().unusedQ(),sealed.ledger().pendingQ(),sealed.plans().size(),deadline(r));
                     if(showTrace())log.info("[PDD-STRESS-LEDGER] phase=SEALED id={} Q={} absorbed={} direct={} plasticReservedUnused={} unused={} deferred={} nodes={} deadline={}",
                             job.id,sealed.ledger().reservedQ(),sealed.ledger().absorbedQ(),sealed.ledger().directQ(),sealed.ledger().plasticUnusedQ(),sealed.ledger().unusedQ(),sealed.ledger().pendingQ(),sealed.plans().size(),deadline(r));
                 }
@@ -513,6 +524,7 @@ public final class StressRuntime {
             try{accepted=PlotKeyCodec.isPlotStorage(key)?plot!=null&&plot.offerStress(entry,plan,intent,job.deliveryIndex)
                     :world!=null&&world.offerStress(entry,plan,intent,job.deliveryIndex);}
             finally{workTime(WorkPhase.HANDOFF,handoffStarted);}
+            if(RogTrace.sample(Stage.R11,accepted?"HANDOFF_ACCEPTED":"HANDOFF_WAIT"))RogTrace.detail(Stage.R11,accepted?"HANDOFF_ACCEPTED":"HANDOFF_WAIT","job={} applyId={} key={} depth={} incomingQ={} fixedIncrement={} index={} total={} accepted={}",job.id,intent.applyId(),key,plan.depth(),plan.incomingQ(),plan.plan().fixedIncrement(),job.deliveryIndex,entry.plans().size(),accepted);
             if(!accepted)break;
             job.deliveryIndex++;this.handoffs++;
             if(showTrace())log.info("[PDD-STRESS-APPLY] phase=DURABLE_HANDOFF id={} origin={} owner={} position={},{},{} depth={} incomingQ={} fixedDamage={} status=QUEUED_OR_TERMINAL_NOT_ASSUMED_APPLIED",
@@ -570,6 +582,7 @@ public final class StressRuntime {
                     ?plot!=null&&plot.recoverStressOrigin(origin,r.settings(),r.createdGameTick(),r.policy().ttlTicks())
                     :world!=null&&world.recoverStressOrigin(origin,r.settings(),r.createdGameTick(),r.policy().ttlTicks());
             if(!accepted){
+                if(RogTrace.sample(Stage.R11,"ORIGIN_WAIT"))RogTrace.detail(Stage.R11,"ORIGIN_WAIT","job={} applyId={} plot={} delivered={} total={} deadline={} tick={}",job.id,origin.applyId(),job.plotOrigins,job.originIndex,job.orderedOrigins.size(),deadline(r),lastTick);
                 if(job.lastQueuePressureLog==Long.MIN_VALUE||lastTick-job.lastQueuePressureLog>=100){
                     job.lastQueuePressureLog=lastTick;
                     if(showTrace())log.info("[PDD-STRESS-LEDGER] phase=ORIGIN_WAIT id={} applyId={} owner={} delivered={} total={} deadline={} gameTick={} QReissue=false",
@@ -577,6 +590,7 @@ public final class StressRuntime {
                 }
                 return false;
             }
+            if(RogTrace.sample(Stage.R11,"ORIGIN_ACCEPTED"))RogTrace.detail(Stage.R11,"ORIGIN_ACCEPTED","job={} applyId={} plot={} index={} total={}",job.id,origin.applyId(),job.plotOrigins,job.originIndex,job.orderedOrigins.size());
             job.originIndex++;
         }
         if(job.originIndex<job.orderedOrigins.size())return false;
@@ -596,6 +610,7 @@ public final class StressRuntime {
             rollbackJobsRemaining--;
             rollbackJobsReconciled++;
         }
+        if(RogTrace.sample(Stage.R11,"ARCHIVED"))RogTrace.detail(Stage.R11,"ARCHIVED","job={} phase={} planCount={} delivered={} rollback={}",job.id,entry.phase(),entry.plans().size(),job.deliveryIndex,job.clockRolledBack);
         remove(job);
     }
     private static WorldCommitCore.Intent derivedIntent(Job job,PlannedNode plan){

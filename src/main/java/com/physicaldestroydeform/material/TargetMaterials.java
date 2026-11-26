@@ -1,5 +1,7 @@
 package com.physicaldestroydeform.material;
 
+import com.physicaldestroydeform.diagnostics.RogTrace;
+import com.physicaldestroydeform.diagnostics.RogTrace.Stage;
 import com.physicaldestroydeform.collision.GameImpactCredit;
 import com.physicaldestroydeform.diagnostics.DiagnosticMode;
 import com.physicaldestroydeform.plot.PlotKeyCodec;
@@ -70,9 +72,11 @@ public final class TargetMaterials {
     }
     private static CopycatMaterial.Resolved read(MinecraftServer server,String dimension,String owner,String local,String fp,MaterialRegistry.Snapshot snapshot){
         if(!CopycatMaterial.isCopycat(fp)){
-            var material=snapshot.resolveFingerprint(fp);return material==null?null:new CopycatMaterial.Resolved(material,"",false);
+            var material=snapshot.resolveFingerprint(fp);
+            if(RogTrace.sample(Stage.R07,material==null?"STATIC_MISSING":"STATIC_RESOLVED"))RogTrace.detail(Stage.R07,material==null?"STATIC_MISSING":"STATIC_RESOLVED","dimension={} owner={} local={} fingerprint={} generation={} material={}",dimension,owner,local,fp,snapshot.generation(),material);
+            return material==null?null:new CopycatMaterial.Resolved(material,"",false);
         }
-        if(!server.isSameThread())return null;
+        if(!server.isSameThread()){if(RogTrace.sample(Stage.R07,"NOT_SERVER_THREAD"))RogTrace.detail(Stage.R07,"NOT_SERVER_THREAD","dimension={} owner={} local={} fingerprint={}",dimension,owner,local,fp);return null;}
         try{
             var xyz=local.split(",",-1);if(xyz.length!=3)return reject(server,dimension,owner,local,fp,snapshot,"INVALID_POSITION");
             BlockPos pos=new BlockPos(Integer.parseInt(xyz[0]),Integer.parseInt(xyz[1]),Integer.parseInt(xyz[2]));
@@ -106,6 +110,7 @@ public final class TargetMaterials {
     }
     private static synchronized void trace(MinecraftServer server,String dimension,String owner,String local,String fp,MaterialRegistry.Snapshot snapshot,CopycatMaterial.Capture capture){
         traceReads++;
+        if(RogTrace.sample(Stage.R07,capture.reason()))RogTrace.detail(Stage.R07,capture.reason(),"dimension={} owner={} local={} fingerprint={} generation={} material={} slots={} k={}",dimension,owner,local,fp,snapshot.generation(),capture.resolved(),capture.slots(),capture.k());
         if(!TRACE||TRACE_CAP==0||!LOG.isInfoEnabled())return;
         long tick=server.getTickCount();
         if(traceServer.get()!=server){TRACE_HISTORY.clear();traceServer=new WeakReference<>(server);traceTick=-1;}

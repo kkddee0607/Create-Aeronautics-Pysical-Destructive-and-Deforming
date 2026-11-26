@@ -1,5 +1,7 @@
 package com.physicaldestroydeform.collision;
 
+import com.physicaldestroydeform.diagnostics.RogTrace;
+import com.physicaldestroydeform.diagnostics.RogTrace.Stage;
 import com.physicaldestroydeform.DamageModel;
 import com.physicaldestroydeform.MaterialProperties;
 import java.util.ArrayList;
@@ -402,27 +404,29 @@ public final class ContactCreditLedger {
         for(var seed:seeds){
             var candidates=opponents.get(seed);
             if(candidates==null||candidates.isEmpty()){
-                unresolved+=split;withheld++;unproved++;continue;
+                unresolved+=split;withheld++;unproved++;if(RogTrace.sample(Stage.R06,"CONTACT_UNPROVED"))RogTrace.detail(Stage.R06,"CONTACT_UNPROVED","seed={} owner={} withheldF={} sideF={} seeds={}",seed,owner,split,sideF,seeds.size());continue;
             }
             if(materials.apply(seed)==null){
-                unresolved+=split;withheld++;missingMaterial++;continue;
+                unresolved+=split;withheld++;missingMaterial++;if(RogTrace.sample(Stage.R06,"CONTACT_SEED_MATERIAL_MISSING"))RogTrace.detail(Stage.R06,"CONTACT_SEED_MATERIAL_MISSING","seed={} withheldF={}",seed,split);continue;
             }
             var ordered=new ArrayList<>(candidates);ordered.sort(ContactCreditLedger::compareCandidateSets);
             double part=split/ordered.size();
             double received=0;
             for(var possible:ordered){
                 int e=consensusElasticity(possible,materials);
-                if(e<0){unresolved+=part;withheld++;if(e==-2)missingMaterial++;else if(e==-3)mixedMaterial++;else unproved++;continue;}
+                if(e<0){unresolved+=part;withheld++;if(e==-2)missingMaterial++;else if(e==-3)mixedMaterial++;else unproved++;if(RogTrace.sample(Stage.R06,e==-2?"CONTACT_MISSING_MATERIAL":e==-3?"CONTACT_MIXED_E":"CONTACT_UNPROVED_CANDIDATES"))RogTrace.detail(Stage.R06,e==-2?"CONTACT_MISSING_MATERIAL":e==-3?"CONTACT_MIXED_E":"CONTACT_UNPROVED_CANDIDATES","seed={} candidates={} candidateCount={} withheldF={} elasticityStatus={}",seed,com.physicaldestroydeform.diagnostics.TraceBudget.sample(possible,4),possible.size(),part,e);continue;}
                 if(possible.size()==1)exact++;else consensus++;
                 double retained=part*DamageModel.contactElasticityTransmissionPercent(e,damage);
                 received+=retained;
                 contactDamped+=part-retained;
+                if(RogTrace.sample(Stage.R06,possible.size()==1?"CONTACT_EXACT":"CONTACT_CONSENSUS"))RogTrace.detail(Stage.R06,possible.size()==1?"CONTACT_EXACT":"CONTACT_CONSENSUS","seed={} candidates={} candidateCount={} incomingF={} retainedF={} dampedF={} opposingE={}",seed,com.physicaldestroydeform.diagnostics.TraceBudget.sample(possible,4),possible.size(),part,retained,part-retained,e);
             }
             if(received>0){effective.put(seed,received);forwardF+=received;}
         }
         double tolerance=Math.max(1e-7,sideF*1e-7);
         if(!Double.isFinite(forwardF)||Math.abs(sideF-forwardF-contactDamped-unresolved)>tolerance)
             throw new IllegalStateException("direct contact F ledger mismatch");
+        if(RogTrace.sample(Stage.R06,"CONTACT_SIDE_SEAL"))RogTrace.detail(Stage.R06,"CONTACT_SIDE_SEAL","owner={} sideF={} forwardF={} contactDampedF={} unresolvedF={} exact={} consensus={} withheld={} missingMaterial={} mixedE={} unproved={} seedCount={} effectiveCount={}",owner,sideF,forwardF,contactDamped,unresolved,exact,consensus,withheld,missingMaterial,mixedMaterial,unproved,seeds.size(),effective.size());
         var plan=ForcePropagation.planTargets(owner,effective,neighbors,materials,forces,damage,direction,trace,crossOwner);
         if(Math.abs(plan.inputF()-forwardF)>tolerance)throw new IllegalStateException("seed F budget mismatch");
         return new ForcePropagation.Result(plan.shares(),sideF,plan.assignedF(),plan.dampedF(),
