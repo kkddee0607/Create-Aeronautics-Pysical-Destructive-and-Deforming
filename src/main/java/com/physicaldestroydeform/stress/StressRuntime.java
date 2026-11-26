@@ -96,7 +96,11 @@ public final class StressRuntime {
         final List<WorldCommitCore.Intent> orderedOrigins;
         final boolean plotOrigins;
         final boolean clockRolledBack,restoredFromDisk;
-        long observedTurns,budgetEnds,pressureDeferrals;
+        long observedTurns,budgetEnds,pressureDeferrals,sessionCapDeferrals,waitDeferrals;
+        long retryAt,lastProgressTick;
+        int waitStreak;
+        boolean waitedThisTurn;
+        Cell lastWaitCell;
         Session session;
         final StressProbeCursor probes=new StressProbeCursor();
         final Map<Cell,Probe> snapshot=new TreeMap<>();
@@ -110,7 +114,7 @@ public final class StressRuntime {
         long lastQueuePressureLog=Long.MIN_VALUE;
         Job(Entry entry,boolean restoredFromDisk){
             this.restoredFromDisk=restoredFromDisk;
-            id=entry.reservation().creditId();reservation=entry.reservation();
+            id=entry.reservation().creditId();reservation=entry.reservation();lastProgressTick=reservation.createdGameTick();
             orderedOrigins=com.physicaldestroydeform.deform.MoveRuntime.reverseOrder(reservation.origins());
             plotOrigins=!orderedOrigins.isEmpty()&&PlotKeyCodec.isPlotStorage(orderedOrigins.getFirst().key());
             clockRolledBack=entry.clockRolledBack();
@@ -327,7 +331,14 @@ public final class StressRuntime {
             if(observation!=null)job.observedPlotOwners.add(cell.owner());
         }
         else observation=world==null?null:world.readStress(key);
-        if(observation==null||!observation.loaded()){if(RogTrace.sample(Stage.R11,"PROBE_UNAVAILABLE"))RogTrace.detail(Stage.R11,"PROBE_UNAVAILABLE","job={} cell={} key={} observation={}",job.id,cell,key,observation);return Probe.unavailable();}
+        if(observation==null&&PlotKeyCodec.isPlotStorage(key)&&plot!=null){
+            String boundary=plot.stressBoundary(key);
+            if(boundary!=null){
+                if(RogTrace.sample(Stage.R11,"PROBE_GRAPH_BOUNDARY"))RogTrace.detail(Stage.R11,"PROBE_GRAPH_BOUNDARY","job={} cell={} reason={}",job.id,cell,boundary);
+                return Probe.empty();
+            }
+        }
+        if(observation==null||!observation.loaded()){job.waitedThisTurn=true;job.lastWaitCell=cell;if(RogTrace.sample(Stage.R11,"PROBE_UNAVAILABLE"))RogTrace.detail(Stage.R11,"PROBE_UNAVAILABLE","job={} cell={} key={} observation={}",job.id,cell,key,observation);return Probe.unavailable();}
         if(observation.isAir()){if(RogTrace.sample(Stage.R11,"PROBE_AIR"))RogTrace.detail(Stage.R11,"PROBE_AIR","job={} cell={} key={}",job.id,cell,key);return Probe.empty();}
         if(observation.hasBlockEntity()||observation.unsafeMultiblock()||observation.unbreakable()
                 ||observation.unsafePhysicsPhase()||observation.ownerGeneration()!=key.ownerGeneration()){if(RogTrace.sample(Stage.R11,"PROBE_SAFETY_DENIED"))RogTrace.detail(Stage.R11,"PROBE_SAFETY_DENIED","job={} cell={} key={} observation={}",job.id,cell,key,observation);return Probe.denied();}
@@ -359,6 +370,11 @@ public final class StressRuntime {
                 String id=order.removeFirst();Job job=jobs.get(id);if(job==null)continue;
                 if(job.pressureBytes==journal.activeBytes()&&job.pressureLogical==journal.activeLogicalBytes()&&tick<job.pressureRetryAt){job.pressureDeferrals++;order.addLast(id);continue;}
                 job.pressureBytes=-1;
+                if(tick<job.retryAt&&tick<deadline(job.reservation)&&!job.invalidated&&!job.finished
+                        &&MaterialRegistry.generation()==job.reservation.materialGeneration()){
+                    job.waitDeferrals++;order.addLast(id);continue;
+                }
+                long before=progress(job);job.waitedThisTurn=false;
                 job.observedTurns++;
                 try{step(job,tick);}catch(BudgetEnd exhausted){job.budgetEnds++;if(RogTrace.sample(Stage.R11,"WORK_BUDGET"))RogTrace.detail(Stage.R11,"WORK_BUDGET","job={} tick={} used={} cap={}",job.id,tick,used,workCap);/* exact shared allowance; preserve cursors */}
                 catch(CapacityException pressure){
@@ -373,7 +389,15 @@ public final class StressRuntime {
                         log.warn("[PDD-STRESS-LEDGER] phase=PRESSURE id={} reason={} roots={} snapshot={} activeBytes={} decodedBytes={} activeRecords={} retries={} QReissue=false",
                                 id,pressure.getMessage(),job.reservation.seeds().size(),job.snapshot.size(),journal.activeBytes(),journal.activeLogicalBytes(),journal.activeCount(),capacityRetries);
                 }
-                if(jobs.containsKey(id))order.addLast(id);
+                if(jobs.containsKey(id)){
+                    if(progress(job)!=before){job.lastProgressTick=tick;job.waitStreak=0;job.retryAt=0;}
+                    else if(job.waitedThisTurn){
+                        job.waitStreak=Math.min(5,job.waitStreak+1);
+                        long delay=1L<<job.waitStreak;
+                        job.retryAt=Math.min(deadline(job.reservation),tick>Long.MAX_VALUE-delay?Long.MAX_VALUE:tick+delay);
+                    }
+                    order.addLast(id);
+                }
             }
             if(RogTrace.sample(Stage.R13,"STRESS_QUEUE"))RogTrace.detail(Stage.R13,"STRESS_QUEUE","gameTick={} jobs={} work={} cap={} activeBytes={} decodedBytes={} worldOriginJobs={} plotOriginJobs={}",tick,jobs.size(),used,workCap,journal.activeBytes(),journal.activeLogicalBytes(),worldOriginOrder.size(),plotOriginOrder.size());
             if(server.getTickCount()%100==0)log.info("[PDD-STRESS-LEDGER] phase=SUMMARY jobs={} work={} cap={} records={} fault=false seals={} handoffs={} unchangedSnapshotWritesAvoided={} unchangedSealWritesAvoided={} traceSuppressed={} activeRecords={} archivedRecords={} activeBytes={} decodedBytes={} worldOriginJobs={} plotOriginJobs={} pressureRetries={} archiveConflicts={} rollbackJobsReconciled={} {}",
@@ -381,6 +405,11 @@ public final class StressRuntime {
         }catch(IOException|RuntimeException failure){
             faulted=true;log.error("[PDD-STRESS-LEDGER] phase=HALT reason=SAVE_OR_PLAN_FAILURE QReissue=false",failure);
         }
+    }
+    private static long progress(Job job){
+        // Monotone within an active phase (no equality dependency on graph iteration order).
+        return (long)job.snapshot.size()+job.deliveryIndex+job.originIndex+job.validationIndex
+                +(job.session==null?0:job.session.rootsResolved()+job.session.plannedNodes());
     }
     private boolean showTrace(){
         if(!TRACE||!log.isInfoEnabled()||shown>=MAX_LOGS){traceSuppressed++;return false;}
@@ -424,7 +453,7 @@ public final class StressRuntime {
         if(originsAttempted)deliverOrigins(job);
         if(!job.finished){
             if(job.session==null){
-                if(activeSessions>=StressScheduler.MAX_JOBS)return;
+                if(activeSessions>=StressScheduler.MAX_JOBS){job.sessionCapDeferrals++;return;}
                 charge();job.session=new Session(r.seeds(),r.policy(),r.settings(),r.createdGameTick(),true);activeSessions++;
             }
             if(job.validation==null){
@@ -435,7 +464,7 @@ public final class StressRuntime {
                         job.probes.advance(job.session,cell->frozen(job,cell),tick,this::charge);
                         if(job.session.finished()||job.session.waiting())break;
                     }
-                }catch(BudgetEnd exhausted){/* persist the frozen partial operation too */}
+                }catch(BudgetEnd exhausted){job.budgetEnds++;/* persist the frozen partial operation too */}
                 finally{workTime(WorkPhase.PROBE,probeStarted);}
                 job.session.verify();
                 // Before the last root, no derived plan can exist. Persist its
@@ -614,7 +643,7 @@ public final class StressRuntime {
             rollbackJobsRemaining--;
             rollbackJobsReconciled++;
         }
-        RogTrace.event(Stage.R11,"STRESS_JOB_SUMMARY","job={} restored={} phase={} reason={} created={} deadline={} turns={} budgetEnds={} pressureDeferrals={} snapshotCells={} planCount={} delivered={} origins={} rollback={} ledger={}",job.id,job.restoredFromDisk,entry.phase(),entry.reason(),job.reservation.createdGameTick(),deadline(job.reservation),job.observedTurns,job.budgetEnds,job.pressureDeferrals,job.snapshot.size(),entry.plans().size(),job.deliveryIndex,job.originIndex,job.clockRolledBack,entry.ledger());
+        RogTrace.event(Stage.R11,"STRESS_JOB_SUMMARY","job={} restored={} phase={} reason={} created={} deadline={} turns={} budgetEnds={} pressureDeferrals={} snapshotCells={} planCount={} delivered={} origins={} rollback={} sessionCapDeferrals={} waitDeferrals={} lastProgressTick={} lastWaitCell={} ledger={}",job.id,job.restoredFromDisk,entry.phase(),entry.reason(),job.reservation.createdGameTick(),deadline(job.reservation),job.observedTurns,job.budgetEnds,job.pressureDeferrals,job.snapshot.size(),entry.plans().size(),job.deliveryIndex,job.originIndex,job.clockRolledBack,job.sessionCapDeferrals,job.waitDeferrals,job.lastProgressTick,job.lastWaitCell,entry.ledger());
         remove(job);
     }
     private static WorldCommitCore.Intent derivedIntent(Job job,PlannedNode plan){

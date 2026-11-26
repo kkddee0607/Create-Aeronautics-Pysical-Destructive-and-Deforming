@@ -5,6 +5,7 @@ final class StressPropagationTest {
     @Test void cycle(){StressPropagationSelfTest.cycle();}
     @Test void elasticityOnce(){StressPropagationSelfTest.elasticityOnce();}
     @Test void budgetAndTtl(){StressPropagationSelfTest.budgetAndTtl();}
+    @Test void independentRootWait(){StressPropagationSelfTest.independentRootWait();}
     @Test void ownerBoundary(){StressPropagationSelfTest.ownerBoundary();}
     @Test void stale(){StressPropagationSelfTest.stale();}
     @Test void minimumAfterMerge(){StressPropagationSelfTest.minimumAfterMerge();}

@@ -19,7 +19,6 @@ final class BilateralContactSurface {
     private static final double PENETRATION=1.0/32.0; // Actual shape-to-shape separation bound; NOT loosened.
     // Native impact witnesses can be noisy. Candidate acceptance is NOT damage authorization:
     // real opposing exterior shapes must pass positiveOverlap() before any F is assigned.
-    private static final double WITNESS_TOLERANCE=1.0/16.0;
     private static final double FACE_OPPOSITION=.98;
     private static final double EPS=1.0e-5;
     private static final double MIN_AREA=1.0e-10;
@@ -45,8 +44,15 @@ final class BilateralContactSurface {
     record Result(List<Match> matches,int checks,boolean incomplete,String gate) {
         Result { matches=List.copyOf(matches); }
     }
+    /** Observed relative normal displacement, not a fabricated contact pose.
+     * Used only for planar, tangent-invariant motion across captured samples. */
+    record Sweep(double minShift,double maxShift) {}
     record Frame(FrameMath.Pose a,FrameMath.Pose b,MovePlan.SignedAxes inwardA,
-                 MovePlan.SignedAxes inwardB,FrameMath.Vec contactA,FrameMath.Vec contactB) {
+                 MovePlan.SignedAxes inwardB,FrameMath.Vec contactA,FrameMath.Vec contactB,Sweep sweep) {
+        Frame(FrameMath.Pose a,FrameMath.Pose b,MovePlan.SignedAxes inwardA,
+              MovePlan.SignedAxes inwardB,FrameMath.Vec contactA,FrameMath.Vec contactB){
+            this(a,b,inwardA,inwardB,contactA,contactB,null);
+        }
         Frame {
             Objects.requireNonNull(a);Objects.requireNonNull(b);Objects.requireNonNull(inwardA);
             Objects.requireNonNull(inwardB);Objects.requireNonNull(contactA);Objects.requireNonNull(contactB);
@@ -61,6 +67,9 @@ final class BilateralContactSurface {
     /** Each *single* native record carries both effect-phase poses. Never mix
      * its transform with a different contact's pose or penetration delta. */
     static Frame fromRecord(GameImpactCredit.Pair pair,Contact record,long tick) {
+        return fromRecord(pair,record,tick,List.of());
+    }
+    static Frame fromRecord(GameImpactCredit.Pair pair,Contact record,long tick,List<CollisionFrame.Snapshot> pre) {
         if(pair==null||record==null){if(RogTrace.sample(Stage.R03,"RECORD_MISSING"))RogTrace.detail(Stage.R03,"RECORD_MISSING","pair={} recordPresent={}",pair,record!=null);return null;}
         if(record.serverTick()!=tick){if(RogTrace.sample(Stage.R03,"RECORD_TICK_MISMATCH"))RogTrace.detail(Stage.R03,"RECORD_TICK_MISMATCH","actual={} expected={}",record.serverTick(),tick);return null;}
         if(record.rawImpactScalar()<=0){if(RogTrace.sample(Stage.R03,"RECORD_NONPOSITIVE"))RogTrace.detail(Stage.R03,"RECORD_NONPOSITIVE","scalar={}",record.rawImpactScalar());return null;}
@@ -81,15 +90,56 @@ final class BilateralContactSurface {
             if(opposition>-.80){if(RogTrace.sample(Stage.R03,"NATIVE_NORMAL_OPPOSITION"))RogTrace.detail(Stage.R03,"NATIVE_NORMAL_OPPOSITION","dot={} limit=-0.80 normalA={} normalB={}",opposition,worldA,worldB);return null;} // Candidate hint, not face proof.
             var aa=axis(rawA,tick);var bb=axis(rawB,tick);
             if(aa==null||bb==null){if(RogTrace.sample(Stage.R03,"DOMINANT_AXIS"))RogTrace.detail(Stage.R03,"DOMINANT_AXIS","localNormalA={} localNormalB={} min=0.75",rawA,rawB);return null;}
-            // Effect consumer witness is only an anchor. Significant separation
-            // or lateral drift cannot certify its surrounding block geometry.
-            var d=b.toWorldPoint(localB).minus(a.toWorldPoint(localA));
-            double along=d.dot(worldA);
-            var lateral=d.minus(worldA.times(along));
-            if(!d.finite()||Math.abs(along)>WITNESS_TOLERANCE||lateral.squareLength()>WITNESS_TOLERANCE*WITNESS_TOLERANCE){if(RogTrace.sample(Stage.R03,"WITNESS_DELTA"))RogTrace.detail(Stage.R03,"WITNESS_DELTA","localA={} localB={} along={} lateralSquared={} tolerance={}",localA,localB,along,lateral.squareLength(),WITNESS_TOLERANCE);return null;}
-            if(RogTrace.sample(Stage.R03,"FRAME_VERIFIED"))RogTrace.detail(Stage.R03,"FRAME_VERIFIED","aSide={} bSide={} localA={} localB={} axisA={} axisB={} dot={} along={} lateralSquared={}",aSide,bSide,localA,localB,aa,bb,opposition,along,lateral.squareLength());
-            return new Frame(a,b,aa,bb,localA,localB);
+            // The two native witnesses are independent local anchors, not an
+            // assertion that their effect-phase world positions coincide.
+            var frame=new Frame(a,b,aa,bb,localA,localB);
+            var sweep=observedSweep(frame,record,aSide==1,pre);
+            if(RogTrace.sample(Stage.R03,"FRAME_ANCHOR"))RogTrace.detail(Stage.R03,"FRAME_ANCHOR",
+                    "aSide={} bSide={} localA={} localB={} axisA={} axisB={} dot={} normalSweep={}",aSide,bSide,localA,localB,aa,bb,opposition,sweep);
+            return new Frame(a,b,aa,bb,localA,localB,sweep);
         } catch(RuntimeException invalid){if(RogTrace.sample(Stage.R03,"FRAME_EXCEPTION"))RogTrace.detail(Stage.R03,"FRAME_EXCEPTION","type={}",invalid.getClass().getName());return null;}
+    }
+    private static FrameMath.Vec outward(MovePlan.SignedAxes axis){
+        return new FrameMath.Vec(-axis.x(),-axis.y(),-axis.z());
+    }
+    private static FrameMath.Pose prePose(Contact c,boolean first,CollisionFrame.Snapshot snapshot){
+        int id=first?c.idA():c.idB();if(id==-1)return WORLD;
+        var expected=first?c.frameA():c.frameB();
+        if(expected==null)return null;
+        CollisionFrame.Body found=null;
+        for(var body:snapshot.bodies())if(body.runtimeId()==id){if(found!=null)return null;found=body;}
+        if(found==null||!found.handleValid()||!expected.uuid().equals(found.plotId())||!unit(found.pose())
+                ||found.pose().rotationPoint().minus(expected.pose().rotationPoint()).squareLength()>1e-8)return null;
+        return found.pose();
+    }
+    private static FrameMath.Vec relativePoint(FrameMath.Pose a,FrameMath.Pose b,FrameMath.Vec p){
+        return a.toLocalPoint(b.toWorldPoint(p));
+    }
+    /** No general interpolation or pose correction. The tangent projection and
+     * relative orientation must be invariant in every observed same-tick pose.
+     * A measured change along the normal can bracket a planar contact. */
+    private static Sweep observedSweep(Frame frame,Contact record,boolean first,List<CollisionFrame.Snapshot> pre){
+        if(pre==null||pre.isEmpty())return null;
+        var n=outward(frame.inwardA());
+        var other=frame.a().toLocalNormal(frame.b().toWorldNormal(outward(frame.inwardB())));
+        if(other.plus(n).squareLength()>EPS*EPS)return null;
+        var baseline=relativePoint(frame.a(),frame.b(),frame.contactB());
+        double min=0,max=0;int samples=0;
+        var basis=List.of(new FrameMath.Vec(1,0,0),new FrameMath.Vec(0,1,0),new FrameMath.Vec(0,0,1));
+        for(var snapshot:pre){
+            if(snapshot==null||snapshot.phase()!=CollisionFrame.Phase.PRE_SOLVER
+                    ||snapshot.serverTick()!=record.serverTick()||!record.dimension().equals(snapshot.dimension()))continue;
+            if(!snapshot.containerAvailable()||record.runtimeStamp().known()&&!record.runtimeStamp().sameCapture(snapshot.runtimeStamp()))return null;
+            var a=prePose(record,first,snapshot);var b=prePose(record,!first,snapshot);
+            if(a==null||b==null)return null;
+            for(var e:basis)if(a.toLocalVector(b.toWorldVector(e)).minus(
+                    frame.a().toLocalVector(frame.b().toWorldVector(e))).squareLength()>EPS*EPS)return null;
+            var delta=relativePoint(a,b,frame.contactB()).minus(baseline);
+            double shift=delta.dot(n);
+            if(!Double.isFinite(shift)||delta.minus(n.times(shift)).squareLength()>EPS*EPS)return null;
+            min=Math.min(min,shift);max=Math.max(max,shift);samples++;
+        }
+        return samples>0&&max-min>EPS?new Sweep(min,max):null;
     }
     private static FrameMath.Pose pose(Contact c,boolean first){
         if((first?c.idA():c.idB())==-1)return WORLD;
@@ -113,6 +163,10 @@ final class BilateralContactSurface {
     }
     private static int axis(MovePlan.SignedAxes axes){return axes.x()!=0?0:axes.y()!=0?1:2;}
 
+    private static double coordinate(FrameMath.Vec p,int axis){return axis==0?p.x():axis==1?p.y():p.z();}
+    private static boolean onAnchorPlane(Frame f,List<FrameMath.Vec> face,int side){
+        int ax=axis(f.inward(side));return Math.abs(coordinate(face.getFirst(),ax)-coordinate(f.contact(side),ax))<=PENETRATION;
+    }
     /** A native record is an anchor, not a separate surface or F credit. The
      * same pair of rigid poses and oriented faces is scanned only once, even
      * when the solver reports many different anchors for that component. */
@@ -120,9 +174,11 @@ final class BilateralContactSurface {
         return reconstructAll(frame==null?List.of():List.of(frame),source,maxChecks);
     }
     private record FrameKey(FrameMath.Pose a,FrameMath.Pose b,
-                            int ax,int ay,int az,int bx,int by,int bz) {
+                            int ax,int ay,int az,int bx,int by,int bz,Sweep sweep,double planeA,double planeB) {
         FrameKey(Frame f){this(f.a(),f.b(),f.inwardA().x(),f.inwardA().y(),f.inwardA().z(),
-                f.inwardB().x(),f.inwardB().y(),f.inwardB().z());}
+                f.inwardB().x(),f.inwardB().y(),f.inwardB().z(),f.sweep(),
+                f.sweep()==null?0:coordinate(f.contactA(),axis(f.inwardA())),
+                f.sweep()==null?0:coordinate(f.contactB(),axis(f.inwardB())));}
     }
     /** A completed connected contact component is independent of unrelated native
      * records and of the 100-record Sable telemetry cap. Incomplete components
@@ -312,8 +368,15 @@ final class BilateralContactSurface {
             if(i==opposingNormal){
                 // A face lies on a cell boundary. Either side of that plane
                 // can contain a real exterior B face; retain both cells.
-                low[i]=(int)Math.floor(bounds[i]-EPS);
-                high[i]=(int)Math.floor(bounds[i+3]+EPS);
+                if(f.sweep()!=null){
+                    double plane=coordinate(f.contact(1-side),i);
+                    if(plane<Integer.MIN_VALUE+3||plane>Integer.MAX_VALUE-3)return null;
+                    low[i]=(int)Math.floor(plane-PENETRATION);
+                    high[i]=(int)Math.floor(plane+PENETRATION);
+                }else{
+                    low[i]=(int)Math.floor(bounds[i]-EPS);
+                    high[i]=(int)Math.floor(bounds[i+3]+EPS);
+                }
             }else{
                 // Tangential zero-area intersections (only a shared grid
                 // edge) cannot receive F. Removing them here avoids the
@@ -373,15 +436,18 @@ final class BilateralContactSurface {
             if(dot>-FACE_OPPOSITION){if(RogTrace.sample(Stage.R04,"FACE_OPPOSITION"))RogTrace.detail(Stage.R04,"FACE_OPPOSITION","a={} b={} dot={} limit={}",a.allocated(),b.allocated(),dot,-FACE_OPPOSITION);return false;}
             int ax=axis(f.inwardA()),bx=axis(f.inwardB());
             for(var boxA:a.boxes())for(var boxB:b.boxes()){
-                var pa=faceCorners(boxA,a.allocated(),ax,f.inwardA()).stream().map(f.a()::toWorldPoint).toList();
-                var pb=faceCorners(boxB,b.allocated(),bx,f.inwardB()).stream().map(f.b()::toWorldPoint).toList();
+                var fa=faceCorners(boxA,a.allocated(),ax,f.inwardA());
+                var fb=faceCorners(boxB,b.allocated(),bx,f.inwardB());
+                boolean swept=f.sweep()!=null&&onAnchorPlane(f,fa,0)&&onAnchorPlane(f,fb,1);
+                var pa=fa.stream().map(f.a()::toWorldPoint).toList();
+                var pb=fb.stream().map(f.b()::toWorldPoint).toList();
                 var u=pa.get(1).minus(pa.get(0)).unit();var v=n.cross(u).unit();
                 var areaA=project(pa,pa.getFirst(),u,v);
                 var areaB=project(pb,pa.getFirst(),u,v);
                 boolean close=true;
                 for(var p:pb){
                     double depth=p.minus(pa.getFirst()).dot(n);
-                    if(depth>EPS||depth<-PENETRATION){if(RogTrace.sample(Stage.R04,"FACE_GAP_OR_PENETRATION"))RogTrace.detail(Stage.R04,"FACE_GAP_OR_PENETRATION","a={} b={} depth={} maxGap={} minDepth={}",a.allocated(),b.allocated(),depth,EPS,-PENETRATION);close=false;break;}
+                    if(!contactDepth(f,depth,swept)){if(RogTrace.sample(Stage.R04,"FACE_GAP_OR_PENETRATION"))RogTrace.detail(Stage.R04,"FACE_GAP_OR_PENETRATION","a={} b={} depth={} maxGap={} minDepth={}",a.allocated(),b.allocated(),depth,EPS,-PENETRATION);close=false;break;}
                 }
                 if(!close)continue;
                 var intersection=clip(ccw(areaB),ccw(areaA));
@@ -396,7 +462,7 @@ final class BilateralContactSurface {
                 double denom=nb.dot(n);
                 if(Math.abs(denom)<FACE_OPPOSITION){if(RogTrace.sample(Stage.R04,"PROJECTION_OPPOSITION"))RogTrace.detail(Stage.R04,"PROJECTION_OPPOSITION","a={} b={} denom={} limit={}",a.allocated(),b.allocated(),denom,FACE_OPPOSITION);continue;}
                 double distance=-nb.dot(centerA.minus(pb.getFirst()))/denom;
-                if(distance>EPS||distance<-PENETRATION){if(RogTrace.sample(Stage.R04,"PROJECTED_DISTANCE"))RogTrace.detail(Stage.R04,"PROJECTED_DISTANCE","a={} b={} distance={} maxGap={} minDepth={}",a.allocated(),b.allocated(),distance,EPS,-PENETRATION);continue;}
+                if(!contactDepth(f,distance,swept)){if(RogTrace.sample(Stage.R04,"PROJECTED_DISTANCE"))RogTrace.detail(Stage.R04,"PROJECTED_DISTANCE","a={} b={} distance={} maxGap={} minDepth={}",a.allocated(),b.allocated(),distance,EPS,-PENETRATION);continue;}
                 var centerB=centerA.plus(n.times(distance));
                 var localA=f.a().toLocalPoint(centerA);
                 var localB=f.b().toLocalPoint(centerB);
@@ -405,6 +471,13 @@ final class BilateralContactSurface {
             }
         }catch(RuntimeException invalid){if(RogTrace.sample(Stage.R04,"OVERLAP_EXCEPTION"))RogTrace.detail(Stage.R04,"OVERLAP_EXCEPTION","type={}",invalid.getClass().getName());return false;}
         return false;
+    }
+    private static boolean contactDepth(Frame f,double gap,boolean swept){
+        if(!Double.isFinite(gap))return false;
+        if(gap<=EPS&&gap>=-PENETRATION)return true;
+        // All projected points must cross the actual contact plane in the
+        // measured relative normal range. Persistent gaps stay rejected.
+        return swept&&gap+f.sweep().minShift()<=EPS&&gap+f.sweep().maxShift()>=-EPS;
     }
     /** Geometry-only hook for pure algorithm tests. Live pairing also requires
      * a separate read-only exterior audit of neighboring blocks. */

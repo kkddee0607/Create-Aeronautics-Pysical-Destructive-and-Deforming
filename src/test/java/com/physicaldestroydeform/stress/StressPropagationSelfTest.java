@@ -16,9 +16,9 @@ public final class StressPropagationSelfTest {
     private static void check(boolean b){if(!b)throw new AssertionError();}
     private static Session run(List<Seed> seeds,Graph g){var s=new Session(seeds,P,D,0);for(int t=0;t<=1400&&!s.ledger().finished();t++)s.advance(g,t,512);check(s.ledger().finished());near(s.ledger().reservedQ(),s.ledger().accountedQ());return s;}
     public static void main(String[] args){
-        diamond();cycle();elasticityOnce();budgetAndTtl();ownerBoundary();stale();minimumAfterMerge();direction();deniedShare();stop();nodeCap();rootIdentity();unbreakable();permutationAndTickSlicing();randomGraphs();invalidInputs();
+        diamond();cycle();elasticityOnce();budgetAndTtl();independentRootWait();ownerBoundary();stale();minimumAfterMerge();direction();deniedShare();stop();nodeCap();rootIdentity();unbreakable();permutationAndTickSlicing();randomGraphs();invalidInputs();
         subthresholdRootsMerge();subthresholdParentsMerge();
-        System.out.println("StressPropagationSelfTest: 18 scenarios passed (includes 200 deterministic random graphs)");
+        System.out.println("StressPropagationSelfTest: 19 scenarios passed (includes 200 deterministic random graphs)");
     }
     static void diamond(){
         var a=node(0,0);var b=node(1,0);var c=node(0,1);var d=node(1,1);
@@ -52,6 +52,17 @@ public final class StressPropagationSelfTest {
         var u=new Session(List.of(new Seed(a,10,null)),P,D,0);
         u.advance(cell->Probe.unavailable(),0,512);near(u.ledger().pendingQ(),10);
         u.advance(cell->Probe.unavailable(),1200,512);near(u.ledger().unusedQ(),10);
+    }
+    static void independentRootWait(){
+        var a=node(0,0);var b=node(2,0);var target=node(1,0);var missing=a.cell().offset(-1,0,0);
+        var g=read(graph(a,b,target));
+        var s=new Session(List.of(new Seed(a,10,null),new Seed(b,10,null)),P,D,0);
+        s.advance(cell->cell.equals(missing)?Probe.unavailable():g.read(cell),0,512);
+        check(!s.rootsExpanded());check(s.rootsResolved()==1);check(s.partialPlans().isEmpty());
+        near(s.ledger().pendingQ(),20);check(s.waiting());
+        s.advance(g,1,512);check(s.rootsExpanded());check(s.ledger().finished());
+        var expected=run(List.of(new Seed(a,10,null),new Seed(b,10,null)),g);
+        check(s.plans().equals(expected.plans()));near(s.ledger().accountedQ(),20);
     }
     static void ownerBoundary(){
         var a=node(0,0);var other=new Node(new Cell("PLOT:other:1",1,0,0),"stone","rev0",M);

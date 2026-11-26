@@ -89,6 +89,21 @@ public final class OwnerResolver {
                                     Vec nativeOwnerPoint) {
         return auditNative(server,dimension,stableOwner,allocatedPos,nativeOwnerPoint,null);
     }
+    /** A live owner has a fixed Sable allocation; outside that allocation is
+     * not an unloaded cell of that owner. Never infer this from hasChunk(). */
+    public static boolean outsidePlotAllocation(LevelPlot plot,ChunkPos chunk){
+        return plot!=null&&chunk!=null&&!plot.contains(chunk);
+    }
+    /** Query the actual Sable holder table, not Minecraft's transient loaded flag. */
+    public static boolean unallocatedPlotChunk(LevelPlot plot,ChunkPos chunk){
+        return plot!=null&&chunk!=null&&plot.contains(chunk)&&plot.getChunkHolder(plot.toLocal(chunk))==null;
+    }
+    static boolean knownNoShape(Check checked){
+        return checked.status()==Status.BLOCK_UNAVAILABLE&&switch(checked.detail()){
+            case "BLOCK_MISSING_OR_AIR","WORLD_SHAPE_EMPTY","PLOT_SHAPE_EMPTY","OWNER_BOUNDARY","PLOT_UNALLOCATED_CHUNK" -> true;
+            default -> false;
+        };
+    }
     private static final class ShapeCapture { VoxelShape value; }
     private static Check auditNative(MinecraftServer server,String dimension,String stableOwner,BlockPos allocatedPos,
                                      Vec nativeOwnerPoint,ShapeCapture capture) {
@@ -294,10 +309,7 @@ public final class OwnerResolver {
                         return ForcePropagation.Probe.present(new GameImpactCredit.Target(owner,
                                 target.x()+","+target.y()+","+target.z(),target.fingerprint()));
                     }
-                    if(checked.status()==Status.BLOCK_UNAVAILABLE && (
-                            checked.detail().equals("BLOCK_MISSING_OR_AIR")
-                            || checked.detail().equals("WORLD_SHAPE_EMPTY")
-                            || checked.detail().equals("PLOT_SHAPE_EMPTY")))
+                    if(knownNoShape(checked))
                         return ForcePropagation.Probe.empty();
                     return ForcePropagation.Probe.unknown();
                 } catch(RuntimeException unsafe) {return ForcePropagation.Probe.unknown();}
@@ -343,10 +355,7 @@ public final class OwnerResolver {
                 return ForcePropagation.Probe.present(new GameImpactCredit.Target(from.ownerKey(),
                         key.x()+","+key.y()+","+key.z(),key.fingerprint()));
             }
-            if(checked.status()==Status.BLOCK_UNAVAILABLE && (
-                    checked.detail().equals("BLOCK_MISSING_OR_AIR") ||
-                    checked.detail().equals("WORLD_SHAPE_EMPTY") ||
-                    checked.detail().equals("PLOT_SHAPE_EMPTY")))
+            if(knownNoShape(checked))
                 return ForcePropagation.Probe.empty();
             return ForcePropagation.Probe.unknown();
         }catch(RuntimeException invalidOwnerOrPosition){return ForcePropagation.Probe.unknown();}
@@ -398,6 +407,13 @@ public final class OwnerResolver {
         BlockState state;
         BlockPos keyPosition=pos; // WORLD is absolute; Plot key is embedded-accessor relative.
         if(proposed.space()==Space.SABLE_PLOT) {
+            if(actualPlot==null||actualPlot.getSubLevel()==null||!proposed.stablePlotId().equals(actualPlot.getSubLevel().getUniqueId())){
+                var expected=container.getSubLevel(proposed.stablePlotId());
+                if(expected instanceof ServerSubLevel current&&!current.isRemoved()&&current.getLevel()==level
+                        &&proposed.stablePlotId().equals(current.getUniqueId())&&current.getPlot()!=null
+                        &&outsidePlotAllocation(current.getPlot(),chunk))
+                    return Check.failed(Status.BLOCK_UNAVAILABLE,"OWNER_BOUNDARY");
+            }
             if(actualPlot==null || !(actualPlot.getSubLevel() instanceof ServerSubLevel sub)
                     || sub.isRemoved() || sub.getLevel()!=level || sub.getPlot()!=actualPlot
                     || container.getSubLevel(proposed.stablePlotId())!=sub
@@ -410,6 +426,8 @@ public final class OwnerResolver {
             ChunkPos centerChunk=actualPlot.getCenterChunk();
             BlockPos relative=toEmbeddedPosition(pos,center);
             keyPosition=relative;
+            if(unallocatedPlotChunk(actualPlot,chunk))
+                return Check.failed(Status.BLOCK_UNAVAILABLE,"PLOT_UNALLOCATED_CHUNK");
             if(!actualPlot.getEmbeddedLevelAccessor().hasChunk(
                     chunk.x-centerChunk.x,chunk.z-centerChunk.z))
                 return Check.failed(Status.BLOCK_UNAVAILABLE,"PLOT_CHUNK_UNLOADED");
@@ -425,7 +443,7 @@ public final class OwnerResolver {
             } catch(RuntimeException ex) {return Check.failed(Status.BLOCK_UNAVAILABLE,"PLOT_BLOCK_READ_FAILED");}
         } else {
             if(actualPlot!=null || container.inBounds(chunk))
-                return Check.failed(Status.OWNER_UNRESOLVED,"PLOT_AREA_MUST_NOT_FALLBACK_TO_WORLD");
+                return Check.failed(Status.BLOCK_UNAVAILABLE,"OWNER_BOUNDARY");
             if(!level.hasChunkAt(pos)) return Check.failed(Status.BLOCK_UNAVAILABLE,"WORLD_CHUNK_UNLOADED");
             try {
                 state=level.getBlockState(pos);

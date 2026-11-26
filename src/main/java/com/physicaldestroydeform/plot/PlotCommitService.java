@@ -533,6 +533,10 @@ public final class PlotCommitService {
         if(watch){stressWatched.add(cell);restoredOwners.computeIfAbsent(owner.uuid(),k->new HashSet<>()).add(owner);}
         else stressWatched.remove(cell);
     }
+    public String stressBoundary(SparseStateKey key){
+        if(fault||core.ioFault()||!server.isSameThread()||isMoveQuarantined(key)||movement.fences.held(key))return null;
+        return gateway.stressBoundary(key);
+    }
     public WorldCommitCore.Observation readStress(SparseStateKey key){
         if(fault||core.ioFault()||!server.isSameThread()||isMoveQuarantined(key)||movement.fences.held(key))return null;
         // Saved graph snapshots contain the exact incarnation used for recovery binding in the origin/output.

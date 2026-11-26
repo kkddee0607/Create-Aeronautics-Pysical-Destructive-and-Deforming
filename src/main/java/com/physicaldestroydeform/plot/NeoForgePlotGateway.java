@@ -242,6 +242,29 @@ public final class NeoForgePlotGateway implements WorldCommitCore.WorldGateway,M
                     new BlockPos(real.x(),real.y(),real.z()),real);
         }catch(RuntimeException|LinkageError invalid){return null;}
     }
+    /** Read-only graph boundary. Never synthesize a mutation observation or
+     * infer AIR from an unloaded Minecraft chunk. Require the live owner fence. */
+    String stressBoundary(SparseStateKey virtual){
+        if(!isServerThread()||!PlotKeyCodec.isPlotStorage(virtual))return null;
+        try{
+            var real=PlotKeyCodec.real(virtual);var owner=PlotOwnerFence.Owner.of(real);
+            if(fence.orphaned(owner)||service.isSplitParent(real.dimension(),owner.uuid()))return null;
+            var level=dimension(real.dimension());if(level==null)return null;
+            var container=SubLevelContainer.getContainer(level);if(container==null)return null;
+            if(!(container.getSubLevel(owner.uuid()) instanceof ServerSubLevel sub)||sub.isRemoved()
+                    ||sub.getLevel()!=level||!owner.uuid().equals(sub.getUniqueId())||sub.getPlot()==null
+                    ||!fence.verify(owner,stamp(sub),false))return null;
+            UUID parent=sub.getSplitFromSubLevel();
+            if(parent!=null&&!service.verifiedLineage(real.dimension(),parent,owner.uuid()))return null;
+            var plot=sub.getPlot();var center=plot.getCenterBlock();
+            var chunk=new ChunkPos(new BlockPos(Math.addExact(center.getX(),real.x()),
+                    Math.addExact(center.getY(),real.y()),Math.addExact(center.getZ(),real.z())));
+            if(com.physicaldestroydeform.collision.OwnerResolver.outsidePlotAllocation(plot,chunk))return "OUTSIDE_OWNER";
+            if(container.getPlot(chunk)==plot&&com.physicaldestroydeform.collision.OwnerResolver.unallocatedPlotChunk(plot,chunk))
+                return "UNALLOCATED_PLOT_CHUNK";
+            return null;
+        }catch(RuntimeException|LinkageError invalid){return null;}
+    }
     /** Bind only on a newly issued Q with a live matching owner; no speculative recovery bind. */
     public boolean bindOnOffer(SparseStateKey original){
         if(!"PLOT".equals(original.ownerSpace()))return false;

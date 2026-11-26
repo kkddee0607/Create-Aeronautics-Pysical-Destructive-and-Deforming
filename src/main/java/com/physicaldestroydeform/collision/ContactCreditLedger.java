@@ -24,7 +24,7 @@ import java.util.function.Function;
 public final class ContactCreditLedger {
     public static final String LEGACY_ALGORITHM_REVISION = "PDD-IDS-1.0.7/0.4.1-spreadFix-MULTIFACE-70-30";
     public static final String PREVIOUS_ALGORITHM_REVISION = "PDD-IDS-1.0.9/0.6.1-CONTACT-ELASTIC-CHAIN";
-    public static final String ALGORITHM_REVISION = "PDD-IDS-1.0.9/0.6.1-originlastFix-DIRECT-SEEDS-ALPHA04";
+    public static final String ALGORITHM_REVISION = "PDD-IDS-1.0.9/0.6.1-finalLastFix-BILATERAL-SEEDS-ALPHA04";
     // Bounded but large enough for a 100x100 fully verified planar contact patch.
     public static final int MAX_TARGETS_PER_SIDE = 16_384;
     public static final int MAX_REGIONS = 2 * MAX_TARGETS_PER_SIDE;
@@ -446,7 +446,10 @@ public final class ContactCreditLedger {
             if(materials.apply(seed)==null){
                 unresolved+=split;withheld++;missingMaterial++;if(RogTrace.sample(Stage.R06,"CONTACT_SEED_MATERIAL_MISSING"))RogTrace.detail(Stage.R06,"CONTACT_SEED_MATERIAL_MISSING","seed={} withheldF={}",seed,split);continue;
             }
-            var ordered=new ArrayList<>(candidates);ordered.sort(ContactCreditLedger::compareCandidateSets);
+            // A complete possible set already wholly covered by independently
+            // proved individual peers cannot introduce another distinct peer.
+            // Do not discard an empty or partially covered observation.
+            var ordered=new ArrayList<>(normalizeOpponents(candidates));ordered.sort(ContactCreditLedger::compareCandidateSets);
             double part=split/ordered.size();
             double received=0;
             for(var possible:ordered){
@@ -471,6 +474,14 @@ public final class ContactCreditLedger {
                 plan.endReason()+" CONTACT_EXACT="+exact+" CONTACT_CONSENSUS="+consensus+" CONTACT_WITHHELD="+withheld+
                         " CONTACT_UNPROVED="+unproved+" CONTACT_MISSING_MATERIAL="+missingMaterial+" CONTACT_MIXED_E="+mixedMaterial,plan.audit(),
                 plan.contactDampedF()+contactDamped,unresolved,contactDamped);
+    }
+    static Set<List<GameImpactCredit.Target>> normalizeOpponents(Set<List<GameImpactCredit.Target>> candidates){
+        var exact=new HashSet<GameImpactCredit.Target>();
+        for(var possible:candidates)if(possible.size()==1)exact.add(possible.getFirst());
+        if(exact.isEmpty())return candidates;
+        var normalized=new HashSet<>(candidates);
+        normalized.removeIf(possible->possible.size()>1&&exact.containsAll(possible));
+        return normalized;
     }
     private static int consensusElasticity(List<GameImpactCredit.Target> possible,
             Function<GameImpactCredit.Target,MaterialProperties> materials){

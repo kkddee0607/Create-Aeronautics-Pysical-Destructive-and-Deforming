@@ -84,11 +84,13 @@ class FinalFixContactSurfaceTest {
         var result=BilateralContactSurface.reconstruct(anchored,twoComponents(),32);
         assertEquals(List.of(new BilateralContactSurface.Match(target(0,0),target(1,0))),result.matches());
     }
-    @Test void aLargeInconsistentNativeWitnessIsRejectedBeforeShapeTraversal(){
+    @Test void aLargeInconsistentNativeWitnessCannotAuthorizeShapeTraversal(){
         var witness=new NativeCollisionTelemetry.Contact(7,-1,100,
                 0,1,0,0,-1,0,.5,65,.5,.5,65.2,.5,DIM,5,
                 new NativeCollisionTelemetry.OwnerFrame(PLOT_UUID,POSE),null,true);
-        assertNull(BilateralContactSurface.fromRecord(PAIR,witness,5));
+        var frame=BilateralContactSurface.fromRecord(PAIR,witness,5);
+        assertNotNull(frame);
+        assertTrue(BilateralContactSurface.reconstruct(frame,twoComponents(),32).matches().isEmpty());
     }
     @Test void sourceReadBudgetExhaustionCannotCertifyAnOpenContactComponent(){
         var reader=new BilateralContactSurface.ShapeReader(){

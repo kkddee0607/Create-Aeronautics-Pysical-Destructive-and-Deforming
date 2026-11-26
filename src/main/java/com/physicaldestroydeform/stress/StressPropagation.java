@@ -87,6 +87,7 @@ public final class StressPropagation {
         }
     }
     private record Edge(Node node,State state,double weight) {}
+    private record RootOutcome(List<Edge> edges,Unused reason) {}
     private static final int[][] FACES={{-1,0,0},{0,-1,0},{0,0,-1},{0,0,1},{0,1,0},{1,0,0}};
     private StressPropagation(){}
     private static void validQ(double q){if(!Double.isFinite(q)||q<0)throw new IllegalArgumentException("invalid Q");}
@@ -104,6 +105,12 @@ public final class StressPropagation {
         private final List<PlannedNode> plans=new ArrayList<>();
         private final EnumMap<Unused,Double> unused=new EnumMap<>(Unused.class);
         private final double reserved;
+        // Probe independent roots, then distribute in the original canonical order.
+        // A yielded cursor always resumes the same queue head; no Q is published
+        // until the full root barrier has been crossed.
+        private final Deque<Integer> pendingRoots=new ArrayDeque<>();
+        private final Map<Integer,RootOutcome> readyRoots=new HashMap<>();
+        private final BitSet triedRoots=new BitSet();
         private int seedIndex,depth=1,nodes;
         private double absorbed,direct,plastic;
         private long lastTick=Long.MIN_VALUE;
@@ -128,6 +135,7 @@ public final class StressPropagation {
                 total+=s.q;
             }
             validQ(total);reserved=total;seeds=List.copyOf(sorted);
+            for(int i=0;i<seeds.size();i++)pendingRoots.addLast(i);
         }
         public boolean matchesOrigin(List<Seed> roots,Policy p,DamageModel.Settings d,long tick) {
             // Runtime reservation roots are already canonical; keep the
@@ -146,25 +154,43 @@ public final class StressPropagation {
             if(tick<started||tick<lastTick||allowance<0)throw new IllegalArgumentException("invalid stress clock/budget");
             if(finished)return 0;
             waiting=false;
-            if(lastTick!=tick){lastTick=tick;usedThisTick=0;}
+            if(lastTick!=tick){lastTick=tick;usedThisTick=0;triedRoots.clear();}
             int available=Math.min(allowance,policy.maxNodesPerTick-usedThisTick),used=0;
             boolean expired=tick-started>=policy.ttlTicks;
             // Roots are visited at construction: stress can never return to an original direct target.
-            while(seedIndex<seeds.size()&&used<available){
-                Seed seed=seeds.get(seedIndex);used++;
-                if(seed.q==0){seedIndex++;continue;}
-                Probe current=checked(graph,seed.node.cell);
-                if(current.state==State.UNAVAILABLE&&!expired){waiting=true;break;}
-                if(current.state!=State.SOLID||!current.node.equals(seed.node)){
-                    close(current.state==State.UNAVAILABLE?Unused.UNAVAILABLE_TTL:Unused.STALE_NODE,seed.q);
-                }else{
-                    List<Edge> edges=edges(graph,seed.node,seed.direction);
-                    if(edges==null&&!expired){waiting=true;break;}
-                    if(edges==null)close(Unused.UNAVAILABLE_TTL,seed.q);
-                    else distribute(seed.q,seed.direction,edges,frontier);
+            while(!pendingRoots.isEmpty()&&used<available){
+                int index=pendingRoots.getFirst();
+                if(triedRoots.get(index)){waiting=true;break;}
+                Seed seed=seeds.get(index);used++;
+                RootOutcome outcome=null;
+                if(seed.q==0)outcome=new RootOutcome(List.of(),null);
+                else {
+                    Probe current=checked(graph,seed.node.cell);
+                    if(current.state==State.UNAVAILABLE){
+                        if(expired)outcome=new RootOutcome(null,Unused.UNAVAILABLE_TTL);
+                    }else if(current.state!=State.SOLID||!current.node.equals(seed.node))
+                        outcome=new RootOutcome(null,Unused.STALE_NODE);
+                    else {
+                        List<Edge> edges=edges(graph,seed.node,seed.direction);
+                        if(edges!=null)outcome=new RootOutcome(edges,null);
+                        else if(expired)outcome=new RootOutcome(null,Unused.UNAVAILABLE_TTL);
+                    }
                 }
-                seedIndex++;
+                // No queue mutation until all required reads returned. BudgetEnd
+                // may replay the partial operation through StressProbeCursor.
+                pendingRoots.removeFirst();
+                if(outcome==null){triedRoots.set(index);pendingRoots.addLast(index);}
+                else {
+                    readyRoots.put(index,outcome);
+                    RootOutcome ready;
+                    while((ready=readyRoots.remove(seedIndex))!=null){
+                        Seed canonical=seeds.get(seedIndex++);
+                        if(ready.reason!=null)close(ready.reason,canonical.q);
+                        else distribute(canonical.q,canonical.direction,ready.edges,frontier);
+                    }
+                }
             }
+            if(!pendingRoots.isEmpty()&&triedRoots.get(pendingRoots.getFirst()))waiting=true;
             while(seedIndex==seeds.size()&&!frontier.isEmpty()&&used<available){
                 var entry=frontier.firstEntry();Arrival a=entry.getValue();used++;
                 if(depth>policy.maxDepth||nodes>=policy.maxNodes){
@@ -270,11 +296,12 @@ public final class StressPropagation {
             if(!finished)throw new IllegalStateException("stress level planning not sealed");
             return List.copyOf(plans);
         }
+        int rootsResolved(){return seeds.size()-pendingRoots.size();}
         public boolean rootsExpanded(){return seedIndex==seeds.size();}
         public boolean boundedSealing(){return sealBounded;}
         public void stop(){
             if(finished)return;
-            close(Unused.STOPPED,ledger().pendingQ);deferred=0;seedIndex=seeds.size();frontier.clear();next.clear();finished=true;verify();
+            close(Unused.STOPPED,ledger().pendingQ);deferred=0;seedIndex=seeds.size();pendingRoots.clear();readyRoots.clear();triedRoots.clear();frontier.clear();next.clear();finished=true;verify();
         }
         void verify(){
             Ledger l=ledger();

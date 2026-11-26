@@ -56,6 +56,18 @@ public class NativeCollisionTelemetryTest {
         assertEquals(uuid,sample.frameA().uuid());
         assertNull(sample.frameB());
     }
+    @Test void oneEffectPollFreezesEachBodyFrameOnceWithoutChangingRawRecords(){
+        NativeCollisionTelemetry.drain();
+        double[] one={9,-1,42,1,0,0,-1,0,0,.1,.2,.3,4,5,6};
+        double[] raw=new double[one.length*3];for(int i=0;i<3;i++)System.arraycopy(one,0,raw,i*one.length,one.length);
+        double[] before=raw.clone();var calls=new java.util.concurrent.atomic.AtomicInteger();
+        var zero=new com.physicaldestroydeform.collision.FrameMath.Vec(0,0,0);
+        var pose=new com.physicaldestroydeform.collision.FrameMath.Pose(zero,zero,new com.physicaldestroydeform.collision.FrameMath.Vec(1,1,1),0,0,0,1);
+        var uuid=java.util.UUID.fromString("10000000-0000-0000-0000-000000000001");
+        NativeCollisionTelemetry.capture(raw,"minecraft:overworld",12,id->{calls.incrementAndGet();return new NativeCollisionTelemetry.OwnerFrame(uuid,pose);});
+        var samples=NativeCollisionTelemetry.drain();assertEquals(3,samples.size());assertEquals(1,calls.get());
+        assertArrayEquals(before,raw);assertSame(samples.getFirst().frameA(),samples.getLast().frameA());
+    }
     @Test void nativeHundredRecordCapSaturationIsNotReportedAsConfirmedDrop() {
         NativeCollisionTelemetry.drain();
         long before=NativeCollisionTelemetry.nativeCapSaturatedPolls();

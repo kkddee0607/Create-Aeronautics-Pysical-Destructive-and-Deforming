@@ -57,6 +57,9 @@ public final class NativeCollisionTelemetry {
         int n = nativeData.length / FIELDS;
         if(n==NATIVE_EFFECT_MAX_RECORDS)NATIVE_CAP_SATURATED.incrementAndGet();
         TOTAL.addAndGet(n);
+        // The consumer pose is sampled once per body in this single native poll.
+        // Do not reuse it across calls or collapse the original raw records.
+        var frames=new java.util.HashMap<Integer,java.util.Optional<OwnerFrame>>();
         for (int offset = 0; offset < nativeData.length; offset += FIELDS) {
             // A NaN ID would cast to zero and could falsely impersonate a
             // real Sable body. Reject the entire malformed native record.
@@ -84,14 +87,16 @@ public final class NativeCollisionTelemetry {
                     nativeData[offset+9], nativeData[offset+10], nativeData[offset+11],
                     nativeData[offset+12], nativeData[offset+13], nativeData[offset+14],
                     dimension,serverTick,
-                    frame(frameReader,(int)nativeData[offset]),frame(frameReader,(int)nativeData[offset+1]),
+                    frame(frameReader,(int)nativeData[offset],frames),frame(frameReader,(int)nativeData[offset+1],frames),
                     n==NATIVE_EFFECT_MAX_RECORDS,runtimeStamp));
         }
     }
-    private static OwnerFrame frame(IntFunction<OwnerFrame> reader,int id) {
+    private static OwnerFrame frame(IntFunction<OwnerFrame> reader,int id,java.util.Map<Integer,java.util.Optional<OwnerFrame>> frames) {
         if(id==-1 || reader==null) return null;
-        try { return reader.apply(id); }
-        catch(RuntimeException unavailable) {return null;}
+        return frames.computeIfAbsent(id,key->{
+            try{return java.util.Optional.ofNullable(reader.apply(key));}
+            catch(RuntimeException unavailable){return java.util.Optional.empty();}
+        }).orElse(null);
     }
     /** Immutable evidence: the pose belongs to the exact Sable effect consumer phase. */
     public record OwnerFrame(UUID uuid, FrameMath.Pose pose) {

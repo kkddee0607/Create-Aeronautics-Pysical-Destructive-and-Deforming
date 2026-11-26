@@ -34,15 +34,26 @@ class OriginLastFixContactTest {
         var result=SableContactRegions.collect(PAIR,List.of(witness(.5)),(c,owner,budget)->
                 owner.equals(PAIR.a().stableKey())?new SableContactRegions.Check(List.of(target(0,0),target(0,1)),2)
                         :new SableContactRegions.Check(List.of(target(1,0)),1));
-        assertNull(result.firstA());assertEquals(2,result.reservedA());
+        assertNull(result.firstA());assertEquals(1,result.reservedA());
         assertEquals(List.of(new ContactCreditLedger.Region(null,target(1,0),List.of(target(0,0),target(0,1)))),result.regions());
     }
-    @Test void repeatedAmbiguousCandidatesReserveDistinctCellsOnly(){
+    @Test void repeatedAmbiguousEvidenceReservesOnePossibleAdditionalCell(){
         var c=witness(.5);
         var result=SableContactRegions.collect(PAIR,List.of(c,c,c),(r,owner,budget)->
                 owner.equals(PAIR.a().stableKey())?new SableContactRegions.Check(List.of(target(0,0),target(0,1)),2)
                         :new SableContactRegions.Check(List.of(target(1,0)),1));
-        assertEquals(2,result.reservedA());assertEquals(1,result.regions().size());
+        assertEquals(1,result.reservedA());assertEquals(1,result.regions().size());
+    }
+    @Test void differentEvidenceWithOverlappingCandidatesCanReserveTwoDistinctCells(){
+        var result=SableContactRegions.collect(PAIR,List.of(witness(.5),witness(.6)),(r,owner,budget)->
+                owner.equals(PAIR.a().stableKey())?new SableContactRegions.Check(List.of(target(0,0),target(0,1)),2)
+                        :new SableContactRegions.Check(List.of(target(1,0)),1));
+        assertEquals(2,result.reservedA());assertNull(result.firstA());
+    }
+    @Test void maximumMatchingDoesNotConfuseThreeEvidenceWithThreeAvailableCells(){
+        var groups=List.of(List.of(target(0,0)),List.of(target(0,0)),List.of(target(0,1),target(0,2)));
+        assertEquals(2,SableContactRegions.additionalReservation(groups,java.util.Set.of()));
+        assertEquals(1,SableContactRegions.additionalReservation(groups,java.util.Set.of(target(0,0))));
     }
     @Test void unresolvedNativeEvidenceIsNotErasedByUnrelatedSurface(){
         var nativeRegion=new ContactCreditLedger.Region(target(0,0),null);
@@ -50,12 +61,19 @@ class OriginLastFixContactTest {
                 List.of(new BilateralContactSurface.Match(target(0,0),target(1,1))));
         assertTrue(merged.contains(nativeRegion));
     }
-    @Test void certifiedPairDoesNotDuplicateAlreadyCoveredOpponent(){
+    @Test void certifiedPairIsDistinctFromAnUnresolvedOpposingSet(){
         var a=target(0,0);var b=target(1,0);var c=target(1,1);
         var existing=new ContactCreditLedger.Region(a,null,List.of(b,c));
         var merged=SableContactRegions.mergeBilateralPairs(List.of(existing),List.of(new BilateralContactSurface.Match(a,b)));
-        assertEquals(2,merged.size());assertTrue(merged.contains(existing));
+        assertEquals(3,merged.size());assertTrue(merged.contains(existing));
+        assertTrue(merged.contains(new ContactCreditLedger.Region(a,null,List.of(b))));
         assertTrue(merged.contains(new ContactCreditLedger.Region(null,b,List.of(a))));
+    }
+    @Test void whollyCoveredAmbiguousOpposingSetIsNotAnotherWeightedContact(){
+        var b=target(1,0);var c=target(1,1);var d=target(1,2);
+        var candidates=java.util.Set.of(List.of(b),List.of(c),List.of(b,c),List.of(c,d),List.<GameImpactCredit.Target>of());
+        var result=ContactCreditLedger.normalizeOpponents(candidates);
+        assertEquals(java.util.Set.of(List.of(b),List.of(c),List.of(c,d),List.<GameImpactCredit.Target>of()),result);
     }
     @Test void materialOnlyCandidatesAndReservedFKeepBudgetConserved(){
         var policy=new GameImpactCredit(GameImpactCredit.Settings.provisional());

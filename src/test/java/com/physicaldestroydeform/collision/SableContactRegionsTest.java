@@ -140,7 +140,7 @@ final class SableContactRegionsTest {
                 (e,owner,remaining)->new SableContactRegions.Check(List.of(target(owner,1),target(owner,2)),2));
         assertEquals(SableContactRegions.Status.NO_VERIFIED_REGION,result.status());
         assertTrue(result.regions().isEmpty());assertEquals(2,result.checksA());assertEquals(2,result.checksB());
-        assertEquals(2,result.reservedA());assertEquals(2,result.reservedB());
+        assertEquals(1,result.reservedA());assertEquals(1,result.reservedB());
     }
     @Test void incompleteCandidateCoverageCannotAuthorizeConsensus(){
         var result=SableContactRegions.collect(PAIR,List.of(contact(1)),

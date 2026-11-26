@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only originlastFix contact routing guard; not compilation or JUnit."""
+"""Read-only finalLastFix contact routing guard; not compilation or JUnit."""
 from pathlib import Path
 import re
 root=Path(__file__).resolve().parents[1]
@@ -12,4 +12,4 @@ for term in ('SableContactRegions.prepare(', 'prepared.expand()', 'regionLedger.
     if term not in bridge:errors.append(f'missing live direct-seed wiring: {term}')
 if bridge.find('var damageRegions=')>bridge.find('regionLedger.issueContactSeeds('):errors.append('expansion must precede sealing')
 if errors:raise SystemExit('\n'.join(errors))
-print('OriginlastFix static contact routing guard PASS: obsolete paths absent, direct/expansion/sealing wiring present')
+print('FinalLastFix static contact routing guard PASS: obsolete paths absent, direct/expansion/sealing wiring present')
