@@ -109,4 +109,28 @@ class OriginFixSurfaceTest {
         assertTrue(merged.contains(new ContactCreditLedger.Region(a,null,List.of(b))));
         assertEquals(3,merged.size());
     }
+    @Test void closedComponentDoesNotEraseExistingNonemptyOppositeEvidence(){
+        var a=target(0,0,0);var b=target(1,0,0);var c=target(1,1,0);
+        var prior=new ContactCreditLedger.Region(a,null,List.of(c));
+        var merged=SableContactRegions.mergeBilateralPairs(List.of(prior),
+                List.of(new BilateralContactSurface.Match(a,b)));
+        assertTrue(merged.contains(prior));
+        assertTrue(merged.contains(new ContactCreditLedger.Region(a,null,List.of(b))));
+        assertTrue(merged.contains(new ContactCreditLedger.Region(null,b,List.of(a))));
+    }
+    @Test void certifiedComponentDoesNotSuppressUnpairedNativeSeed(){
+        var a=target(0,0,0);var b=target(1,0,0);var other=target(0,4,0);
+        var evidence=List.of(new ContactCreditLedger.Region(a,b),new ContactCreditLedger.Region(other,null));
+        assertEquals(java.util.Set.of(other),SableContactRegions.unresolvedSeeds(evidence));
+        assertTrue(SableContactRegions.needsFallback(true,false,evidence));
+        assertFalse(SableContactRegions.needsFallback(true,false,List.of(evidence.getFirst())));
+        assertTrue(SableContactRegions.needsFallback(true,true,List.of(evidence.getFirst())));
+    }
+    @Test void speculativeHaloCannotDiluteNativeContactBudget(){
+        var a=target(0,0,0);var b=target(0,1,0);
+        var patch=new ContactFacePatch.Result(List.of(a,b),2,"halo",java.util.Set.of(),
+                java.util.Map.of(a,new FrameMath.Vec(.5,65,.5)),List.of());
+        assertEquals(List.of(a),SableContactRegions.pendingPatchTargets(patch,java.util.Set.of()));
+        assertTrue(SableContactRegions.pendingPatchTargets(patch,java.util.Set.of(a)).isEmpty());
+    }
 }

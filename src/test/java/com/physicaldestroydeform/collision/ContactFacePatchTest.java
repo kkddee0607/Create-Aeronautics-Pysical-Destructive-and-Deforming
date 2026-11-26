@@ -330,4 +330,18 @@ class ContactFacePatchTest {
         assertEquals(65,shared.y(),1e-10);
     }
 
+    @Test void knownNativeSeedAlsoReceivesStrictFootprintAnchorWithoutAnotherShapeRead(){
+        var root=target(0,0);
+        var patch=ContactFacePatch.reconstruct(DIM,OWNER,BlockPos.ZERO,List.of(root),corners(),
+                (pos,point)->target(pos.getX(),pos.getZ()),true);
+        assertEquals(new FrameMath.Vec(.5,65,.5),patch.interiorPoints().get(root));
+        assertEquals(24,patch.attempted());
+        assertFalse(patch.added().contains(root));
+    }
+    @Test void strictRuntimePatchDoesNotReadSparseLineOrObliqueExplorationCells(){
+        var patch=ContactFacePatch.reconstruct(DIM,OWNER,BlockPos.ZERO,List.of(target(0,0)),
+                List.of(corners().getFirst()),(pos,point)->{fail("no exploratory shape reads");return null;},true);
+        assertEquals(0,patch.attempted());
+        assertTrue(patch.added().isEmpty());
+    }
 }

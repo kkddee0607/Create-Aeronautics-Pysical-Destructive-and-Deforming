@@ -95,7 +95,8 @@ public final class StressRuntime {
         final Reservation reservation;
         final List<WorldCommitCore.Intent> orderedOrigins;
         final boolean plotOrigins;
-        final boolean clockRolledBack;
+        final boolean clockRolledBack,restoredFromDisk;
+        long observedTurns,budgetEnds,pressureDeferrals;
         Session session;
         final StressProbeCursor probes=new StressProbeCursor();
         final Map<Cell,Probe> snapshot=new TreeMap<>();
@@ -107,7 +108,8 @@ public final class StressRuntime {
         long pressureBytes=-1,pressureLogical=-1,pressureRetryAt;
         boolean invalidated,finished,originsRecovered;
         long lastQueuePressureLog=Long.MIN_VALUE;
-        Job(Entry entry){
+        Job(Entry entry,boolean restoredFromDisk){
+            this.restoredFromDisk=restoredFromDisk;
             id=entry.reservation().creditId();reservation=entry.reservation();
             orderedOrigins=com.physicaldestroydeform.deform.MoveRuntime.reverseOrder(reservation.origins());
             plotOrigins=!orderedOrigins.isEmpty()&&PlotKeyCodec.isPlotStorage(orderedOrigins.getFirst().key());
@@ -162,7 +164,7 @@ public final class StressRuntime {
                 if(prior!=null&&!prior.equals(entry.reservation().creditId()))throw new IOException("stress source origin reserved twice");
             }
             // CLOSED still has source origins. Repair a crash after reservation/handoff but before direct submit.
-            add(entry);
+            add(entry,true);
         }
         // Old archives dropped creation time while retaining DEFERRED commit
         // ownership. The production TTL is constant and lets us recover it
@@ -190,8 +192,8 @@ public final class StressRuntime {
                 Double.parseDouble(System.getProperty("pdd.stressMinQ",Double.toString(d.minQ()))),d.ttlTicks());}
         catch(RuntimeException invalid){return d;}
     }
-    private void add(Entry entry){
-        Job job=new Job(entry);jobs.put(job.id,job);order.addLast(job.id);
+    private void add(Entry entry,boolean restored){
+        Job job=new Job(entry,restored);jobs.put(job.id,job);order.addLast(job.id);
         if(job.orderedOrigins.isEmpty())job.originsRecovered=true;
         else if(!job.clockRolledBack)originOrder(job).addLast(job.id);
         if(entry.phase()!=Phase.CLOSED&&!job.clockRolledBack){
@@ -237,7 +239,7 @@ public final class StressRuntime {
         journal.reserve(reservation);
         if(RogTrace.sample(Stage.R11,"RESERVED"))RogTrace.detail(Stage.R11,"RESERVED","job={} roots={} Q={} created={} deadline={} materialGeneration={}",id,ordered.size(),reservation.reservedQ(),reservation.createdGameTick(),deadline(reservation),materials.generation());
         for(var origin:ordered)originJobs.put(origin.applyId(),id);
-        add(journal.get(id));
+        add(journal.get(id),false);
         if(TRACE&&ordered.size()>8192)log.info("[PDD-STRESS-LEDGER] phase=LARGE_RESERVED id={} roots={} Q={} deadline={} activeBytes={} decodedBytes={} QReissue=false",
                 id,ordered.size(),reservation.reservedQ(),deadline(reservation),journal.activeBytes(),journal.activeLogicalBytes());
         return true;
@@ -355,10 +357,12 @@ public final class StressRuntime {
             int turns=order.size();
             while(turns-->0&&!order.isEmpty()&&used<workCap){
                 String id=order.removeFirst();Job job=jobs.get(id);if(job==null)continue;
-                if(job.pressureBytes==journal.activeBytes()&&job.pressureLogical==journal.activeLogicalBytes()&&tick<job.pressureRetryAt){order.addLast(id);continue;}
+                if(job.pressureBytes==journal.activeBytes()&&job.pressureLogical==journal.activeLogicalBytes()&&tick<job.pressureRetryAt){job.pressureDeferrals++;order.addLast(id);continue;}
                 job.pressureBytes=-1;
-                try{step(job,tick);}catch(BudgetEnd exhausted){if(RogTrace.sample(Stage.R11,"WORK_BUDGET"))RogTrace.detail(Stage.R11,"WORK_BUDGET","job={} tick={} used={} cap={}",job.id,tick,used,workCap);/* exact shared allowance; preserve cursors */}
+                job.observedTurns++;
+                try{step(job,tick);}catch(BudgetEnd exhausted){job.budgetEnds++;if(RogTrace.sample(Stage.R11,"WORK_BUDGET"))RogTrace.detail(Stage.R11,"WORK_BUDGET","job={} tick={} used={} cap={}",job.id,tick,used,workCap);/* exact shared allowance; preserve cursors */}
                 catch(CapacityException pressure){
+                    job.pressureDeferrals++;
                     // Quota pressure is not a corrupt save. Retry the exact job,
                     // keep its immutable prefix, and allow other jobs to drain.
                     long created=job.reservation.createdGameTick(),ttl=job.reservation.policy().ttlTicks();
@@ -405,7 +409,7 @@ public final class StressRuntime {
         // it would consume a cap=1 allowance forever and starve delivery/acknowledgment.
         if(expired&&(entry.phase()==Phase.RESERVED||!entry.ledger().finished()||entry.ledger().pendingQ()!=0)){
             charge();journal.closeResidual(job.id,"ORIGINAL_TTL_UNUSED");job.finished=true;
-            if(RogTrace.sample(Stage.R11,"TTL_EXPIRED"))RogTrace.detail(Stage.R11,"TTL_EXPIRED","job={} tick={} created={} deadline={}",job.id,tick,r.createdGameTick(),deadline(r));
+            RogTrace.event(Stage.R11,"TTL_EXPIRED","job={} tick={} created={} deadline={} restored={} observedTurns={} budgetEnds={} pressureDeferrals={} snapshotCells={}",job.id,tick,r.createdGameTick(),deadline(r),job.restoredFromDisk,job.observedTurns,job.budgetEnds,job.pressureDeferrals,job.snapshot.size());
             entry=journal.get(job.id);
         }else if(MaterialRegistry.generation()!=r.materialGeneration()&&(!job.finished||entry.ledger()!=null&&entry.ledger().pendingQ()!=0)){
             charge();journal.closeResidual(job.id,"MATERIAL_GENERATION_CHANGED_UNUSED");job.finished=true;
@@ -610,7 +614,7 @@ public final class StressRuntime {
             rollbackJobsRemaining--;
             rollbackJobsReconciled++;
         }
-        if(RogTrace.sample(Stage.R11,"ARCHIVED"))RogTrace.detail(Stage.R11,"ARCHIVED","job={} phase={} planCount={} delivered={} rollback={}",job.id,entry.phase(),entry.plans().size(),job.deliveryIndex,job.clockRolledBack);
+        RogTrace.event(Stage.R11,"STRESS_JOB_SUMMARY","job={} restored={} phase={} reason={} created={} deadline={} turns={} budgetEnds={} pressureDeferrals={} snapshotCells={} planCount={} delivered={} origins={} rollback={} ledger={}",job.id,job.restoredFromDisk,entry.phase(),entry.reason(),job.reservation.createdGameTick(),deadline(job.reservation),job.observedTurns,job.budgetEnds,job.pressureDeferrals,job.snapshot.size(),entry.plans().size(),job.deliveryIndex,job.originIndex,job.clockRolledBack,entry.ledger());
         remove(job);
     }
     private static WorldCommitCore.Intent derivedIntent(Job job,PlannedNode plan){

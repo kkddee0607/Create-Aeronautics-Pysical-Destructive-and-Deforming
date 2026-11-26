@@ -145,6 +145,9 @@ final class SuperFixBilateralSurfaceTest {
                 Map.of(),null,ignored->material);
         assertTrue(grant.credited());
         assertTrue(grant.propagationA().unresolvedF()>0);
+        // Missing opposite is one of 25 equal source seeds: 25,000/25=1,000 F.
+        assertEquals(1000,grant.propagationA().directUnresolvedF(),1e-7);
+        assertEquals(grant.propagationA().unresolvedF(),grant.propagationA().directUnresolvedF()+grant.propagationA().propagationUnresolvedF(),1e-7);
         assertEquals(24,grant.propagationB().shares().stream().filter(s->s.layer()==0).count());
         assertEquals(grant.issuedQ(),grant.accounted(),1e-5);
     }

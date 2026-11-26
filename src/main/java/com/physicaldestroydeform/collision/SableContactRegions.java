@@ -186,7 +186,7 @@ public final class SableContactRegions {
         String patchStatus="NOT_ELIGIBLE";
         // One owner may be incomplete while the opposite source-local owner
         // is independently proved. Never discard that already-safe face.
-        if(collected.verified()) {
+        if(collected.verified()&&collected.trace().failure()==AuditFailure.NONE) {
             var joined=new LinkedHashSet<>(collected.regions());
             String[] owners={pair.a().stableKey(),pair.b().stableKey()};
             var pairedSurfaces=new ContactFacePatch.Result[2];
@@ -246,10 +246,19 @@ public final class SableContactRegions {
             int pairRemaining=RUNTIME_MAX_UNIQUE_CELLS_PER_SIDE;
             var validFrames=new java.util.ArrayList<BilateralContactSurface.Frame>();
             if(remainingSurface[0]>0&&remainingSurface[1]>0){
+                int ordinal=0;boolean calibrationLogged=false;
                 for(var witness:visitedRecords){
+                    int index=ordinal++;
                     if(witness==null){surfaceRejected++;continue;}
                     var frame=BilateralContactSurface.fromRecord(pair,witness,witness.serverTick());
-                    if(frame==null){surfaceRejected++;continue;}
+                    if(frame==null){
+                        surfaceRejected++;
+                        if(!calibrationLogged&&RogTrace.enabled()){
+                            ContactPoseDiagnostics.observe(pair,witness,index,directions.diagnosticPreFrames(),nativeBatch);
+                            calibrationLogged=true;
+                        }
+                        continue;
+                    }
                     validFrames.add(frame);
                 }
                 if(!validFrames.isEmpty()){
@@ -269,39 +278,30 @@ public final class SableContactRegions {
             int distinctSurfaceB=(int)surfaceEvidence.stream().map(BilateralContactSurface.Match::b).distinct().count();
             var baseRegions=new ArrayList<>(joined);
             var updatedRegions=mergeBilateralPairs(baseRegions,surfaceEvidence);
-            var seenPairA=new java.util.HashMap<GameImpactCredit.Target,java.util.Set<GameImpactCredit.Target>>();
-            var seenPairB=new java.util.HashMap<GameImpactCredit.Target,java.util.Set<GameImpactCredit.Target>>();
-            for(var r:updatedRegions){
-                if(r.a()!=null){
-                    var targets=r.b()==null?r.opposingCandidates():List.of(r.b());
-                    seenPairA.computeIfAbsent(r.a(),k->new java.util.HashSet<>()).addAll(targets);
-                }
-                if(r.b()!=null){
-                    var targets=r.a()==null?r.opposingCandidates():List.of(r.a());
-                    seenPairB.computeIfAbsent(r.b(),k->new java.util.HashSet<>()).addAll(targets);
-                }
-            }
-            boolean allPairsProved=!surfaceEvidence.isEmpty();
-            for(var pairEvidence:surfaceEvidence)if(!seenPairA.getOrDefault(pairEvidence.a(),java.util.Set.of()).contains(pairEvidence.b())
-                    ||!seenPairB.getOrDefault(pairEvidence.b(),java.util.Set.of()).contains(pairEvidence.a())){
-                allPairsProved=false;break;
-            }
             // A capped *telemetry sample* is not grounds to reject a fully
             // closed geometric contact component. The cap still prevents any
             // claim that ALL unobserved components are known, and never grants
             // movement direction. These are separate proof levels.
-            boolean certifiedSurface=allPairsProved;
+            boolean certifiedSurface=!surfaceEvidence.isEmpty()&&updatedRegions!=baseRegions;
             boolean nativeSaturated=visitedRecords.stream().anyMatch(NativeCollisionTelemetry.Contact::capSaturated);
             boolean completeSurface=certifiedSurface&&surfaceRejected==0
-                    &&!nativeSaturated&&!surfaceReadLimited[0]&&!surfaceReadLimited[1];
+                    &&!nativeSaturated&&!surfaceReadLimited[0]&&!surfaceReadLimited[1]
+                    &&unresolvedSeeds(updatedRegions).isEmpty();
             int surfaceAdded=Math.max(0,updatedRegions.size()-baseRegions.size());
             if(RogTrace.sample(Stage.R04,"SURFACE_MERGE"))RogTrace.detail(Stage.R04,"SURFACE_MERGE","pair={} base={} matches={} distinctA={} distinctB={} merged={} rejected={} certified={} complete={} nativeCap={} remainingA={} remainingB={}",pair,baseRegions.size(),surfaceEvidence.size(),distinctSurfaceA,distinctSurfaceB,updatedRegions.size(),surfaceRejected,certifiedSurface,completeSurface,nativeSaturated,remainingSurface[0],remainingSurface[1]);
             if(certifiedSurface)joined=new LinkedHashSet<>(updatedRegions);
+            // A closed component is not an event-wide certificate. Only unresolved
+            // native evidence and failed components need the legacy bounded search.
+            var unresolvedBefore=unresolvedSeeds(joined);
+            boolean fallback=needsFallback(certifiedSurface,surfaceRejected>0,joined);
+            var certifiedTargets=new java.util.HashSet<GameImpactCredit.Target>();
+            if(certifiedSurface)for(var match:surfaceEvidence){certifiedTargets.add(match.a());certifiedTargets.add(match.b());}
+            int pendingPatch=0,excludedExploration=0;
             // For an incomplete result preserve the previous native/legacy
             // proof path. In particular do not seal a fragment of a large face.
             shapeChecksA+=RUNTIME_MAX_UNIQUE_CELLS_PER_SIDE-collected.checksA()-shapeChecksA-remainingSurface[0];
             shapeChecksB+=RUNTIME_MAX_UNIQUE_CELLS_PER_SIDE-collected.checksB()-shapeChecksB-remainingSurface[1];
-            if(!certifiedSurface || directions.active()) for(int side=0;side<2;side++) {
+            if(fallback || directions.active()) for(int side=0;side<2;side++) {
                 final String owner=owners[side];
                 var originals=new LinkedHashSet<GameImpactCredit.Target>();
                 for(var region:collected.regions()) {
@@ -336,19 +336,25 @@ public final class SableContactRegions {
                     if(patchAxis!=null&&nativeBatch.targetFace(owner,absolute,new FrameMath.Vec(
                             point.x()+offset.getX(),point.y()+offset.getY(),point.z()+offset.getZ()),patchAxis))patchFaces.add(target);
                     return target;
-                });
+                },true);
                 if(side==0){shapeChecksA+=additional[0];attemptedA=patch.attempted();}
                 else {shapeChecksB+=additional[0];attemptedB=patch.attempted();}
-                int size=originals.size()+patch.added().size();
+                var existingTargets=new java.util.HashSet<GameImpactCredit.Target>();
+                for(var region:joined){var target=side==0?region.a():region.b();if(target!=null)existingTargets.add(target);}
+                var pending=fallback?pendingPatchTargets(patch,existingTargets):List.<GameImpactCredit.Target>of();
+                int size=existingTargets.size()+pending.size();
                 if(!exceeded[0] && size<=ContactCreditLedger.MAX_TARGETS_PER_SIDE
-                        && joined.size()+patch.added().size()<=ContactCreditLedger.MAX_REGIONS) {
+                        && joined.size()+pending.size()<=ContactCreditLedger.MAX_REGIONS) {
                     pairedSurfaces[side]=patch;
-                    for(var target:patch.added()){
-                        if(!certifiedSurface)joined.add(side==0?new ContactCreditLedger.Region(target,null):new ContactCreditLedger.Region(null,target));
-                        if(directions.active())directions.patch(target,patch.planarInterior().contains(target)&&patchFaces.contains(target)?patchAxis:null);
-                    }
-                    if(side==0)expandedA=patch.added().size();
-                    else expandedB=patch.added().size();
+                    pendingPatch+=pending.size();
+                    if(fallback)excludedExploration+=patch.added().size()-pending.size();
+                    for(var target:pending)joined.add(side==0?new ContactCreditLedger.Region(target,null):new ContactCreditLedger.Region(null,target));
+                    // Direction evidence alone cannot introduce a new damage seed.
+                    for(var target:patch.added())if(directions.active()&&(certifiedTargets.contains(target)||
+                            fallback&&patch.interiorPoints().containsKey(target)))
+                        directions.patch(target,patch.planarInterior().contains(target)&&patchFaces.contains(target)?patchAxis:null);
+                    if(side==0)expandedA=pending.size();
+                    else expandedB=pending.size();
                 }
                 descriptions.append(side==0?"A=":" B=")
                         .append(exceeded[0]?"SHAPE_BUDGET":size>ContactCreditLedger.MAX_TARGETS_PER_SIDE
@@ -359,7 +365,7 @@ public final class SableContactRegions {
             // revalidated source records on EACH surface. Direction approval is
             // deliberately separate: a sampled native cap must not grant move
             // direction, but it does not invalidate a positive exact-frame hit.
-            if(!certifiedSurface&&pairedSurfaces[0]!=null&&pairedSurfaces[1]!=null&&
+            if(fallback&&pairedSurfaces[0]!=null&&pairedSurfaces[1]!=null&&
                     (!pairedSurfaces[0].interiorPoints().isEmpty()||!pairedSurfaces[1].interiorPoints().isEmpty())){
                 var remaining=new int[]{RUNTIME_MAX_UNIQUE_CELLS_PER_SIDE-collected.checksA()-shapeChecksA,
                         RUNTIME_MAX_UNIQUE_CELLS_PER_SIDE-collected.checksB()-shapeChecksB};
@@ -367,13 +373,19 @@ public final class SableContactRegions {
                 var pairing=pairVerifiedSurfaces(new ArrayList<>(joined),pairedSurfaces,
                         new net.minecraft.core.BlockPos[]{
                             ownerOffsets.get(owners[0]),ownerOffsets.get(owners[1])},directions,
-                        (side,point,axis)->uniquePatchTarget(nativeBatch,owners[side],point,axis,remaining,side));
+                        (side,point,axis)->uniquePatchTarget(nativeBatch,owners[side],point,axis,remaining,side),
+                        Math.max(0,pairRemaining-surfacePairChecks));
                 joined=new LinkedHashSet<>(pairing.regions());
                 pairedPatchA=pairing.pairedA();pairedPatchB=pairing.pairedB();
                 pairProofTestsA=pairing.checksA();pairProofTestsB=pairing.checksB();
                 pairBudgetA=pairing.limitedA();pairBudgetB=pairing.limitedB();
                 shapeChecksA+=firstA-remaining[0];shapeChecksB+=firstB-remaining[1];
             }
+            descriptions.append(" fallback=").append(fallback)
+                    .append(" unresolvedBefore=").append(unresolvedBefore.size())
+                    .append(" unresolvedAfter=").append(unresolvedSeeds(joined).size())
+                    .append(" pendingPatch=").append(pendingPatch)
+                    .append(" excludedExploration=").append(excludedExploration);
             descriptions.append(" bilateralPairs=").append(surfaceMatches)
                     .append(" bilateralCertifiedA=").append(distinctSurfaceA)
                     .append(" bilateralCertifiedB=").append(distinctSurfaceB)
@@ -387,6 +399,8 @@ public final class SableContactRegions {
                     .append(" nativeCapSaturated=").append(nativeSaturated)
                     .append(" sharedFrameCount=").append(validFrames.size());
             patchStatus=descriptions.toString();
+            RogTrace.event(Stage.R04,"CONTACT_COVERAGE","sourceRecords={} baseRegions={} finalRegions={} detail={} authority=NONE",
+                    visitedRecords.size(),baseRegions.size(),joined.size(),patchStatus);
             collected=new Result(new ArrayList<>(joined),
                     collected.status(),collected.checksA()+shapeChecksA,collected.checksB()+shapeChecksB,
                     collected.rejected(),collected.methodA(),collected.methodB(),collected.trace());
@@ -449,8 +463,8 @@ public final class SableContactRegions {
             // A fully certified counterpart supersedes a speculative one-sided
             // seed for the same owner/block. Leaving both adds an empty candidate
             // set and wrongly withholds half of this seed's F.
-            if(region.a()!=null&&region.b()==null&&provedA.contains(region.a())
-                    ||region.b()!=null&&region.a()==null&&provedB.contains(region.b()))continue;
+            if(region.opposingCandidates().isEmpty()&&(region.a()!=null&&region.b()==null&&provedA.contains(region.a())
+                    ||region.b()!=null&&region.a()==null&&provedB.contains(region.b())))continue;
             kept.add(region);
         }
         if(presentA.size()+provedA.stream().filter(t->!presentA.contains(t)).count()>ContactCreditLedger.MAX_TARGETS_PER_SIDE
@@ -472,6 +486,23 @@ public final class SableContactRegions {
         return List.copyOf(kept);
     }
 
+    /** Missing counterpart evidence is tracked per seed, not per owner or event. */
+    static java.util.Set<GameImpactCredit.Target> unresolvedSeeds(java.util.Collection<ContactCreditLedger.Region> regions){
+        var missing=new java.util.HashSet<GameImpactCredit.Target>();
+        for(var r:regions)if(r.opposingCandidates().isEmpty()&&(r.a()==null||r.b()==null))
+            missing.add(r.a()==null?r.b():r.a());
+        return missing;
+    }
+    static boolean needsFallback(boolean certified,boolean failedComponent,java.util.Collection<ContactCreditLedger.Region> regions){
+        return !certified||failedComponent||!unresolvedSeeds(regions).isEmpty();
+    }
+    /** A one-sided halo or line is exploration, not a Layer-0 surface seed.
+     * Positive-area witnessed cells remain pending; unknown opposing evidence
+     * retains its F share instead of redistributing it to other blocks. */
+    static List<GameImpactCredit.Target> pendingPatchTargets(ContactFacePatch.Result patch,java.util.Set<GameImpactCredit.Target> certified){
+        return patch.added().stream().filter(t->patch.interiorPoints().containsKey(t)&&!certified.contains(t)).toList();
+    }
+
     @FunctionalInterface interface SurfaceProbe {
         GameImpactCredit.Target verify(int side,FrameMath.Vec point,
                 com.physicaldestroydeform.deform.MovePlan.SignedAxes inward);
@@ -489,6 +520,11 @@ public final class SableContactRegions {
     static SurfacePairing pairVerifiedSurfaces(List<ContactCreditLedger.Region> regions,
             ContactFacePatch.Result[] patches,net.minecraft.core.BlockPos[] offsets,
             TargetDirections directions,SurfaceProbe proof){
+        return pairVerifiedSurfaces(regions,patches,offsets,directions,proof,RUNTIME_MAX_UNIQUE_CELLS_PER_SIDE);
+    }
+    static SurfacePairing pairVerifiedSurfaces(List<ContactCreditLedger.Region> regions,
+            ContactFacePatch.Result[] patches,net.minecraft.core.BlockPos[] offsets,
+            TargetDirections directions,SurfaceProbe proof,int pairBudget){
         var joined=new LinkedHashSet<>(regions);
         if(patches==null||patches.length!=2||patches[0]==null||patches[1]==null
                 ||offsets==null||offsets.length!=2
@@ -517,8 +553,10 @@ public final class SableContactRegions {
                         :new ContactCreditLedger.Region(null,entry.getKey());
                 if(!joined.contains(previous))continue;
                 var source=offset(entry.getValue(),offsets[side],1);
+                var peers=new LinkedHashSet<GameImpactCredit.Target>();
+                boolean uncertain=false;
                 for(var face:footprintProofs.get(side)){
-                    if(checks[side]>=RUNTIME_MAX_UNIQUE_CELLS_PER_SIDE){limited[side]=true;break targetLoop;}
+                    if(checks[0]+checks[1]>=pairBudget){limited[side]=true;break targetLoop;}
                     checks[side]++;
                     if(!face.face().covers(entry.getValue()))continue;
                     var frame=face.frame();
@@ -526,7 +564,7 @@ public final class SableContactRegions {
                     if(!mapped.finite())continue;
                     var otherCenter=offset(mapped,offsets[1-side],-1);
                     for(var other:footprintProofs.get(1-side)){
-                        if(checks[side]>=RUNTIME_MAX_UNIQUE_CELLS_PER_SIDE){limited[side]=true;break targetLoop;}
+                        if(checks[0]+checks[1]>=pairBudget){limited[side]=true;break targetLoop;}
                         checks[side]++;
                         if(!frame.coherent(other.frame()))continue;
                         var relative=ContactFacePatch.commonSurfacePoint(face.face(),other.face(),
@@ -537,17 +575,20 @@ public final class SableContactRegions {
                         var opposite=offset(relative,offsets[1-side],1);
                         var actualSource=frame.opposite(opposite,!onA);
                         var self=proof.verify(side,actualSource,frame.axis(onA));
-                        if(!entry.getKey().equals(self))continue;
+                        if(!entry.getKey().equals(self)){uncertain=true;continue;}
                         var target=proof.verify(1-side,opposite,frame.axis(!onA));
-                        if(target==null||!seeds[1-side].contains(target))continue;
-                        if(joined.remove(previous)){
-                            joined.add(onA?new ContactCreditLedger.Region(self,null,List.of(target))
-                                    :new ContactCreditLedger.Region(null,self,List.of(target)));
-                            paired[side]++;
-                        }
-                        break;
+                        if(target==null||!seeds[1-side].contains(target)){uncertain=true;continue;}
+                        peers.add(target);
                     }
-                    if(!joined.contains(previous))break;
+                }
+                // A single interior point cannot prove every cell of a multi-peer
+                // surface. Preserve unknown evidence if different peers were found;
+                // the strict bilateral geometry path is the authority for that case.
+                if(!uncertain&&peers.size()==1&&joined.remove(previous)){
+                    var peer=peers.iterator().next();
+                    joined.add(onA?new ContactCreditLedger.Region(entry.getKey(),null,List.of(peer))
+                            :new ContactCreditLedger.Region(null,entry.getKey(),List.of(peer)));
+                    paired[side]++;
                 }
             }
         }

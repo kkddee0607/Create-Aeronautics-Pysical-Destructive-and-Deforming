@@ -33,7 +33,10 @@ public abstract class SableSnapshotPacketDiagnosticMixin {
             for(var entry:entries) {
                 int x=ChunkPos.getX(entry.plotCoordinate());
                 int z=ChunkPos.getZ(entry.plotCoordinate());
-                if(container!=null && container.getSubLevel(x,z) instanceof ClientSubLevel)continue;
+                if(container!=null && container.getSubLevel(x,z) instanceof ClientSubLevel sub){
+                    RogTrace.client("SNAPSHOT_MAPPED","clientDimension={} interpolationTick={} mode={} plotChunkX={} plotChunkZ={} ownerUUID={} outcome=MAPPED_BEFORE_HANDLER",dimension,interpolationTick,mode,x,z,sub.getUniqueId());
+                    continue;
+                }
                 missing++;
                 RogTrace.client("SNAPSHOT_MISSING","clientDimension={} interpolationTick={} mode={} plotChunkX={} plotChunkZ={} containerPresent={} ownerUUID=UNAVAILABLE runtimeBodyId=UNAVAILABLE action=SABLE_HANDLER_UNCHANGED",dimension,interpolationTick,mode,x,z,container!=null);
             }

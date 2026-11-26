@@ -37,7 +37,7 @@ import org.slf4j.LoggerFactory;
 @Mod(PhysicalDestroyDeform.MOD_ID)
 public final class PhysicalDestroyDeform {
     public static final String MOD_ID = "physical_destroy_deform";
-    public static final String BUILD_VERSION = "0.6.1-finalFix-rogFix";
+    public static final String BUILD_VERSION = "0.6.1-lastFix";
     private static final Logger LOGGER = LoggerFactory.getLogger(PhysicalDestroyDeform.class);
     private final AcceptanceReport acceptanceReport = new AcceptanceReport();
     private final RealFixRuntimeBridge bridge = new RealFixRuntimeBridge();
@@ -77,6 +77,10 @@ public final class PhysicalDestroyDeform {
         MaterialRegistry.rebuild(event.getServer(), LOGGER);
         LOGGER.info("[PDD-COPYCAT] phase=START compatibility={} policy={}",
                 com.physicaldestroydeform.material.CopycatMaterial.compatibilityStatus(),com.physicaldestroydeform.material.CopycatMaterial.POLICY);
+        // Registry mismatch is external compatibility evidence, not a reason to remap blocks.
+        var catwalk=net.minecraft.resources.ResourceLocation.tryParse("copycats:copycat_catwalk");
+        if(catwalk!=null)LOGGER.info("[PDD-COPYCAT] phase=REGISTRY id={} blockRegistered={} itemRegistered={} authority=NONE",
+                catwalk,net.minecraft.core.registries.BuiltInRegistries.BLOCK.containsKey(catwalk),net.minecraft.core.registries.BuiltInRegistries.ITEM.containsKey(catwalk));
         bridge.loadPreview(event.getServer(), LOGGER);
         try {
             worldCommit=new WorldCommitService(event.getServer(),
@@ -112,7 +116,7 @@ public final class PhysicalDestroyDeform {
             WorldBlockMutationTracker.attachPlot(null);
             LOGGER.error("[PDD-STRESS-LEDGER] phase=START status=HALTED reason=JOURNAL_INIT_FAILED mutations=OFF",unsafeStressJournal);
         }
-        LOGGER.info("[PDD-0.6.1] phase=START revision=0.6.1-finalFix-rogFix CONTACT_ELASTIC_ALPHA04_PERSISTENT_CONTACT bridge=READ_ONLY nativeScalar=GAME_FORCE_PROXY " +
+        LOGGER.info("[PDD-0.6.1] phase=START revision=0.6.1-lastFix CONTACT_ELASTIC_ALPHA04_PERSISTENT_CONTACT bridge=READ_ONLY nativeScalar=GAME_FORCE_PROXY " +
                 "newNativeABI=NOT_REQUIRED customNullCallback=DISABLED faceRecovery=BILATERAL_VOXEL_SHAPE_CONNECTED worldMutation={} plotMutation={} ",
                 worldCommit==null?"DISABLED":"WORLD_STATIC_ONLY",plotCommit==null?"DISABLED":"SABLE_PLOT");
     }
@@ -173,9 +177,7 @@ public final class PhysicalDestroyDeform {
         finally{
             long ended=System.nanoTime();runtimeDiagnostics.recordTick(ended-started);
             RogTrace.endTick();
-            runtimeDiagnostics.recordPhase(Phase.DIAGNOSTICS,System.nanoTime()-ended);
             if(runtimeDiagnostics.reportDue(ended)){
-                long diagnosticStart=System.nanoTime();
                 try{if(RogTrace.sample(Stage.R13,"REPORT"))RogTrace.detail(Stage.R13,"REPORT","serverTick={} mutationHalted={} worldAvailable={} plotAvailable={} stressAvailable={}",event.getServer().getTickCount(),mutationHalted,worldCommit!=null,plotCommit!=null,stress!=null);runtimeDiagnostics.log(LOGGER);TargetMaterials.logPerformance(LOGGER);
                     if(worldCommit!=null){LOGGER.info("[PDD-STORAGE-PERF] owner=WORLD {}",worldCommit.storagePerformance());
                         LOGGER.info("[PDD-JOURNAL-IO] owner=WORLD {}",worldCommit.ioPerformance());}
@@ -183,8 +185,8 @@ public final class PhysicalDestroyDeform {
                         LOGGER.info("[PDD-JOURNAL-IO] owner=PLOT {}",plotCommit.ioPerformance());}
                     if(stress!=null)LOGGER.info("[PDD-STRESS-IO] {}",stress.ioPerformance());}
                 catch(RuntimeException|LinkageError unavailable){LOGGER.warn("[PDD-PERFORMANCE] status=DIAGNOSTICS_UNAVAILABLE",unavailable);}
-                finally{runtimeDiagnostics.recordPhase(Phase.DIAGNOSTICS,System.nanoTime()-diagnosticStart);}
             }
+            runtimeDiagnostics.recordPhase(Phase.DIAGNOSTICS,System.nanoTime()-ended);
         }
     }
     private void processServerTick(ServerTickEvent.Post event) {

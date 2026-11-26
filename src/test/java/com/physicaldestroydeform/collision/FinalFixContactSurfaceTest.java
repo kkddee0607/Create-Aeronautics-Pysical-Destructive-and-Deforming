@@ -113,4 +113,18 @@ class FinalFixContactSurfaceTest {
             assertEquals(expected,BilateralContactSurface.reconstructAll(frames,twoComponents(),3));
         }finally{com.physicaldestroydeform.diagnostics.RogTrace.stop();}
     }
+    @Test void unknownFirstComponentDoesNotVetoIndependentLaterComponent(){
+        var known=twoComponents();
+        var reader=new BilateralContactSurface.ShapeReader(){
+            @Override public BilateralContactSurface.Cell get(int side,BlockPos p){
+                return p.getX()<2?null:known.get(side,p);
+            }
+            @Override public boolean unresolvedCell(int side,BlockPos p){return p.getX()==0;}
+            @Override public boolean exposed(int side,FrameMath.Vec p,MovePlan.SignedAxes inward){return true;}
+        };
+        var result=BilateralContactSurface.reconstructAll(List.of(frame(.5),frame(2.5)),reader,32);
+        assertTrue(result.incomplete());
+        assertEquals(7,result.matches().size());
+        assertFalse(result.matches().stream().anyMatch(m->m.a().equals(target(0,0))));
+    }
 }

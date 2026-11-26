@@ -1023,6 +1023,15 @@ public final class RealFixRuntimeBridge {
                                     String.valueOf(grant.propagationA().endReason()),
                                     String.valueOf(grant.propagationB().endReason()),
                                     saturatedPoll,String.valueOf(regions.status())));
+                            RogTrace.event(Stage.R06,"F_CREDIT_SUMMARY","credit={} sideA={} sideB={} directUnresolvedA={} directUnresolvedB={} propagationUnresolvedA={} propagationUnresolvedB={} directDampedA={} directDampedB={} contactDampedTotal={} internalDamped={} assignedF={} thresholdDiscardF={} candidateQA={} candidateQB={} preCapQA={} preCapQB={} issuedQ={} allocatedA={} allocatedB={} unusedQ={} fResidual={} qResidual={} endA={} endB={}",
+                                    grant.id(),grant.propagationA().inputF(),grant.propagationB().inputF(),
+                                    grant.propagationA().directUnresolvedF(),grant.propagationB().directUnresolvedF(),
+                                    grant.propagationA().propagationUnresolvedF(),grant.propagationB().propagationUnresolvedF(),
+                                    grant.propagationA().directContactDampedF(),grant.propagationB().directContactDampedF(),
+                                    grant.contactDampedF(),grant.dampedF(),grant.propagationA().assignedF()+grant.propagationB().assignedF(),
+                                    grant.propagationA().audit().thresholdDiscardF()+grant.propagationB().audit().thresholdDiscardF(),
+                                    grant.propagationA().candidateQ(),grant.propagationB().candidateQ(),grant.propagationA().finalQ(),grant.propagationB().finalQ(),
+                                    grant.issuedQ(),grant.allocatedA(),grant.allocatedB(),grant.unused(),fError,qError,grant.propagationA().endReason(),grant.propagationB().endReason());
                             log.info("[PDD-F-INVARIANT] credit={} FInput={} FAccounted={} FError={} " +
                                             "issuedQ={} reservedA={} reservedB={} unusedQ={} QError={} " +
                                             "FStatus={} QStatus={} mutation=OFF",

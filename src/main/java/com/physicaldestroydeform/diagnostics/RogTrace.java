@@ -19,7 +19,11 @@ public final class RogTrace {
     private RogTrace(){}
 
     private record HoldKey(String dimension,String owner,long generation) {}
-    private record Hold(String reason,long since) {}
+    private static final class Hold {
+        final String reason;final long since;long checks=1;
+        Hold(String reason,long since){this.reason=reason;this.since=since;}
+        String reason(){return reason;}long since(){return since;}
+    }
     static final class Count {
         long seen,selected;
         long last=Long.MIN_VALUE;
@@ -93,13 +97,21 @@ public final class RogTrace {
             var old=s.holds.get(key);
             if(reason==null){
                 if(old==null)return;s.holds.remove(key);
-                if(s.sample(Stage.R09,"HOLD_CLEARED"))emit(s,Stage.R09,"HOLD_CLEARED","owner={} previous={} since={} durationTicks={} observedTick={} forceLive={}",key,old.reason(),old.since(),Math.max(0,tick-old.since()),tick,forceLive);
+                if(s.sample(Stage.R09,"HOLD_CLEARED"))emit(s,Stage.R09,"HOLD_CLEARED","owner={} previous={} since={} durationTicks={} observedTick={} forceLive={} holdChecks={}",key,old.reason(),old.since(),Math.max(0,tick-old.since()),tick,forceLive,old.checks);
             }else if(old==null||!reason.equals(old.reason())){
                 if(old==null&&s.holds.size()>=256){s.holds.pollFirstEntry();if(s.sample(Stage.R09,"HOLD_TRACKING_EVICTED"))emit(s,Stage.R09,"HOLD_TRACKING_EVICTED","limit=256 durationForEvictedOwner=UNKNOWN");}
                 s.holds.put(key,new Hold(reason,tick));
                 if(s.sample(Stage.R09,"HOLD_TRANSITION"))emit(s,Stage.R09,"HOLD_TRANSITION","owner={} previous={} new={} previousSince={} previousDuration={} observedTick={} pending={} forceLive={}",key,old==null?"UNTRACKED":old.reason(),reason,old==null?-1:old.since(),old==null?-1:Math.max(0,tick-old.since()),tick,pending,forceLive);
-            }
+            }else old.checks++;
         }catch(RuntimeException|LinkageError ignored){}
+    }
+    /** One compact aggregate per already bounded authorization audit or credit.
+     * Never use for per-cell or per-edge loops. */
+    public static boolean enabled(){return ENABLED&&SERVER.get()!=null;}
+    public static void event(Stage stage,String reason,String format,Object... args){
+        if(!ENABLED)return;
+        try{var s=SERVER.get();if(s!=null&&LOG.isInfoEnabled())emit(s,stage,reason,format,args);}
+        catch(RuntimeException|LinkageError ignored){}
     }
     public static boolean sample(Stage stage,String reason){
         if(!ENABLED)return false;

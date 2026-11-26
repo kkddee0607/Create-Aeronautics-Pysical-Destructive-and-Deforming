@@ -433,7 +433,7 @@ public final class ContactCreditLedger {
                 plan.unresolvedF()+unresolved,plan.candidateQ(),plan.finalQ(),plan.dampedQ(),
                 plan.endReason()+" CONTACT_EXACT="+exact+" CONTACT_CONSENSUS="+consensus+" CONTACT_WITHHELD="+withheld+
                         " CONTACT_UNPROVED="+unproved+" CONTACT_MISSING_MATERIAL="+missingMaterial+" CONTACT_MIXED_E="+mixedMaterial,plan.audit(),
-                plan.contactDampedF()+contactDamped);
+                plan.contactDampedF()+contactDamped,unresolved,contactDamped);
     }
     private static int consensusElasticity(List<GameImpactCredit.Target> possible,
             Function<GameImpactCredit.Target,MaterialProperties> materials){

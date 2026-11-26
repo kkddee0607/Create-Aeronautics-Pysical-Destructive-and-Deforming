@@ -203,6 +203,9 @@ public final class OwnerResolver {
                 }
                 evidence=new Cell(basic,boxes,pos);
                 cells.put(key,evidence);
+                if(basic.verified()&&com.physicaldestroydeform.material.CopycatMaterial.isCopycat(basic.key().fingerprint())
+                        &&com.physicaldestroydeform.diagnostics.RogTrace.sample(com.physicaldestroydeform.diagnostics.RogTrace.Stage.R07,"COPYCAT_SHAPE"))
+                    com.physicaldestroydeform.diagnostics.RogTrace.detail(com.physicaldestroydeform.diagnostics.RogTrace.Stage.R07,"COPYCAT_SHAPE","owner={} allocated={} fingerprint={} shapeBoxCount={}",owner,pos,basic.key().fingerprint(),boxes.size());
             } else reusedCells++;
             Check structural=evidence.identity();
             if(!structural.verified())return new Sample(structural,added);

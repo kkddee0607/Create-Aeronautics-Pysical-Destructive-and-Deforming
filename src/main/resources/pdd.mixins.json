@@ -11,7 +11,10 @@
     "SableAssemblyLineageMixin",
     "SableHeatMapSafetyAccessor",
     "SableHeatMapReadCacheMixin",
-    "SablePlotTickWitnessMixin"
+    "SablePlotTickWitnessMixin",
+    "SableTrackingSendDiagnosticMixin",
+    "SableSnapshotTickAccessor",
+    "SableUdpSendDiagnosticMixin"
   ],
   "client": [
     "SableSnapshotPacketDiagnosticMixin",

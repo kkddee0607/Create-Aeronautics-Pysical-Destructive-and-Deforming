@@ -78,6 +78,12 @@ final class ContactFacePatch {
                               Collection<GameImpactCredit.Target> verified,
                               List<NativeCollisionTelemetry.Contact> records,
                               BiFunction<BlockPos,FrameMath.Vec,GameImpactCredit.Target> shape) {
+        return reconstruct(dimension,owner,gridOffset,verified,records,shape,false);
+    }
+    static Result reconstruct(String dimension,String owner,BlockPos gridOffset,
+                              Collection<GameImpactCredit.Target> verified,
+                              List<NativeCollisionTelemetry.Contact> records,
+                              BiFunction<BlockPos,FrameMath.Vec,GameImpactCredit.Target> shape,boolean strictRuntime) {
         Objects.requireNonNull(dimension);Objects.requireNonNull(owner);
         Objects.requireNonNull(gridOffset);Objects.requireNonNull(verified);
         Objects.requireNonNull(records);Objects.requireNonNull(shape);
@@ -123,9 +129,9 @@ final class ContactFacePatch {
             if(match==null)planes.add(new Plane(witness,record));
             else match.include(witness,record);
         }
-        Set<String> original=new HashSet<>();
-        for(var target:verified)if(owner.equals(target.ownerKey()))original.add(target.localBlock());
-        Set<String> seen=new HashSet<>(original);
+        var original=new HashMap<String,GameImpactCredit.Target>();
+        for(var target:verified)if(owner.equals(target.ownerKey()))original.putIfAbsent(target.localBlock(),target);
+        Set<String> seen=new HashSet<>(original.keySet());
         var added=new ArrayList<GameImpactCredit.Target>();
         var planarInterior=new HashSet<GameImpactCredit.Target>();
         var interiorPoints=new HashMap<GameImpactCredit.Target,FrameMath.Vec>();
@@ -135,6 +141,11 @@ final class ContactFacePatch {
             var points=group.points;
             List<Point> hull=hull(points);
             if(hull.isEmpty()){insufficient++;continue;}
+            // Exploratory halo, line and oblique hulls cannot be paired by the
+            // strict legacy footprint proof. Do not spend live reads on them.
+            if(strictRuntime&&(!group.first.axisAligned()||hull.size()<3||group.maxPlane-group.minPlane>Math.max(PAIR_EPS,SableConsumerTargets.EPSILON))){
+                insufficient++;continue;
+            }
             boolean localHalo=hull.size()==1;
             double tolerance=localHalo?SPARSE_HALO:SURFACE_TOLERANCE;
             int axis=group.first.axis(),u=(axis+1)%3,v=(axis+2)%3;
@@ -182,6 +193,7 @@ final class ContactFacePatch {
             int faceStart=added.size();
             boolean pairable=group.first.axisAligned()&&group.maxPlane-group.minPlane<=PAIR_EPS&&hull.size()>=3;
             boolean faceOverBudget=false;
+            var originalAnchors=new HashMap<GameImpactCredit.Target,FrameMath.Vec>();
             outer:for(int a=u0;a<=u1;a++) {
                 // Convex hull edges intersected with one grid-column band.
                 // This avoids testing an unverified enclosing rectangle.
@@ -197,9 +209,14 @@ final class ContactFacePatch {
                     int[] c=new int[3];c[u]=a;c[v]=b;
                     c[axis]=(int)Math.floor(along-Math.signum(normal[axis])*GRID_EPS);
                     String key=c[0]+","+c[1]+","+c[2];
-                    if(seen.contains(key))continue;
-                    if(attempted>=MAX_AREA){faceOverBudget=true;break outer;}
                     double[] p=new double[3];p[u]=cu;p[v]=cv;p[axis]=along;
+                    if(seen.contains(key)){
+                        var known=original.get(key);
+                        if(known!=null&&pairable&&overlapsCell(hull,a,b))
+                            originalAnchors.putIfAbsent(known,new FrameMath.Vec(p[0],p[1],p[2]));
+                        continue;
+                    }
+                    if(attempted>=MAX_AREA){faceOverBudget=true;break outer;}
                     attempted++;
                     var found=shape.apply(new BlockPos(c[0],c[1],c[2]),
                             new FrameMath.Vec(p[0],p[1],p[2]));
@@ -228,7 +245,10 @@ final class ContactFacePatch {
             } else {
                 faces++;
                 if(localHalo)sparse++;
-                if(pairable)footprints.add(new Footprint(axis,plane,hull,group.records));
+                if(pairable){
+                    footprints.add(new Footprint(axis,plane,hull,group.records));
+                    originalAnchors.forEach(interiorPoints::putIfAbsent);
+                }
             }
         }
         if(faces==0)return new Result(List.of(),attempted,

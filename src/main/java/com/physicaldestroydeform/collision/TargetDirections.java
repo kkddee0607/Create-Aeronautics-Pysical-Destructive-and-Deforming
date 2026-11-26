@@ -53,6 +53,7 @@ public final class TargetDirections {
         if(d.active())SableContactRegions.audit(server,pair.dimension(),pair,contacts,d);
         return d;
     }
+    List<CollisionFrame.Snapshot> diagnosticPreFrames(){return pre;}
     MovePlan.SignedAxes axis(String owner,Contact contact){
         if(!active()||contact.serverTick()!=tick)return null;
         var result=normals.computeIfAbsent(contact,c->normalProofs.computeIfAbsent(NormalKey.of(c),key->{

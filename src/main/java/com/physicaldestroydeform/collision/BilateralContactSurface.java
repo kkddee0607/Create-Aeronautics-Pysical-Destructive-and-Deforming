@@ -141,7 +141,7 @@ final class BilateralContactSurface {
             var search=new Search(group.getFirst(),source,maxChecks-checked,MAX_PAIRS-completed.size());
             completed.addAll(search.run(group));
             checked+=search.checks;
-            if(search.incomplete)incomplete=true;
+            if(search.incomplete||search.anyIncomplete)incomplete=true;
             if(source.budgetExhausted())break;
         }
         return new Result(new ArrayList<>(completed),checked,incomplete,
@@ -159,7 +159,7 @@ final class BilateralContactSurface {
         final Map<BlockPos,Cell> cellsA=new HashMap<>(),cellsB=new HashMap<>();
         final ArrayDeque<Pair> frontier=new ArrayDeque<>();
         int checks;
-        boolean incomplete;
+        boolean incomplete,anyIncomplete;
         Search(Frame frame,ShapeReader source,int maxChecks,int maxPairs){
             this.frame=frame;this.source=source;this.maxChecks=maxChecks;this.maxPairs=maxPairs;
         }
@@ -189,7 +189,13 @@ final class BilateralContactSurface {
             // Each anchor seeds its own connected component. Completed components
             // stay cached, so 100 witnesses on one face do NOT rescan it 100 times.
             for(var witness:anchors){
-                if(incomplete)break;
+                if(incomplete){
+                    anyIncomplete=true;
+                    if(source.budgetExhausted()||checks>=maxChecks||complete.size()>=maxPairs)break;
+                    // Discard only the unfinished traversal. Previously closed
+                    // components remain immutable; unknown cells remain unknown.
+                    incomplete=false;active.clear();queued.clear();frontier.clear();
+                }
                 for(var pa:SableConsumerTargets.cells(witness.contactA())){
                     if(incomplete)break;
                     if(!anchorFace(witness,cell(0,pa),0)){if(RogTrace.sample(Stage.R04,"ANCHOR_A_REJECTED"))RogTrace.detail(Stage.R04,"ANCHOR_A_REJECTED","allocated={} witness={} axis={}",pa,witness.contactA(),witness.inwardA());continue;}

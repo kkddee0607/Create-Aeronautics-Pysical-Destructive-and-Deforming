@@ -1,10 +1,12 @@
-# PDD 0.6.1-finalFix-rogFix — Physical Destructive and Deforming
+# PDD 0.6.1-lastFix — Physical Destructive and Deforming
 
 Minecraft 1.21.1 · Java 21 · NeoForge 21.1.228 · Sable 2.0.6 · Create 6.0.10 · Aeronautics 1.3.2. 선택 호환: Copycats+ 3.0.11.
 
 [통합설계서 1.0.9](.github/workflows/PDD-1.0.9-Integrated-Design-Specification.md) · [originFix-buildFix 검증 보고](docs/verification/PDD-0.6.1-originFix-buildFix.md) · [originFix 구현 이력](docs/verification/PDD-0.6.1-originFix.md).
 
-**현재 배포판: 0.6.1-finalFix-rogFix.** 기존 물리 정책을 유지한 검증용 진단 버전이다. 설치 대상: `build/libs/physical-destroy-deform-0.6.1-finalFix-rogFix.jar`. [rogFix 검증 및 로그 사용법](docs/verification/PDD-0.6.1-finalFix-rogFix.md).
+**현재 배포판: 0.6.1-lastFix.** 양측 접촉 증거 보존, 독립 성분 보완, 탐색 후보와 피해 씨앗 분리 및 제한된 기하 Shadow 계측을 적용한다. 기존 F/Q·콜백·저장 계약 유지. 설치 대상: `build/libs/physical-destroy-deform-0.6.1-lastFix.jar`. [lastFix 검증 보고](docs/verification/PDD-0.6.1-lastFix.md).
+
+**이전 진단판:** [0.6.1-finalFix-rogFix](docs/verification/PDD-0.6.1-finalFix-rogFix.md).
 
 **직전 배포판: 0.6.1-finalFix.** Native 효과 레코드 100개 포화를 이유로 이미 완전히 증명된 독립 접촉면까지 거절하던 전역 승인 게이트를 분리했다. 실제 형상·외부면·접촉 면적·owner/Pose 검증을 통과한 연결 성분은 개별 인증하며, 예산 초과 성분만 보류한다. Native 접촉점 차이는 후보 단계에서만 완화하고 실제 접촉면의 1/32블록 관통 상한, 양의 면적, 두 면 노출 검증을 유지한다. 동일 사건의 F/Q·원장·콜백·내구 저장 순서를 변경하지 않는다. 독립 연결 성분 및 100 Native 레코드의 중복 탐색 회귀 테스트를 추가했다. Sable Rust 100개 원본 제한과 동기 WAL fsync는 이 Java 모드만으로 제거되지 않으며 실측 TPS 개선을 보증하지 않는다. 현재 설치 대상: `build/libs/physical-destroy-deform-0.6.1-finalFix.jar`. 시작 로그·NeoForge 모드 목록 버전을 통일했다. [finalFix 검증 문서](docs/verification/PDD-0.6.1-finalFix.md).
 

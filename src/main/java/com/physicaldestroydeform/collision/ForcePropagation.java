@@ -71,11 +71,18 @@ public final class ForcePropagation {
     }
     public record Result(List<Share> shares, double inputF, double assignedF,
                          double dampedF, double unresolvedF, double candidateQ,
-                         double finalQ, double dampedQ, String endReason, Audit audit, double contactDampedF) {
+                         double finalQ, double dampedQ, String endReason, Audit audit, double contactDampedF,
+                         double directUnresolvedF,double directContactDampedF) {
         public Result {
             shares = List.copyOf(shares);
             Objects.requireNonNull(audit);
         }
+        public Result(List<Share> shares, double inputF, double assignedF, double dampedF,
+                      double unresolvedF, double candidateQ, double finalQ, double dampedQ,
+                      String endReason, Audit audit,double contactDampedF) {
+            this(shares,inputF,assignedF,dampedF,unresolvedF,candidateQ,finalQ,dampedQ,endReason,audit,contactDampedF,0,0);
+        }
+        public double propagationUnresolvedF(){return Math.max(0,unresolvedF-directUnresolvedF);}
         public Result(List<Share> shares, double inputF, double assignedF, double dampedF,
                       double unresolvedF, double candidateQ, double finalQ, double dampedQ,
                       String endReason, Audit audit) {
