@@ -230,6 +230,15 @@ public final class OwnerResolver {
      * Cache the owner/coordinate proof, not an across-tick world view. Each
      * first visit still executes the complete Sable chunk/plot/shape audit.
      * No guessed emptiness, no forced chunk load, no cross-owner reuse. */
+    public static boolean matchesSnapshot(ForcePropagation.NeighborReader reader,GameImpactCredit.Target target){
+        if(reader==null||target==null)return false;
+        try{
+            String[] p=target.localBlock().split(",",-1);
+            if(p.length!=3)return false;
+            var probe=reader.read(target,Integer.parseInt(p[0]),Integer.parseInt(p[1]),Integer.parseInt(p[2]));
+            return probe!=null&&target.equals(probe.target());
+        }catch(RuntimeException unavailable){return false;}
+    }
     public static ForcePropagation.NeighborReader propagationSnapshot(
             MinecraftServer server,String dimension) {
         if(server==null || dimension==null)return (from,x,y,z)->ForcePropagation.Probe.unknown();

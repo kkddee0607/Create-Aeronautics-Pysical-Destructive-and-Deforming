@@ -127,4 +127,18 @@ class FinalFixContactSurfaceTest {
         assertEquals(7,result.matches().size());
         assertFalse(result.matches().stream().anyMatch(m->m.a().equals(target(0,0))));
     }
+    @Test void unknownExteriorCannotBeCachedAsKnownNoncontact(){
+        var known=twoComponents();
+        var reader=new BilateralContactSurface.ShapeReader(){
+            boolean unknown;
+            public BilateralContactSurface.Cell get(int side,BlockPos p){return known.get(side,p);}
+            public boolean exposed(int side,FrameMath.Vec p,MovePlan.SignedAxes axis){
+                if(p.x()>3&&p.x()<4){unknown=true;return false;}return true;
+            }
+            public boolean takeUncertainExterior(){boolean b=unknown;unknown=false;return b;}
+        };
+        var result=BilateralContactSurface.reconstructAll(List.of(frame(.5),frame(2.5),frame(4.5)),reader,32);
+        assertTrue(result.incomplete());
+        assertEquals(List.of(new BilateralContactSurface.Match(target(0,0),target(1,0))),result.matches());
+    }
 }

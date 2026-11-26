@@ -1,41 +1,26 @@
 package com.physicaldestroydeform.collision;
 
-import com.physicaldestroydeform.diagnostics.NativeCollisionTelemetry;
 import java.util.List;
-import net.minecraft.core.BlockPos;
 import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
 
 class SpreadFixContactTest {
-    private static final String DIM="minecraft:overworld", OWNER="WORLD:"+DIM;
-    private static GameImpactCredit.Target at(int x,int z) {
-        return new GameImpactCredit.Target(OWNER,x+",64,"+z,"minecraft:stone");
+    @Test void sparseWitnessDoesNotAddHaloTargets(){
+        var result=SableContactRegions.collect(OriginLastFixContactTest.PAIR,List.of(OriginLastFixContactTest.witness(.5)),
+                (c,owner,remaining)->new SableContactRegions.Check(List.of(new GameImpactCredit.Target(owner,"0,0,0","minecraft:stone")),1));
+        assertEquals(1,result.regions().size());
+        assertEquals(result.regions(),SableContactRegions.mergeBilateralPairs(result.regions(),List.of()));
     }
-    private static NativeCollisionTelemetry.Contact witness(double x,double z) {
-        return new NativeCollisionTelemetry.Contact(7,-1,3000,
-                0,-1,0,0,1,0,0,0,0,x,65,z,DIM,99);
+    @Test void noVerifiedAnchorCannotSynthesizeContact(){
+        var result=SableContactRegions.collect(OriginLastFixContactTest.PAIR,List.of(OriginLastFixContactTest.witness(.5)),
+                (c,owner,remaining)->new SableContactRegions.Check(List.of(),0));
+        assertFalse(result.verified());assertTrue(result.regions().isEmpty());
     }
-    @Test void sparseWitnessAddsOnlyNearbyOwnerVerifiedCells() {
-        var result=ContactFacePatch.reconstruct(DIM,OWNER,BlockPos.ZERO,
-                List.of(at(0,0)),List.of(witness(.5,.5)),
-                (pos,p)->pos.getX()>=0&&pos.getX()<=1&&pos.getZ()>=0&&pos.getZ()<=1
-                        ?at(pos.getX(),pos.getZ()):null);
-        assertTrue(result.reason().contains("sparseLocalHalos=1"));
-        assertEquals(2,result.added().size());
-        assertTrue(result.added().contains(at(1,0)));
-        assertTrue(result.added().contains(at(0,1)));
-        assertFalse(result.added().contains(at(1,1)));
-        assertTrue(result.added().stream().noneMatch(t->t.localBlock().equals("2,64,2")));
-    }
-    @Test void noVerifiedAnchorCannotSynthesizeContact() {
-        var result=ContactFacePatch.reconstruct(DIM,OWNER,BlockPos.ZERO,
-                List.of(at(10,10)),List.of(witness(.5,.5)),(pos,p)->at(pos.getX(),pos.getZ()));
-        assertTrue(result.added().isEmpty());
-        assertEquals("NO_PROVEN_SURFACE",result.reason());
-    }
-    @Test void noShapeMeansNoAddedTargetsEvenWhenWitnessExists() {
-        var result=ContactFacePatch.reconstruct(DIM,OWNER,BlockPos.ZERO,
-                List.of(at(0,0)),List.of(witness(.5,.5)),(pos,p)->null);
-        assertTrue(result.added().isEmpty());
+    @Test void oneSidedShapeWithoutOppositeCannotCreateExtraTargets(){
+        var a=OriginLastFixContactTest.target(0,0);
+        var result=SableContactRegions.collect(OriginLastFixContactTest.PAIR,List.of(OriginLastFixContactTest.witness(.5)),
+                (c,owner,remaining)->new SableContactRegions.Check(owner.equals(a.ownerKey())?List.of(a):List.of(),1));
+        assertEquals(List.of(new ContactCreditLedger.Region(a,null)),result.regions());
+        assertEquals(result.regions(),SableContactRegions.mergeBilateralPairs(result.regions(),List.of()));
     }
 }

@@ -41,6 +41,13 @@ public final class SableConsumerTargets {
         if(frame==null)return null;
         return raw.plus(frame.pose().rotationPoint());
     }
+    /** Raw owner-local outward normal may disambiguate a cached shape face.
+     * This is never an authorization for deformation or a new episode. */
+    static com.physicaldestroydeform.deform.MovePlan.SignedAxes identityAxis(NativeCollisionTelemetry.Contact c,boolean a){
+        try{return com.physicaldestroydeform.deform.MovePlan.quantizeDirection(
+                -(a?c.ax():c.bx()),-(a?c.ay():c.by()),-(a?c.az():c.bz()),true,c.serverTick());}
+        catch(IllegalArgumentException invalid){return null;}
+    }
     /** Pure and bounded: at most eight cells on a voxel boundary, never search radius. */
     public static List<BlockPos> cells(Vec point) {
         if(point==null || !point.finite() ||

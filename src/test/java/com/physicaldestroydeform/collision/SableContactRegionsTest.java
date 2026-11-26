@@ -93,7 +93,8 @@ final class SableContactRegionsTest {
             return new SableContactRegions.Check(List.of(target(owner,0),target(owner,1)),1);
         });
         assertTrue(result.verified());
-        assertEquals(20,result.regions().size());
+        assertEquals(16,result.regions().size());
+        assertEquals(0,result.reservedA());assertEquals(0,result.reservedB());
         assertTrue(result.trace().detail().contains("compactedRegions=false"));
     }
     @Test void thirtyTwoUniquePerSideStillProduceBoundedRegions() {
@@ -134,34 +135,29 @@ final class SableContactRegionsTest {
         assertNull(result.firstA());
         assertNotNull(result.firstB());
     }
-    @Test void multipleVerifiedBlocksInOneSourceContactPreserveBothSidesWithoutInventedPairs() {
+    @Test void multipleCandidatesAreNotAutomaticallyDamageSeeds() {
         var result=SableContactRegions.collect(PAIR,List.of(contact(1)),
-                (e,owner,remaining)->new SableContactRegions.Check(
-                        List.of(target(owner,1),target(owner,2)),2));
-        assertEquals(SableContactRegions.Status.PROVED,result.status());
-        assertEquals(4,result.regions().size());
-        assertEquals(2,result.checksA());
-        assertEquals(2,result.checksB());
-        assertTrue(result.regions().stream().allMatch(r->(r.a()==null)!=(r.b()==null)));
-        assertTrue(result.regions().stream().allMatch(r->r.opposingCandidates().size()==2));
+                (e,owner,remaining)->new SableContactRegions.Check(List.of(target(owner,1),target(owner,2)),2));
+        assertEquals(SableContactRegions.Status.NO_VERIFIED_REGION,result.status());
+        assertTrue(result.regions().isEmpty());assertEquals(2,result.checksA());assertEquals(2,result.checksB());
+        assertEquals(2,result.reservedA());assertEquals(2,result.reservedB());
     }
     @Test void incompleteCandidateCoverageCannotAuthorizeConsensus(){
         var result=SableContactRegions.collect(PAIR,List.of(contact(1)),
-                (e,owner,remaining)->new SableContactRegions.Check(
-                        List.of(target(owner,1),target(owner,2)),2,false,"R2","UNKNOWN_CELL",null,false));
-        assertEquals(4,result.regions().size());
-        assertTrue(result.regions().stream().allMatch(r->r.opposingCandidates().isEmpty()));
+                (e,owner,remaining)->owner.equals(PAIR.a().stableKey())
+                        ?new SableContactRegions.Check(List.of(target(owner,1),target(owner,2)),2,false,"R2","UNKNOWN_CELL",null,false)
+                        :new SableContactRegions.Check(List.of(target(owner,1)),1));
+        assertEquals(1,result.regions().size());assertNull(result.firstA());assertNotNull(result.firstB());
+        assertTrue(result.regions().getFirst().opposingCandidates().isEmpty());
+        assertEquals(8,result.reservedA());
     }
     @Test void uniqueDirectionalFaceCanPairWithoutPromotingOtherShapeCells(){
         var a=target(PAIR.a().stableKey(),1);var b=target(PAIR.b().stableKey(),1);
         var result=SableContactRegions.collect(PAIR,List.of(contact(1)),
                 (record,owner,remaining)->new SableContactRegions.Check(
                         List.of(target(owner,1),target(owner,2)),2,false,"R2","UNIQUE_FACE",target(owner,1)));
-        assertTrue(result.regions().contains(new ContactCreditLedger.Region(a,b)));
-        assertEquals(3,result.regions().size());
-        assertEquals(1,result.regions().stream().filter(r->r.a()!=null&&r.b()!=null).count());
-        assertTrue(result.regions().contains(new ContactCreditLedger.Region(target(PAIR.a().stableKey(),2),null,List.of(b))));
-        assertTrue(result.regions().contains(new ContactCreditLedger.Region(null,target(PAIR.b().stableKey(),2),List.of(a))));
+        assertEquals(List.of(new ContactCreditLedger.Region(a,b)),result.regions());
+        assertEquals(0,result.reservedA());assertEquals(0,result.reservedB());
     }
     @Test void verificationTraceDistinguishesTargetLimitFromCellBudget() {
         var many=new ArrayList<NativeCollisionTelemetry.Contact>();
@@ -257,31 +253,27 @@ final class SableContactRegionsTest {
         assertNotNull(result.firstB());
     }
     @Test void runtimeAcceptsExactlyMaximumDistinctDamageTargets() {
-        var targets=new ArrayList<Target>();
-        for(int i=0;i<ContactCreditLedger.MAX_TARGETS_PER_SIDE;i++)
-            targets.add(target(PAIR.a().stableKey(),i));
-        var result=SableContactRegions.collectWithBudget(PAIR,List.of(contact(1)),
-                (record,owner,remaining)->new SableContactRegions.Check(
-                        owner.equals(PAIR.a().stableKey())?targets:List.of(target(owner,1)),1),
+        var records=new ArrayList<NativeCollisionTelemetry.Contact>();
+        for(int i=0;i<ContactCreditLedger.MAX_TARGETS_PER_SIDE;i++)records.add(contact(i));
+        var result=SableContactRegions.collectWithBudget(PAIR,records,
+                (record,owner,remaining)->new SableContactRegions.Check(List.of(target(owner,
+                        owner.equals(PAIR.a().stableKey())?(int)record.contactAX():1)),1),
                 SableContactRegions.RUNTIME_MAX_UNIQUE_CELLS_PER_SIDE);
         assertEquals(SableContactRegions.Status.PROVED,result.status());
         assertEquals(SableContactRegions.AuditFailure.NONE,result.trace().failure());
-        assertNotNull(result.firstA());
-        assertNotNull(result.firstB());
+        assertEquals(ContactCreditLedger.MAX_TARGETS_PER_SIDE,result.trace().verifiedTargetsA());
+        assertNotNull(result.firstA());assertNotNull(result.firstB());
     }
     @Test void runtimeQuarantinesWhenDistinctDamageTargetsExceedCap() {
-        var targets=new ArrayList<Target>();
-        for(int i=0;i<=ContactCreditLedger.MAX_TARGETS_PER_SIDE;i++)
-            targets.add(target(PAIR.a().stableKey(),i));
-        var result=SableContactRegions.collectWithBudget(PAIR,List.of(contact(1)),
-                (record,owner,remaining)->new SableContactRegions.Check(
-                        owner.equals(PAIR.a().stableKey())?targets:List.of(target(owner,1)),1),
+        var records=new ArrayList<NativeCollisionTelemetry.Contact>();
+        for(int i=0;i<=ContactCreditLedger.MAX_TARGETS_PER_SIDE;i++)records.add(contact(i));
+        var result=SableContactRegions.collectWithBudget(PAIR,records,
+                (record,owner,remaining)->new SableContactRegions.Check(List.of(target(owner,
+                        owner.equals(PAIR.a().stableKey())?(int)record.contactAX():1)),1),
                 SableContactRegions.RUNTIME_MAX_UNIQUE_CELLS_PER_SIDE);
         assertEquals(SableContactRegions.Status.PARTIAL,result.status());
         assertEquals(SableContactRegions.AuditFailure.TARGET_LIMIT_A,result.trace().failure());
-        assertNull(result.firstA());
-        assertNotNull(result.firstB());
+        assertNull(result.firstA());assertNotNull(result.firstB());
         assertTrue(result.trace().detail().contains("overflowA=true"));
     }
-
 }

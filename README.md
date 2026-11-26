@@ -1,10 +1,10 @@
-# PDD 0.6.1-lastFix — Physical Destructive and Deforming
+# PDD 0.6.1-originlastFix — Physical Destructive and Deforming
 
 Minecraft 1.21.1 · Java 21 · NeoForge 21.1.228 · Sable 2.0.6 · Create 6.0.10 · Aeronautics 1.3.2. 선택 호환: Copycats+ 3.0.11.
 
 [통합설계서 1.0.9](.github/workflows/PDD-1.0.9-Integrated-Design-Specification.md) · [originFix-buildFix 검증 보고](docs/verification/PDD-0.6.1-originFix-buildFix.md) · [originFix 구현 이력](docs/verification/PDD-0.6.1-originFix.md).
 
-**현재 배포판: 0.6.1-lastFix.** 양측 접촉 증거 보존, 독립 성분 보완, 탐색 후보와 피해 씨앗 분리 및 제한된 기하 Shadow 계측을 적용한다. 기존 F/Q·콜백·저장 계약 유지. 설치 대상: `build/libs/physical-destroy-deform-0.6.1-lastFix.jar`. [lastFix 검증 보고](docs/verification/PDD-0.6.1-lastFix.md).
+**현재 배포판: 0.6.1-originlastFix.** Native 직접 접촉 씨앗 우선, 모호한 후보의 F 보류, 승인 후 양측 접촉 보완. 단측 halo·재매칭 삭제. 기존 F/Q·콜백·저장 계약 유지. 설치 대상: `build/libs/physical-destroy-deform-0.6.1-originlastFix.jar`. [검증 보고](docs/verification/PDD-0.6.1-originlastFix.md).
 
 **이전 진단판:** [0.6.1-finalFix-rogFix](docs/verification/PDD-0.6.1-finalFix-rogFix.md).
 

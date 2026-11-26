@@ -35,6 +35,7 @@ final class BilateralContactSurface {
         Cell get(int side,BlockPos allocated);
         /** An unknown neighbor is not evidence of empty space. */
         boolean exposed(int side,FrameMath.Vec point,MovePlan.SignedAxes inward);
+        default boolean takeUncertainExterior(){return false;}
         /** Distinguish an unknown cell caused by exhausted read budget from real air. */
         default boolean budgetExhausted(){return false;}
         /** A failed/unloaded cell read is NOT proof that the face terminates. */
@@ -156,6 +157,7 @@ final class BilateralContactSurface {
         final Map<Pair,Match> complete=new LinkedHashMap<>();
         final Map<Pair,Match> active=new LinkedHashMap<>();
         final Set<Pair> queued=new HashSet<>();
+        final Set<Pair> failedComponents=new HashSet<>();
         final Map<BlockPos,Cell> cellsA=new HashMap<>(),cellsB=new HashMap<>();
         final ArrayDeque<Pair> frontier=new ArrayDeque<>();
         int checks;
@@ -171,6 +173,7 @@ final class BilateralContactSurface {
         }
         boolean enqueue(Pair p){
             if(incomplete||complete.containsKey(p)||queued.contains(p))return false;
+            if(failedComponents.contains(p)){incomplete=true;return false;}
             Boolean pass=evaluated.get(p);
             if(pass==null){
                 Cell a=cell(0,p.a()),b=cell(1,p.b());
@@ -179,7 +182,7 @@ final class BilateralContactSurface {
                 if(checks>=maxChecks){incomplete=true;if(RogTrace.sample(Stage.R04,"PAIR_CHECK_CAP"))RogTrace.detail(Stage.R04,"PAIR_CHECK_CAP","pair={} checked={} max={}",p,checks,maxChecks);return false;}
                 checks++;
                 pass=positiveOverlap(frame,source,a,b);
-                if(source.budgetExhausted()){incomplete=true;return false;}
+                if(source.takeUncertainExterior()||source.budgetExhausted()){incomplete=true;return false;}
                 evaluated.put(p,pass);
             }
             if(pass){queued.add(p);frontier.add(p);}
@@ -203,9 +206,11 @@ final class BilateralContactSurface {
                         if(incomplete)break;
                         if(!anchorFace(witness,cell(1,pb),1)){if(RogTrace.sample(Stage.R04,"ANCHOR_B_REJECTED"))RogTrace.detail(Stage.R04,"ANCHOR_B_REJECTED","allocated={} witness={} axis={}",pb,witness.contactB(),witness.inwardB());continue;}
                         active.clear();queued.clear();frontier.clear();
-                        if(!enqueue(new Pair(pa,pb)))continue;
+                        var anchor=new Pair(pa,pb);
+                        if(failedComponents.contains(anchor)){anyIncomplete=true;continue;}
+                        if(!enqueue(anchor))continue;
                         drain();
-                        if(incomplete){if(RogTrace.sample(Stage.R04,"COMPONENT_DISCARDED"))RogTrace.detail(Stage.R04,"COMPONENT_DISCARDED","anchorA={} anchorB={} discardedPairs={} priorCertified={} checks={}",pa,pb,active.size(),complete.size(),checks);active.clear();frontier.clear();break;}
+                        if(incomplete){if(RogTrace.sample(Stage.R04,"COMPONENT_DISCARDED"))RogTrace.detail(Stage.R04,"COMPONENT_DISCARDED","anchorA={} anchorB={} discardedPairs={} priorCertified={} checks={}",pa,pb,active.size(),complete.size(),checks);failedComponents.addAll(queued);failedComponents.add(anchor);active.clear();frontier.clear();break;}
                         if(RogTrace.sample(Stage.R04,"COMPONENT_CLOSED"))RogTrace.detail(Stage.R04,"COMPONENT_CLOSED","anchorA={} anchorB={} pairs={} checked={}",pa,pb,active.size(),checks);
                         complete.putAll(active); // ONLY a closed, fully inspected component.
                     }

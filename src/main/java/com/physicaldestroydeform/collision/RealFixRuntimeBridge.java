@@ -267,9 +267,9 @@ public final class RealFixRuntimeBridge {
                 DamageModel.PLASTIC_SHARE,DamageModel.STRESS_SHARE,
                 com.physicaldestroydeform.BlockDamageState.FIXED_SCALE,
                 ForcePropagation.MAX_NODES_PER_SIDE,ForcePropagation.MIN_PROPAGATED_F);
-        log.info("[PDD-FACE-POLICY] revision=0.5.0Fix-NOISY-AXIS-COPLANAR nativeWitnesses=1+ " +
+        log.info("[PDD-FACE-POLICY] revision=originlastFix-DIRECT-SEEDS nativeWitnesses=1+ " +
                 "maxFaceArea=16384 ownerLocalShapeProof=REQUIRED sourceBudget=ONE_COLLISION " +
-                "sparseHaloRadius=1.01 syntheticNativeContact=NONE");
+                "expansion=BILATERAL_CLOSED_ONLY speculativeDamageSeeds=0 syntheticNativeContact=NONE");
         log.info("[PDD-F-SPREAD-POLICY] revision=spreadFix-DIRECTION-70-30 " +
                 "inwardWeight=0.70 lateralWeight=0.30 transferShare=0.50 " +
                 "reverseEdges=FORBIDDEN verifiedNeighbors=REQUIRED " +
@@ -579,8 +579,14 @@ public final class RealFixRuntimeBridge {
                 if(firstUncreditedRetry)priorTracking.lastUncreditedAudit=now;
                 long r2Start=auditEligible?System.nanoTime():0;
                 var targetDirections=auditEligible?TargetDirections.forEvent(pair,massSafe.contacts(),pre,stamp.tick,complete&&massSafe.maskedFrames()==0):new TargetDirections();
-                var regions=auditEligible?SableContactRegions.audit(server,stamp.dimension,pair,massSafe.contacts(),targetDirections)
-                        :SableContactRegions.skippedDuplicate();
+                var prepared=auditEligible?SableContactRegions.prepare(server,stamp.dimension,pair,massSafe.contacts(),targetDirections):null;
+                var directRegions=prepared==null?SableContactRegions.skippedDuplicate():prepared.direct;
+                // If all native cells are ambiguous, a closed bilateral component
+                // can supply the initial target for an otherwise eligible approach.
+                // Never use a newly expanded cell as regional reimpact evidence.
+                var regions=prepared!=null&&!directRegions.verified()&&
+                        (preSolverClosing||beforeAudit.phase()==Phase.ARMED||beforeAudit.hasUnspentAuthorization())
+                        ?prepared.expand():directRegions;
                 long r2Nanos=auditEligible?System.nanoTime()-r2Start:0;
                 if(auditEligible){
                     r2Audits++;r2ShapeChecks+=regions.checksA()+regions.checksB();
@@ -588,11 +594,6 @@ public final class RealFixRuntimeBridge {
                                     "checkedA={} checkedB={} regions={} status={} mutation=OFF",
                             pair.a().stableKey(),pair.b().stableKey(),r2Nanos,records.size(),
                             regions.checksA(),regions.checksB(),regions.regions().size(),regions.status());
-                    if(DETAIL_ENABLED&&regions.trace().detail().contains("facePatchAddedA="))
-                        log.info("[PDD-CONTACT-PATCH] pair={}/{} nativeTick={} " +
-                                        "originalRecords={} verifiedRegions={} audit={} mutation=OFF",
-                                pair.a().stableKey(),pair.b().stableKey(),stamp.tick,
-                                records.size(),regions.regions().size(),regions.trace().detail());
                 }
                 else r2SkippedDuplicate++;
                 boolean saturatedPoll=records.stream().anyMatch(NativeCollisionTelemetry.Contact::capSaturated);
@@ -651,7 +652,7 @@ public final class RealFixRuntimeBridge {
                 boolean nativeApproach=auditEligible && (a!=null || b!=null)
                         && preSolverClosing;
                 boolean regionMoved=RegionalContactProof.hasNewCells(
-                        t.lastCreditedRegions,regions.regions());
+                        t.lastCreditedRegions,directRegions.regions());
                 // A new shape-proved cell plus independent pre-solver closing
                 // is stronger than an arbitrary raw-F rising ratio. A persistent
                 // stationary press or tangential slide still cannot mint Q.
@@ -853,6 +854,11 @@ public final class RealFixRuntimeBridge {
                                 result.reason(),gapBefore.pendingApproach()&&!gapAfter.pendingApproach());
                         t.lastVerfFsm=fsmSignature;t.lastVerfFsmTick=now;
                     }
+                    // Freeze optional geometry on the same server-thread snapshot,
+                    // before deferred graph/propagation offers can mutate any owner.
+                    var damageRegions=result.credited()&&prepared!=null?prepared.expand():regions;
+                    if(result.credited()&&damageRegions!=regions)
+                        r2ShapeChecks+=Math.max(0,damageRegions.checksA()+damageRegions.checksB()-regions.checksA()-regions.checksB());
                     // Freeze decisions in batch order; all plans/offers run
                     // only after the contact graph has been finalized below.
                     Runnable deferred=()-> {
@@ -921,13 +927,14 @@ public final class RealFixRuntimeBridge {
                                 }
                             }:null;
                     long propagationStart=System.nanoTime();
-                    ContactCreditLedger.Grant grant=result.credited()?regionLedger.issuePropagatedTargets(
-                            pair,result,ContactCreditLedger.Source.SABLE_POST_EFFECT,regions.regions(),
-                            OwnerResolver.propagationSnapshot(server,stamp.dimension),
-                            targetMaterials::material,credit.settings(),damageSettings,
+                    var propagationReader=result.credited()?OwnerResolver.propagationSnapshot(server,stamp.dimension):null;
+                    ContactCreditLedger.Grant grant=result.credited()?regionLedger.issueContactSeeds(
+                            pair,result,ContactCreditLedger.Source.SABLE_POST_EFFECT,damageRegions.regions(),damageRegions.reservedA(),damageRegions.reservedB(),
+                            propagationReader,
+                            target->OwnerResolver.matchesSnapshot(propagationReader,target)?targetMaterials.material(target):null,credit.settings(),damageSettings,
                             nativeNormal.owners(),targetDirections.hasProvenSeed()||fTrace!=null
                                     ?event->{targetDirections.trace(event);if(fTrace!=null)fTrace.accept(event);}:null,
-                            materialSnapshot::resolveFingerprint,contactGraph.planContext()):null;
+                            contactGraph.planContext()):null;
                     long propagationNanos=System.nanoTime()-propagationStart;
                     if(grant!=null){if(RogTrace.sample(Stage.R06,grant.status().name()))RogTrace.detail(Stage.R06,grant.status().name(),"credit={} issuedQ={} inputF={} dampedF={} unresolvedF={} unusedQ={} targetsA={} targetsB={} failure={} elapsedNs={}",grant.id(),grant.issuedQ(),grant.inputF(),grant.dampedF(),grant.unresolvedF(),grant.unused(),grant.a().size(),grant.b().size(),regionLedger.lastPropagationFailure(),propagationNanos);}
                     boolean granted=grant!=null && grant.credited();
@@ -943,13 +950,14 @@ public final class RealFixRuntimeBridge {
                                 grant==null?"NULL":grant.status(),regionLedger.lastPropagationFailure(),aborted);
                     }
                     if(granted) {
+                        RogTrace.event(Stage.R06,"CONTACT_SEED_SEALED","credit={} directRegions={} finalRegions={} reservedA={} reservedB={} speculativeDamageSeeds=0",grant.id(),directRegions.regions().size(),damageRegions.regions().size(),damageRegions.reservedA(),damageRegions.reservedB());
                         if(RogTrace.sample(Stage.R06,"SEALED_CREDIT"))RogTrace.detail(Stage.R06,"SEALED_CREDIT","credit={} propagationA={} propagationB={} owners={} rawF={} cappedF={} Q={}",grant.id(),grant.propagationA()==null?"NONE":grant.propagationA().endReason(),grant.propagationB()==null?"NONE":grant.propagationB().endReason(),nativeNormal.owners(),currentPeak,result.peakForce(),grant.issuedQ());
                         targetDirections.bind(grant,credit.settings(),targetMaterials::material);
                         if(DETAIL_ENABLED)log.info("[PDD-DEFORM-EVIDENCE] credit={} {}",grant.id(),targetDirections.summary());
                         t.lastCreditedPeak=currentPeak;
                         t.quietForceFrames=0;
                         t.lastCreditedTick=now;
-                        t.lastCreditedRegions=RegionalContactProof.capture(regions.regions());
+                        t.lastCreditedRegions=RegionalContactProof.capture(damageRegions.regions());
                         log.info("[PDD-IMPACT-DECISION] pair={}/{} tick={} credit={} " +
                                         "source={} rawF={} issuedQ={} gate={} nativeApproach={} " +
                                         "regionalReimpact={} movedSurface={} verifiedCells={} " +
@@ -1153,7 +1161,7 @@ public final class RealFixRuntimeBridge {
                     if(grant!=null && logCounts[0]++<MAX_LOG_PER_TICK)
                         log.info("[PDD-LEDGER] dimension={} tick={} episodeGeneration={} source={} status={} regions={} checksA={} checksB={} rejectedPoints={} Q={} allocatedA={} allocatedB={} unused={} aTargets={} bTargets={} aSample={} bSample={} ownerEpochA={} ownerEpochB={} sourceCapSaturated={} mutation=OFF",
                                 stamp.dimension,stamp.tick,grant.id().episodeGeneration(),grant.source(),grant.status(),
-                                grant.observedRegions(),regions.checksA(),regions.checksB(),regions.rejected(),
+                                grant.observedRegions(),damageRegions.checksA(),damageRegions.checksB(),damageRegions.rejected(),
                                 grant.issuedQ(),grant.allocatedA(),grant.allocatedB(),grant.unused(),
                                 grant.a().size(),grant.b().size(),DETAIL_ENABLED?TraceBudget.sample(grant.a(),fullTrace?32:4):List.of(),DETAIL_ENABLED?TraceBudget.sample(grant.b(),fullTrace?32:4):List.of(),pair.a().generation(),pair.b().generation(),saturatedPoll);
                     if(DETAIL_ENABLED && showGroup && logCounts[0]++<MAX_LOG_PER_TICK) log.info("[PDD-TARGET] dimension={} tick={} ownerA={} ownerAGeneration={} ownerB={} ownerBGeneration={} targetA={} fingerprintA={} targetB={} fingerprintB={} frameMethodA={} frameMethodB={} shapeAudit={} quality={} reason={} approachByAabb={} armedFromGap={} recentGap={} worldMutation=OFF",

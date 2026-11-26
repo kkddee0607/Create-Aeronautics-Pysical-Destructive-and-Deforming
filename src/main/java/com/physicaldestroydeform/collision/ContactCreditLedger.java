@@ -24,7 +24,7 @@ import java.util.function.Function;
 public final class ContactCreditLedger {
     public static final String LEGACY_ALGORITHM_REVISION = "PDD-IDS-1.0.7/0.4.1-spreadFix-MULTIFACE-70-30";
     public static final String PREVIOUS_ALGORITHM_REVISION = "PDD-IDS-1.0.9/0.6.1-CONTACT-ELASTIC-CHAIN";
-    public static final String ALGORITHM_REVISION = "PDD-IDS-1.0.9/0.6.1-originFix-CONTACT-PAIRED-ALPHA04";
+    public static final String ALGORITHM_REVISION = "PDD-IDS-1.0.9/0.6.1-originlastFix-DIRECT-SEEDS-ALPHA04";
     // Bounded but large enough for a 100x100 fully verified planar contact patch.
     public static final int MAX_TARGETS_PER_SIDE = 16_384;
     public static final int MAX_REGIONS = 2 * MAX_TARGETS_PER_SIDE;
@@ -110,6 +110,7 @@ public final class ContactCreditLedger {
     }
     private record Stored(Source source, long tick, Grant grant) {}
     private final Map<CreditId, Stored> recorded = new HashMap<>();
+    private final Set<CreditId> planning=new HashSet<>();
     // Ephemeral and server-thread only: why the last proposed graph was rejected.
     private String lastPropagationFailure="NONE";
     public String lastPropagationFailure() {return lastPropagationFailure;}
@@ -133,51 +134,10 @@ public final class ContactCreditLedger {
     /** The caller must first pass GameImpactCredit's ARMED/new-approach gate. */
     public Grant issue(GameImpactCredit.Pair pair, GameImpactCredit.Decision decision,
                        Source source, List<Region> evidence) {
-        Objects.requireNonNull(pair); Objects.requireNonNull(decision);
-        Objects.requireNonNull(source); Objects.requireNonNull(evidence);
-        CreditId id=new CreditId(pair,Math.max(1,decision.episodeGeneration()));
-        if (!decision.credited())
-            return empty(id,source,Status.INSUFFICIENT_EVIDENCE,decision.tick(),evidence.size());
-        if (recorded.containsKey(id))
-            return empty(id,source,Status.DUPLICATE_CAUSE,decision.tick(),evidence.size());
-        if (source==Source.SPECIAL_CALLBACK_HINT)
-            return empty(id,source,Status.HINT_NOT_AUTHORITATIVE,decision.tick(),evidence.size());
-        if (recorded.size()>=MAX_ENTRIES)
-            return empty(id,source,Status.LEDGER_CAPACITY,decision.tick(),evidence.size());
-
-        // Linked source contacts may report the same target repeatedly. They
-        // only increase observation count, never target Q or source Q.
-        if (evidence.isEmpty() || evidence.size()>MAX_REGIONS)
-            return empty(id,source,Status.INVALID_TARGET_SET,decision.tick(),evidence.size());
-        Set<GameImpactCredit.Target> a=new HashSet<>(), b=new HashSet<>();
-        Map<String,String> aCells=new HashMap<>(), bCells=new HashMap<>();
-        for(Region region:evidence) {
-            if (region==null) return empty(id,source,Status.INVALID_TARGET_SET,decision.tick(),evidence.size());
-            if(region.a()!=null) {
-                if(!region.a().ownerKey().equals(pair.a().stableKey()))
-                    return empty(id,source,Status.INVALID_TARGET_SET,decision.tick(),evidence.size());
-                String earlier=aCells.putIfAbsent(region.a().localBlock(),region.a().fingerprint());
-                if(earlier!=null && !earlier.equals(region.a().fingerprint()))
-                    return empty(id,source,Status.INVALID_TARGET_SET,decision.tick(),evidence.size());
-                a.add(region.a());
-            }
-            if(region.b()!=null) {
-                if(!region.b().ownerKey().equals(pair.b().stableKey()))
-                    return empty(id,source,Status.INVALID_TARGET_SET,decision.tick(),evidence.size());
-                String earlier=bCells.putIfAbsent(region.b().localBlock(),region.b().fingerprint());
-                if(earlier!=null && !earlier.equals(region.b().fingerprint()))
-                    return empty(id,source,Status.INVALID_TARGET_SET,decision.tick(),evidence.size());
-                b.add(region.b());
-            }
-        }
-        if(a.size()>MAX_TARGETS_PER_SIDE || b.size()>MAX_TARGETS_PER_SIDE || a.isEmpty()&&b.isEmpty())
-            return empty(id,source,Status.INVALID_TARGET_SET,decision.tick(),evidence.size());
-        // Candidates are never new seeds. They must already be verified on
-        // the opposite side with the same owner, coordinates and fingerprint.
-        for(var region:evidence)if(!region.opposingCandidates().isEmpty()
-                && !(region.a()!=null?b:a).containsAll(region.opposingCandidates()))
-            return empty(id,source,Status.INVALID_TARGET_SET,decision.tick(),evidence.size());
-
+        var validation=validateSeeds(pair,decision,source,evidence,false,0,0);
+        CreditId id=validation.id();
+        if(validation.status()!=Status.ISSUED)return empty(id,source,validation.status(),decision.tick(),evidence.size());
+        var a=validation.a();var b=validation.b();
         var partsA=split(a,decision.allocation().sideA());
         var partsB=split(b,decision.allocation().sideB());
         double sum=partsA.stream().mapToDouble(Share::q).sum()
@@ -190,6 +150,69 @@ public final class ContactCreditLedger {
                 partsA,partsB,Math.max(0,unused),evidence.size(),LEGACY_ALGORITHM_REVISION);
         recorded.put(id,new Stored(source,decision.tick(),issued));
         return issued;
+    }
+    private record SeedValidation(CreditId id,Status status,Set<GameImpactCredit.Target> a,Set<GameImpactCredit.Target> b){}
+    private SeedValidation validateSeeds(GameImpactCredit.Pair pair,GameImpactCredit.Decision decision,
+                                         Source source,List<Region> evidence,boolean materialOnly,int reservedA,int reservedB){
+        Objects.requireNonNull(pair); Objects.requireNonNull(decision);
+        Objects.requireNonNull(source); Objects.requireNonNull(evidence);
+        CreditId id=new CreditId(pair,Math.max(1,decision.episodeGeneration()));
+        if (!decision.credited())
+            return new SeedValidation(id,Status.INSUFFICIENT_EVIDENCE,Set.of(),Set.of());
+        if (recorded.containsKey(id)||planning.contains(id))
+            return new SeedValidation(id,Status.DUPLICATE_CAUSE,Set.of(),Set.of());
+        if (source==Source.SPECIAL_CALLBACK_HINT)
+            return new SeedValidation(id,Status.HINT_NOT_AUTHORITATIVE,Set.of(),Set.of());
+        if (recorded.size()+planning.size()>=MAX_ENTRIES)
+            return new SeedValidation(id,Status.LEDGER_CAPACITY,Set.of(),Set.of());
+
+        // Linked source contacts may report the same target repeatedly. They
+        // only increase observation count, never target Q or source Q.
+        if (!Double.isFinite(decision.issuedQ())||!Double.isFinite(decision.peakForce())||decision.peakForce()<0
+                ||decision.allocation()==null||Math.abs(decision.allocation().total()-decision.issuedQ())>Math.max(1e-7,decision.issuedQ()*1e-9)
+                ||evidence.isEmpty() || evidence.size()>MAX_REGIONS)
+            return new SeedValidation(id,Status.INVALID_TARGET_SET,Set.of(),Set.of());
+        Set<GameImpactCredit.Target> a=new HashSet<>(), b=new HashSet<>();
+        Map<String,String> aCells=new HashMap<>(), bCells=new HashMap<>();
+        for(Region region:evidence) {
+            if (region==null) return new SeedValidation(id,Status.INVALID_TARGET_SET,Set.of(),Set.of());
+            if(region.a()!=null) {
+                if(!region.a().ownerKey().equals(pair.a().stableKey()))
+                    return new SeedValidation(id,Status.INVALID_TARGET_SET,Set.of(),Set.of());
+                String earlier=aCells.putIfAbsent(region.a().localBlock(),region.a().fingerprint());
+                if(earlier!=null && !earlier.equals(region.a().fingerprint()))
+                    return new SeedValidation(id,Status.INVALID_TARGET_SET,Set.of(),Set.of());
+                a.add(region.a());
+            }
+            if(region.b()!=null) {
+                if(!region.b().ownerKey().equals(pair.b().stableKey()))
+                    return new SeedValidation(id,Status.INVALID_TARGET_SET,Set.of(),Set.of());
+                String earlier=bCells.putIfAbsent(region.b().localBlock(),region.b().fingerprint());
+                if(earlier!=null && !earlier.equals(region.b().fingerprint()))
+                    return new SeedValidation(id,Status.INVALID_TARGET_SET,Set.of(),Set.of());
+                b.add(region.b());
+            }
+        }
+        if(a.size()>MAX_TARGETS_PER_SIDE || b.size()>MAX_TARGETS_PER_SIDE || a.isEmpty()&&b.isEmpty())
+            return new SeedValidation(id,Status.INVALID_TARGET_SET,Set.of(),Set.of());
+        if(reservedA<0||reservedB<0||(long)a.size()+reservedA>MAX_TARGETS_PER_SIDE
+                ||(long)b.size()+reservedB>MAX_TARGETS_PER_SIDE)
+            return new SeedValidation(id,Status.INVALID_TARGET_SET,Set.of(),Set.of());
+        // A material-only candidate has no Layer-0 debit. The live material
+        // resolver must independently revalidate its state/fingerprint. Legacy
+        // Q fixtures retain their historical all-candidates-are-seeds contract.
+        for(var region:evidence)for(var candidate:region.opposingCandidates()){
+            boolean onA=region.a()==null;
+            if(!candidate.ownerKey().equals((onA?pair.a():pair.b()).stableKey())||
+                    !materialOnly&&!(onA?a:b).contains(candidate))
+                return new SeedValidation(id,Status.INVALID_TARGET_SET,Set.of(),Set.of());
+            var cells=onA?aCells:bCells;
+            var prior=cells.putIfAbsent(candidate.localBlock(),candidate.fingerprint());
+            if(prior!=null&&!prior.equals(candidate.fingerprint())||cells.size()>MAX_TARGETS_PER_SIDE)
+                return new SeedValidation(id,Status.INVALID_TARGET_SET,Set.of(),Set.of());
+        }
+        return new SeedValidation(id,Status.ISSUED,a,b);
+
     }
     /** colFix: use R2 source-verified contacts as seeds, then inspect actual
      * connected World/Plot neighbors. Keep GameImpactCredit's approval/cap as
@@ -227,7 +250,7 @@ public final class ContactCreditLedger {
                                  Map<String,ForcePropagation.Orientation> directions,
                                  java.util.function.Consumer<ForcePropagation.Trace> trace) {
         return issuePropagatedInternal(pair,decision,source,evidence,neighbors,t->Objects.requireNonNull(materials.apply(t.fingerprint()),"missing material"),
-                forces,damage,directions,trace,materials,false,null);
+                forces,damage,directions,trace,materials,false,null,false,0,0);
     }
     public Grant issuePropagatedTargets(GameImpactCredit.Pair pair,GameImpactCredit.Decision decision,
                                  Source source,List<Region> evidence,ForcePropagation.NeighborReader neighbors,
@@ -248,7 +271,19 @@ public final class ContactCreditLedger {
                                  Function<String,MaterialProperties> legacyMaterials,
                                  ForcePropagation.CrossOwnerContext crossOwner) {
         return issuePropagatedInternal(pair,decision,source,evidence,neighbors,materials,forces,damage,
-                directions==null?Map.of():directions,trace,legacyMaterials,true,crossOwner);
+                directions==null?Map.of():directions,trace,legacyMaterials,true,crossOwner,false,0,0);
+    }
+    /** Current runtime: one authorized source envelope, independently verified
+     * direct/closed-surface seeds, and non-spendable ambiguous contact slots. */
+    public Grant issueContactSeeds(GameImpactCredit.Pair pair,GameImpactCredit.Decision decision,
+                                  Source source,List<Region> evidence,int reservedA,int reservedB,
+                                  ForcePropagation.NeighborReader neighbors,Function<GameImpactCredit.Target,MaterialProperties> materials,
+                                  GameImpactCredit.Settings forces,DamageModel.Settings damage,
+                                  Map<String,ForcePropagation.Orientation> directions,
+                                  java.util.function.Consumer<ForcePropagation.Trace> trace,
+                                  ForcePropagation.CrossOwnerContext crossOwner){
+        return issuePropagatedInternal(pair,decision,source,evidence,neighbors,materials,forces,damage,
+                directions==null?Map.of():directions,trace,null,true,crossOwner,true,reservedA,reservedB);
     }
     private Grant issuePropagatedInternal(GameImpactCredit.Pair pair,GameImpactCredit.Decision decision,
                                  Source source,List<Region> evidence,ForcePropagation.NeighborReader neighbors,
@@ -257,19 +292,20 @@ public final class ContactCreditLedger {
                                  Map<String,ForcePropagation.Orientation> directions,
                                  java.util.function.Consumer<ForcePropagation.Trace> trace,
                                  Function<String,MaterialProperties> legacyMaterials,boolean bilateral,
-                                 ForcePropagation.CrossOwnerContext crossOwner) {
-        // Preserve every existing owner/region/episode validation and one-credit rule.
+                                 ForcePropagation.CrossOwnerContext crossOwner,boolean materialOnly,int reservedA,int reservedB) {
+        // Validate the single source envelope without minting a legacy Q grant.
         lastPropagationFailure="NONE";
-        Grant base=issue(pair,decision,source,evidence);
-        if(!base.credited()) {
-            lastPropagationFailure="SOURCE_OR_EVIDENCE_GATE_"+base.status();
-            return base;
+        var validated=validateSeeds(pair,decision,source,evidence,materialOnly,reservedA,reservedB);
+        if(validated.status()!=Status.ISSUED) {
+            lastPropagationFailure="SOURCE_OR_EVIDENCE_GATE_"+validated.status();
+            return empty(validated.id(),source,validated.status(),decision.tick(),evidence.size());
         }
         List<ForcePropagation.Trace> traces=trace==null?null:new ArrayList<>();
         Grant issued;
+        planning.add(validated.id());
         try {
-            List<GameImpactCredit.Target> seedsA=base.a().stream().map(Share::target).toList();
-            List<GameImpactCredit.Target> seedsB=base.b().stream().map(Share::target).toList();
+            List<GameImpactCredit.Target> seedsA=!materialOnly&&decision.allocation().sideA()==0?List.of():validated.a().stream().sorted(CONTACT_ORDER).toList();
+            List<GameImpactCredit.Target> seedsB=!materialOnly&&decision.allocation().sideB()==0?List.of():validated.b().stream().sorted(CONTACT_ORDER).toList();
             double sideF=decision.peakForce()/2;
             if(crossOwner!=null){
                 var owners=crossOwner.owners();
@@ -278,7 +314,7 @@ public final class ContactCreditLedger {
                     if(candidate!=null&&!candidate.equals(owner))throw new IllegalArgumentException("stale source owner generation");
                 }
             }
-            var pa=bilateral?contactPlan(pair.a().stableKey(),seedsA,sideF,evidence,true,neighbors,materials,forces,
+            var pa=bilateral?contactPlan(pair.a().stableKey(),seedsA,sideF,reservedA,evidence,true,neighbors,materials,forces,
                     damage,directions.getOrDefault(pair.a().stableKey(),ForcePropagation.Orientation.unknown()),
                     traces==null?null:traces::add,crossOwner==null?null:crossOwner.forSide(pair.a().stableKey(),pair.b().stableKey()))
                     :directions==null
@@ -286,7 +322,7 @@ public final class ContactCreditLedger {
                     :ForcePropagation.planTargets(pair.a().stableKey(),seedsA,sideF,neighbors,materials,forces,damage,
                             directions.getOrDefault(pair.a().stableKey(),ForcePropagation.Orientation.unknown()),
                             traces==null?null:traces::add);
-            var pb=bilateral?contactPlan(pair.b().stableKey(),seedsB,sideF,evidence,false,neighbors,materials,forces,
+            var pb=bilateral?contactPlan(pair.b().stableKey(),seedsB,sideF,reservedB,evidence,false,neighbors,materials,forces,
                     damage,directions.getOrDefault(pair.b().stableKey(),ForcePropagation.Orientation.unknown()),
                     traces==null?null:traces::add,crossOwner==null?null:crossOwner.forSide(pair.b().stableKey(),pair.a().stableKey()))
                     :directions==null
@@ -299,15 +335,17 @@ public final class ContactCreditLedger {
             // with just the uncertain boundary held, without minting Credit/F.
             if(bilateral&&crossOwner!=null&&!crossValid(pair,pa,pb,crossOwner)){
                 if(traces!=null)traces.clear();
-                pa=contactPlan(pair.a().stableKey(),seedsA,sideF,evidence,true,neighbors,materials,forces,damage,
+                pa=contactPlan(pair.a().stableKey(),seedsA,sideF,reservedA,evidence,true,neighbors,materials,forces,damage,
                         directions.getOrDefault(pair.a().stableKey(),ForcePropagation.Orientation.unknown()),
                         traces==null?null:traces::add,holdCross(crossOwner.forSide(pair.a().stableKey(),pair.b().stableKey())));
-                pb=contactPlan(pair.b().stableKey(),seedsB,sideF,evidence,false,neighbors,materials,forces,damage,
+                pb=contactPlan(pair.b().stableKey(),seedsB,sideF,reservedB,evidence,false,neighbors,materials,forces,damage,
                         directions.getOrDefault(pair.b().stableKey(),ForcePropagation.Orientation.unknown()),
                         traces==null?null:traces::add,holdCross(crossOwner.forSide(pair.b().stableKey(),pair.a().stableKey())));
             }
-            var a=seal(pa,decision.allocation().sideA());
-            var b=seal(pb,decision.allocation().sideB());
+            // An independently certified late expansion may recover a formerly
+            // missing side. It can spend only its ORIGINAL half, never the other half.
+            var a=seal(pa,materialOnly?decision.issuedQ()/2:decision.allocation().sideA());
+            var b=seal(pb,materialOnly?decision.issuedQ()/2:decision.allocation().sideB());
             double sum=a.stream().mapToDouble(Share::q).sum()+b.stream().mapToDouble(Share::q).sum();
             double unused=decision.issuedQ()-sum;
             if(!Double.isFinite(unused) || unused < -1e-7 ||
@@ -334,18 +372,17 @@ public final class ContactCreditLedger {
             }
             if(additionalOwners.size()+2>ForcePropagation.MAX_CROSS_OWNERS)
                 throw new IllegalStateException("event cross-owner budget exceeded");
-            Grant grant=new Grant(base.id(),source,Status.ISSUED,base.tick(),decision.issuedQ(),
-                    a,b,Math.max(0,unused),base.observedRegions(),bilateral?ALGORITHM_REVISION:LEGACY_ALGORITHM_REVISION,pa,pb,additionalOwners);
-            recorded.put(grant.id(),new Stored(source,base.tick(),grant));
+            Grant grant=new Grant(validated.id(),source,Status.ISSUED,decision.tick(),decision.issuedQ(),
+                    a,b,Math.max(0,unused),evidence.size(),bilateral?ALGORITHM_REVISION:LEGACY_ALGORITHM_REVISION,pa,pb,additionalOwners);
+            recorded.put(grant.id(),new Stored(source,decision.tick(),grant));
             issued=grant;
         }catch(RuntimeException unsafe) {
             // Diagnostic reason is not persisted; only verified plans can mint Q.
             lastPropagationFailure=unsafe.getClass().getSimpleName()+":"+
                     String.valueOf(unsafe.getMessage());
             // Nothing is committed to the preview or source on a failed plan.
-            recorded.remove(base.id());
-            return empty(base.id(),source,Status.INVALID_TARGET_SET,base.tick(),evidence.size());
-        }
+            return empty(validated.id(),source,Status.INVALID_TARGET_SET,decision.tick(),evidence.size());
+        }finally{planning.remove(validated.id());}
         // A diagnostic consumer must never revoke the already accepted credit.
         if(traces!=null)for(var event:traces) {
             try {trace.accept(event);}catch(RuntimeException ignored) {break;}
@@ -385,7 +422,7 @@ public final class ContactCreditLedger {
      * and exhaustive native candidate sets share a seed budget; identical
      * evidence coverage is deduplicated. A candidate set proves E only when
      * every possible material is resolved and has the same E. */
-    private static ForcePropagation.Result contactPlan(String owner,List<GameImpactCredit.Target> seeds,double sideF,
+    private static ForcePropagation.Result contactPlan(String owner,List<GameImpactCredit.Target> seeds,double sideF,int reserved,
              List<Region> evidence,boolean onA,ForcePropagation.NeighborReader neighbors,
              Function<GameImpactCredit.Target,MaterialProperties> materials,GameImpactCredit.Settings forces,
              DamageModel.Settings damage,ForcePropagation.Orientation direction,
@@ -398,8 +435,8 @@ public final class ContactCreditLedger {
             opponents.computeIfAbsent(self,k->new HashSet<>()).add(other==null?region.opposingCandidates():List.of(other));
         }
         var effective=new HashMap<GameImpactCredit.Target,Double>();
-        double contactDamped=0,unresolved=seeds.isEmpty()?sideF:0,forwardF=0;
-        double split=seeds.isEmpty()?0:sideF/seeds.size();
+        double split=seeds.isEmpty()?0:sideF/(seeds.size()+reserved);
+        double contactDamped=0,unresolved=seeds.isEmpty()?sideF:split*reserved,forwardF=0;
         int exact=0,consensus=0,withheld=0,missingMaterial=0,mixedMaterial=0,unproved=0;
         for(var seed:seeds){
             var candidates=opponents.get(seed);
@@ -426,7 +463,7 @@ public final class ContactCreditLedger {
         double tolerance=Math.max(1e-7,sideF*1e-7);
         if(!Double.isFinite(forwardF)||Math.abs(sideF-forwardF-contactDamped-unresolved)>tolerance)
             throw new IllegalStateException("direct contact F ledger mismatch");
-        if(RogTrace.sample(Stage.R06,"CONTACT_SIDE_SEAL"))RogTrace.detail(Stage.R06,"CONTACT_SIDE_SEAL","owner={} sideF={} forwardF={} contactDampedF={} unresolvedF={} exact={} consensus={} withheld={} missingMaterial={} mixedE={} unproved={} seedCount={} effectiveCount={}",owner,sideF,forwardF,contactDamped,unresolved,exact,consensus,withheld,missingMaterial,mixedMaterial,unproved,seeds.size(),effective.size());
+        if(RogTrace.sample(Stage.R06,"CONTACT_SIDE_SEAL"))RogTrace.detail(Stage.R06,"CONTACT_SIDE_SEAL","owner={} sideF={} forwardF={} contactDampedF={} unresolvedF={} exact={} consensus={} withheld={} missingMaterial={} mixedE={} unproved={} seedCount={} reservedUnknown={} effectiveCount={}",owner,sideF,forwardF,contactDamped,unresolved,exact,consensus,withheld,missingMaterial,mixedMaterial,unproved,seeds.size(),reserved,effective.size());
         var plan=ForcePropagation.planTargets(owner,effective,neighbors,materials,forces,damage,direction,trace,crossOwner);
         if(Math.abs(plan.inputF()-forwardF)>tolerance)throw new IllegalStateException("seed F budget mismatch");
         return new ForcePropagation.Result(plan.shares(),sideF,plan.assignedF(),plan.dampedF(),

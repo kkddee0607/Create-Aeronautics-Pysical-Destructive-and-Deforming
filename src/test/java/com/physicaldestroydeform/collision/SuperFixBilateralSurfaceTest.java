@@ -3,180 +3,99 @@ package com.physicaldestroydeform.collision;
 import com.physicaldestroydeform.DamageModel;
 import com.physicaldestroydeform.MaterialProperties;
 import com.physicaldestroydeform.diagnostics.NativeCollisionTelemetry;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Map;
-import java.util.UUID;
+import java.util.*;
 import net.minecraft.core.BlockPos;
+import net.minecraft.world.phys.AABB;
 import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
 
-/** Regress the actual material-only surface bridge into issuePropagatedTargets.
- * Native points establish an event and real boundary; synthetic shape probes
- * stand in for the server-only VoxelShape reader, not a new solver contact. */
+/** Runtime-equivalent bilateral expansion and F-first ledger, no unilateral polygon. */
 final class SuperFixBilateralSurfaceTest {
-    private static final String DIM="minecraft:overworld";
-    private static final UUID ID=UUID.fromString("12345678-1234-1234-1234-123456789abc");
-    private static final String PLOT="PLOT:"+ID;
-    private static final String WORLD="WORLD:"+DIM;
-    private static final FrameMath.Vec ZERO=new FrameMath.Vec(0,0,0);
-    private static final FrameMath.Pose POSE=new FrameMath.Pose(ZERO,ZERO,
-            new FrameMath.Vec(1,1,1),0,0,0,1);
-    private record Fixture(GameImpactCredit.Pair pair,
-                           List<NativeCollisionTelemetry.Contact> contacts,
-                           CollisionFrame.Snapshot pre,
-                           ContactFacePatch.Result[] patches,
-                           List<ContactCreditLedger.Region> initial,
-                           TargetDirections directions) {
-        SableContactRegions.SurfacePairing paired(){
-            return SableContactRegions.pairVerifiedSurfaces(initial,patches,
-                    new BlockPos[]{BlockPos.ZERO,BlockPos.ZERO},directions,
-                    (side,point,axis)->{
-                        if(!point.finite()||axis==null||point.y()!=65
-                                ||axis.x()!=0||axis.z()!=0
-                                ||axis.y()!=(side==0?-1:1))return null;
-                        int x=(int)Math.floor(point.x()),z=(int)Math.floor(point.z());
-                        if(x<0||x>=5||z<0||z>=5)return null;
-                        return target(side,x,z);
-                    });
-        }
+    static final String DIM="minecraft:overworld";
+    static final UUID ID=UUID.fromString("12345678-1234-1234-1234-123456789abc");
+    static final String PLOT="PLOT:"+ID,WORLD="WORLD:"+DIM;
+    static final GameImpactCredit.Pair PAIR=GameImpactCredit.Pair.canonical("face-proof",DIM,new GameImpactCredit.Owner(PLOT,1),new GameImpactCredit.Owner(WORLD,1));
+    static final FrameMath.Vec ZERO=new FrameMath.Vec(0,0,0);
+    static final FrameMath.Pose POSE=new FrameMath.Pose(ZERO,ZERO,new FrameMath.Vec(1,1,1),0,0,0,1);
+    static final AABB CUBE=new AABB(0,0,0,1,1,1);
+    static GameImpactCredit.Target target(int side,int x,int z){return new GameImpactCredit.Target(side==0?PLOT:WORLD,x+","+(side==0?64:65)+","+z,"minecraft:stone");}
+    static List<NativeCollisionTelemetry.Contact> contacts(boolean cap,double gap){
+        var list=new ArrayList<NativeCollisionTelemetry.Contact>();
+        for(int x:new int[]{0,4})for(int z:new int[]{0,4})list.add(new NativeCollisionTelemetry.Contact(7,-1,3000,0,1,0,0,-1,0,
+                x+.5,65,z+.5,x+.5,65+gap,z+.5,DIM,5,new NativeCollisionTelemetry.OwnerFrame(ID,POSE),null,cap));
+        if(cap)while(list.size()<NativeCollisionTelemetry.NATIVE_EFFECT_MAX_RECORDS)list.add(list.get(list.size()%4));
+        return List.copyOf(list);
     }
-    private static GameImpactCredit.Target target(int side,int x,int z){
-        return new GameImpactCredit.Target(side==0?PLOT:WORLD,
-                x+","+(side==0?64:65)+","+z,"minecraft:stone");
+    static List<ContactCreditLedger.Region> roots(){var list=new ArrayList<ContactCreditLedger.Region>();
+        for(int x:new int[]{0,4})for(int z:new int[]{0,4})list.add(new ContactCreditLedger.Region(target(0,x,z),target(1,x,z)));
+        return List.copyOf(list);
     }
-    private static Fixture fixture(boolean saturated,boolean missingCentre,double noise){
-        var pair=GameImpactCredit.Pair.canonical("face-proof",DIM,
-                new GameImpactCredit.Owner(PLOT,1),new GameImpactCredit.Owner(WORLD,1));
-        var frame=new NativeCollisionTelemetry.OwnerFrame(ID,POSE);
-        var contacts=new ArrayList<NativeCollisionTelemetry.Contact>();
-        for(int x:new int[]{0,4})for(int z:new int[]{0,4}){
-            double y=65+(x==4&&z==4?noise:0);
-            contacts.add(new NativeCollisionTelemetry.Contact(7,-1,3000,
-                    0,1,0,0,-1,0,x+.5,y,z+.5,x+.5,y,z+.5,DIM,5,frame,null,saturated));
-        }
-        // Match the actual Sable native truncation boundary of 100 entries.
-        if(saturated){
-            var four=List.copyOf(contacts);
-            while(contacts.size()<NativeCollisionTelemetry.NATIVE_EFFECT_MAX_RECORDS)
-                contacts.add(four.get(contacts.size()%four.size()));
-        }
-        var body=new CollisionFrame.Body(ID,0,15,0,15,POSE,ZERO,ZERO,ZERO,true,null,7);
-        var pre=new CollisionFrame.Snapshot(1,5,DIM,CollisionFrame.Phase.PRE_SOLVER,List.of(body),true);
-        var roots=new ArrayList<ContactCreditLedger.Region>();
-        var plotRoots=new ArrayList<GameImpactCredit.Target>();
-        var worldRoots=new ArrayList<GameImpactCredit.Target>();
-        for(int x:new int[]{0,4})for(int z:new int[]{0,4}){
-            var a=target(0,x,z);var b=target(1,x,z);
-            plotRoots.add(a);worldRoots.add(b);
-            roots.add(new ContactCreditLedger.Region(a,b));
-        }
-        var a=ContactFacePatch.reconstruct(DIM,PLOT,BlockPos.ZERO,plotRoots,contacts,
-                (pos,p)->pos.getX()>=0&&pos.getX()<5&&pos.getZ()>=0&&pos.getZ()<5
-                        &&pos.getY()==64?target(0,pos.getX(),pos.getZ()):null);
-        var b=ContactFacePatch.reconstruct(DIM,WORLD,BlockPos.ZERO,worldRoots,contacts,
-                (pos,p)->pos.getX()>=0&&pos.getX()<5&&pos.getZ()>=0&&pos.getZ()<5
-                        &&pos.getY()==65&&(!missingCentre||pos.getX()!=2||pos.getZ()!=2)
-                        ?target(1,pos.getX(),pos.getZ()):null);
-        for(var t:a.added())roots.add(new ContactCreditLedger.Region(t,null));
-        for(var t:b.added())roots.add(new ContactCreditLedger.Region(null,t));
-        return new Fixture(pair,List.copyOf(contacts),pre,new ContactFacePatch.Result[]{a,b},
-                List.copyOf(roots),TargetDirections.forEvent(pair,contacts,List.of(pre),5,true));
+    static BilateralContactSurface.ShapeReader reader(boolean missingCentre,boolean unknownCentre){
+        return new BilateralContactSurface.ShapeReader(){
+            public BilateralContactSurface.Cell get(int side,BlockPos p){
+                if(p.getX()<0||p.getX()>=5||p.getZ()<0||p.getZ()>=5||p.getY()!=(side==0?64:65))return null;
+                if(side==1&&missingCentre&&p.getX()==2&&p.getZ()==2)return null;
+                return new BilateralContactSurface.Cell(target(side,p.getX(),p.getZ()),p,List.of(CUBE));
+            }
+            public boolean unresolvedCell(int side,BlockPos p){return unknownCentre&&side==1&&p.getX()==2&&p.getZ()==2&&p.getY()==65;}
+            public boolean exposed(int side,FrameMath.Vec p,com.physicaldestroydeform.deform.MovePlan.SignedAxes axis){return true;}
+        };
+    }
+    static BilateralContactSurface.Result surface(boolean cap,boolean missing,boolean unknown,double gap){
+        return BilateralContactSurface.reconstructAll(contacts(cap,gap).stream().map(c->BilateralContactSurface.fromRecord(PAIR,c,5)).filter(Objects::nonNull).toList(),reader(missing,unknown),32768);
+    }
+    private static GameImpactCredit.Decision approved(){
+        var credit=new GameImpactCredit(GameImpactCredit.Settings.provisional());
+        credit.step(new GameImpactCredit.Frame(PAIR,1,List.of(),true,false,null,null));
+        credit.step(new GameImpactCredit.Frame(PAIR,2,List.of(),true,false,null,null));
+        return credit.step(new GameImpactCredit.Frame(PAIR,5,List.of(new GameImpactCredit.ObservedForce(7,-1,50_000,0)),false,true,target(0,0,0),target(1,0,0)));
+    }
+    private static ContactCreditLedger.Grant grant(ContactCreditLedger ledger,GameImpactCredit.Decision decision,List<ContactCreditLedger.Region> regions){
+        return ledger.issueContactSeeds(PAIR,decision,ContactCreditLedger.Source.SABLE_POST_EFFECT,regions,0,0,
+                (from,x,y,z)->ForcePropagation.Probe.empty(),t->new MaterialProperties(0,255,0,0,false),
+                GameImpactCredit.Settings.provisional(),DamageModel.Settings.defaults(),Map.of(),null,null);
     }
     @Test void fourNativeCornersProveTwentyFiveFullFaceTargetsPerOwnerInProductionLedger(){
-        var fixture=fixture(false,false,0);
-        assertEquals(21,fixture.patches()[0].added().size());
-        assertEquals(21,fixture.patches()[1].added().size());
-        var paired=fixture.paired();
-        assertEquals(21,paired.pairedA());assertEquals(21,paired.pairedB());
-        assertEquals(46,paired.regions().size());
-        assertEquals(42,paired.regions().stream().filter(r->!r.opposingCandidates().isEmpty()).count());
-        var policy=new GameImpactCredit(GameImpactCredit.Settings.provisional());
-        policy.step(new GameImpactCredit.Frame(fixture.pair(),1,List.of(),true,false,null,null));
-        policy.step(new GameImpactCredit.Frame(fixture.pair(),2,List.of(),true,false,null,null));
-        var approved=policy.step(new GameImpactCredit.Frame(fixture.pair(),5,
-                List.of(new GameImpactCredit.ObservedForce(7,-1,50_000,0)),false,true,
-                target(0,0,0),target(1,0,0)));
-        assertTrue(approved.credited());
-        var ledger=new ContactCreditLedger();
-        var material=new MaterialProperties(0,255,0,0,false);
-        var grant=ledger.issuePropagatedTargets(fixture.pair(),approved,
-                ContactCreditLedger.Source.SABLE_POST_EFFECT,paired.regions(),
-                (from,x,y,z)->ForcePropagation.Probe.empty(),ignored->material,
-                GameImpactCredit.Settings.provisional(),DamageModel.Settings.defaults(),
-                Map.of(),null,ignored->material);
-        assertEquals(ContactCreditLedger.Status.ISSUED,grant.status(),ledger.lastPropagationFailure());
+        var found=surface(false,false,false,0);assertFalse(found.incomplete());assertEquals(25,found.matches().size());
+        var regions=SableContactRegions.mergeBilateralPairs(roots(),found.matches());
+        assertEquals(46,regions.size());
+        var ledger=new ContactCreditLedger();var decision=approved();var grant=grant(ledger,decision,regions);
+        assertTrue(grant.credited(),ledger.lastPropagationFailure());
         assertEquals(25,grant.propagationA().shares().stream().filter(s->s.layer()==0).count());
         assertEquals(25,grant.propagationB().shares().stream().filter(s->s.layer()==0).count());
-        assertTrue(grant.propagationA().endReason().contains("CONTACT_UNPROVED=0"));
-        assertTrue(grant.propagationB().endReason().contains("CONTACT_UNPROVED=0"));
+        assertEquals(0,grant.propagationA().directUnresolvedF(),1e-7);assertEquals(0,grant.propagationB().directUnresolvedF(),1e-7);
         assertEquals(grant.issuedQ(),grant.accounted(),1e-5);
-        assertEquals(ContactCreditLedger.Status.DUPLICATE_CAUSE,
-                ledger.issue(fixture.pair(),approved,ContactCreditLedger.Source.SABLE_POST_EFFECT,
-                        paired.regions()).status());
+        assertEquals(ContactCreditLedger.Status.DUPLICATE_CAUSE,grant(ledger,decision,regions).status());
     }
     @Test void nativeCapKeepsDamageDirectionUnknownButCanStillPairExactObservedSurface(){
-        var fixture=fixture(true,false,0);
-        assertEquals(NativeCollisionTelemetry.NATIVE_EFFECT_MAX_RECORDS,fixture.contacts().size());
-        assertFalse(fixture.directions().active());
-        assertTrue(fixture.directions().summary().contains("gate=NATIVE_CAP"));
-        assertNull(fixture.directions().axis(PLOT,fixture.contacts().getFirst()));
-        assertEquals(21,fixture.paired().pairedA());
-        assertEquals(21,fixture.paired().pairedB());
+        var records=contacts(true,0);assertEquals(100,records.size());
+        var body=new CollisionFrame.Body(ID,0,15,0,15,POSE,ZERO,ZERO,ZERO,true,null,7);
+        var pre=new CollisionFrame.Snapshot(1,5,DIM,CollisionFrame.Phase.PRE_SOLVER,List.of(body),true);
+        var directions=TargetDirections.forEvent(PAIR,records,List.of(pre),5,true);
+        assertFalse(directions.active());assertNull(directions.axis(PLOT,records.getFirst()));
+        assertEquals(25,surface(true,false,false,0).matches().size());
     }
     @Test void absentOppositeVoxelCannotGainAFictitiousMaterialPair(){
-        var fixture=fixture(false,true,0);
-        var paired=fixture.paired();
-        assertEquals(20,paired.pairedA());
-        assertEquals(20,paired.pairedB());
-        assertTrue(paired.regions().contains(new ContactCreditLedger.Region(target(0,2,2),null)));
-        assertTrue(paired.regions().stream().noneMatch(r->r.opposingCandidates().contains(target(1,2,2))));
-        var policy=new GameImpactCredit(GameImpactCredit.Settings.provisional());
-        policy.step(new GameImpactCredit.Frame(fixture.pair(),1,List.of(),true,false,null,null));
-        policy.step(new GameImpactCredit.Frame(fixture.pair(),2,List.of(),true,false,null,null));
-        var approved=policy.step(new GameImpactCredit.Frame(fixture.pair(),5,
-                List.of(new GameImpactCredit.ObservedForce(7,-1,50_000,0)),false,true,
-                target(0,0,0),target(1,0,0)));
-        var material=new MaterialProperties(0,255,0,0,false);
-        var grant=new ContactCreditLedger().issuePropagatedTargets(fixture.pair(),approved,
-                ContactCreditLedger.Source.SABLE_POST_EFFECT,paired.regions(),
-                (from,x,y,z)->ForcePropagation.Probe.empty(),ignored->material,
-                GameImpactCredit.Settings.provisional(),DamageModel.Settings.defaults(),
-                Map.of(),null,ignored->material);
-        assertTrue(grant.credited());
-        assertTrue(grant.propagationA().unresolvedF()>0);
-        // Missing opposite is one of 25 equal source seeds: 25,000/25=1,000 F.
-        assertEquals(1000,grant.propagationA().directUnresolvedF(),1e-7);
-        assertEquals(grant.propagationA().unresolvedF(),grant.propagationA().directUnresolvedF()+grant.propagationA().propagationUnresolvedF(),1e-7);
-        assertEquals(24,grant.propagationB().shares().stream().filter(s->s.layer()==0).count());
-        assertEquals(grant.issuedQ(),grant.accounted(),1e-5);
+        var found=surface(false,true,false,0);assertFalse(found.incomplete());assertEquals(24,found.matches().size());
+        var merged=SableContactRegions.mergeBilateralPairs(roots(),found.matches());
+        assertTrue(merged.stream().noneMatch(r->target(0,2,2).equals(r.a())||target(1,2,2).equals(r.b())));
+        var g=grant(new ContactCreditLedger(),approved(),merged);assertTrue(g.credited());
+        assertEquals(24,g.propagationA().shares().stream().filter(s->s.layer()==0).count());
+        assertEquals(24,g.propagationB().shares().stream().filter(s->s.layer()==0).count());
+        assertEquals(0,g.propagationA().directUnresolvedF(),1e-7);assertEquals(g.issuedQ(),g.accounted(),1e-5);
     }
-    // The legacy witness-hull pairing remains strictly fail-closed on noisy
-    // planes. duperFix has a SEPARATE bilateral shape proof (see
-    // DuperFixBilateralSurfaceTest), not a relaxation of these assertions.
-    @Test void legacyIncoherentContactPlaneCannotBePromotedIntoFullFacePair(){
-        var fixture=fixture(false,false,.1);
-        assertTrue(fixture.patches()[0].footprints().isEmpty());
-        assertTrue(fixture.patches()[1].footprints().isEmpty());
-        assertEquals(0,fixture.paired().pairedA());
-        assertEquals(0,fixture.paired().pairedB());
+    @Test void incoherentNativeContactPlaneDoesNotVetoNativeRoots(){
+        var found=surface(false,false,false,.2);assertTrue(found.matches().isEmpty());
+        assertEquals(roots(),SableContactRegions.mergeBilateralPairs(roots(),found.matches()));
     }
-    @Test void mismatchedPrePoseRejectsSourceToOppositeFrameMapping(){
-        var fixture=fixture(false,false,0);
-        var shifted=new FrameMath.Pose(new FrameMath.Vec(.1,0,0),ZERO,
-                new FrameMath.Vec(1,1,1),0,0,0,1);
-        var movedBody=new CollisionFrame.Body(ID,0,15,0,15,shifted,ZERO,ZERO,ZERO,true,null,7);
-        var wrong=new CollisionFrame.Snapshot(1,5,DIM,CollisionFrame.Phase.PRE_SOLVER,List.of(movedBody),true);
-        var unsafe=TargetDirections.forEvent(fixture.pair(),fixture.contacts(),List.of(wrong),5,true);
-        var paired=SableContactRegions.pairVerifiedSurfaces(fixture.initial(),fixture.patches(),
-                new BlockPos[]{BlockPos.ZERO,BlockPos.ZERO},unsafe,(side,p,axis)->target(side,2,2));
-        assertEquals(0,paired.pairedA());
-        assertEquals(0,paired.pairedB());
+    @Test void noPrePoseRequiredForIndependentDirectMaterialIdentity(){
+        var contacts=contacts(false,0);var d=TargetDirections.forEvent(PAIR,contacts,List.of(),5,true);
+        assertFalse(d.active());assertNull(d.axis(PLOT,contacts.getFirst()));
+        var r=SableContactRegions.collect(PAIR,contacts,(c,owner,budget)->new SableContactRegions.Check(List.of(target(owner.equals(PLOT)?0:1,(int)c.contactAX(),(int)c.contactAZ())),1));
+        assertEquals(4,r.regions().size());assertTrue(r.verified());
     }
     @Test void unknownShapeEvidenceMustNotReplaceACertifiedNativeCornerPair(){
-        var fixture=fixture(true,true,0);
-        var paired=fixture.paired();
-        assertEquals(4,paired.regions().stream().filter(r->r.a()!=null&&r.b()!=null).count());
-        assertEquals(20,paired.pairedA());
+        var found=surface(false,true,true,0);assertTrue(found.incomplete());assertTrue(found.matches().isEmpty());
+        assertEquals(roots(),SableContactRegions.mergeBilateralPairs(roots(),found.matches()));
     }
 }

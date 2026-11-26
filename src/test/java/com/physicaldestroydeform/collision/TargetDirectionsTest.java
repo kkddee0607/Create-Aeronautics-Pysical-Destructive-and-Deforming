@@ -58,11 +58,12 @@ class TargetDirectionsTest {
         d.observe(List.of(B),List.of(B),NEG,false);
         assertNull(d.get(A));assertNull(d.get(B));
     }
-    @Test void ambiguousCandidatesCannotBePromotedByPatchOrPropagatedParent(){
+    @Test void ambiguousCandidatesCannotBePromotedByExpansionOrPropagatedParent(){
         var d=new TargetDirections();
         var c=new GameImpactCredit.Target(A.ownerKey(),"2,0,0",A.fingerprint());
         d.observe(List.of(A,B),List.of(A,B),POS,false);
-        d.patch(B,POS);d.patch(c,POS);
+        d.seed(B);d.seed(c);
+        d.observe(List.of(c),List.of(c),POS,false);
         d.trace(new ForcePropagation.Edge(c,B,0,10,5,5,1,5));
         assertNull(d.get(A));assertNull(d.get(B));assertEquals(POS,d.get(c));
     }
@@ -84,11 +85,11 @@ class TargetDirectionsTest {
         d.observe(List.of(A),List.of(A),POS,false);
         assertNull(d.get(A));
     }
-    @Test void derivedFaceCannotOverrideUnknownDirectSeed(){
+    @Test void expandedSeedDoesNotGainMovementAuthority(){
         var d=new TargetDirections();
         d.observe(List.of(A),List.of(),null,false);
-        d.patch(A,POS);d.patch(B,POS);
-        assertNull(d.get(A));assertEquals(POS,d.get(B));
+        d.seed(A);d.seed(B);
+        assertNull(d.get(A));assertNull(d.get(B));
     }
     @Test void paidChildInheritsButUnknownSeedDoesNot(){
         var d=new TargetDirections();
@@ -111,13 +112,13 @@ class TargetDirectionsTest {
         var contact=new com.physicaldestroydeform.diagnostics.NativeCollisionTelemetry.Contact(-1,7,100,0,1,0,0,-1,0,
                 0,1,0,0,0,0,dim,10,null,frame,false);
         var d=TargetDirections.forEvent(pair,List.of(contact),List.of(pre),10,true);
-        assertEquals(new MovePlan.SignedAxes(0,-1,0,true,41),d.uniformPatchAxis(world));
+        assertEquals(new MovePlan.SignedAxes(0,-1,0,true,41),d.axis(world,contact));
         assertEquals(new MovePlan.SignedAxes(0,1,0,true,41),d.axis(plot,contact));
         // Different shape witness/force, identical normal proof and effect frames.
         var second=new com.physicaldestroydeform.diagnostics.NativeCollisionTelemetry.Contact(-1,7,200,0,1,0,0,-1,0,
                 2,1,0,2,0,0,dim,10,null,frame,false);
         var shared=TargetDirections.forEvent(pair,List.of(contact,second),List.of(pre),10,true);
-        assertEquals(d.uniformPatchAxis(world),shared.uniformPatchAxis(world));
+        assertEquals(d.axis(world,contact),shared.axis(world,contact));
         assertEquals(d.axis(plot,contact),shared.axis(plot,second));
         assertTrue(shared.summary().contains("normalRecords={OPPOSING_NORMALS=2}"));
         assertTrue(shared.summary().contains("uniqueNormalProofs=1"));
@@ -126,7 +127,6 @@ class TargetDirectionsTest {
         var opposed=TargetDirections.forEvent(pair,List.of(contact,changedNormal),List.of(pre),10,true);
         assertEquals(d.axis(world,contact),opposed.axis(world,contact));
         assertNull(opposed.axis(world,changedNormal));
-        assertNull(opposed.uniformPatchAxis(world));
         assertTrue(opposed.summary().contains("uniqueNormalProofs=2"));
         var capped=new com.physicaldestroydeform.diagnostics.NativeCollisionTelemetry.Contact(-1,7,100,0,1,0,0,-1,0,
                 0,1,0,0,0,0,dim,10,null,frame,true);
