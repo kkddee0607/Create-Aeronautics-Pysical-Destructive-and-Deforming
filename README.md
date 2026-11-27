@@ -1,10 +1,10 @@
-# PDD 0.6.1-astraFix — Physical Destructive and Deforming
+# PDD 0.6.1-astraFixFix — Physical Destructive and Deforming
 
 Minecraft 1.21.1 · Java 21 · NeoForge 21.1.228 · Sable 2.0.6 · Create 6.0.10 · Aeronautics 1.3.2. 선택 호환: Copycats+ 3.0.11.
 
 [통합설계서 1.0.9](.github/workflows/PDD-1.0.9-Integrated-Design-Specification.md) · [originFix-buildFix 검증 보고](docs/verification/PDD-0.6.1-originFix-buildFix.md) · [originFix 구현 이력](docs/verification/PDD-0.6.1-originFix.md).
 
-**현재 검증 후보: 0.6.1-astraFix.** 정확한 양측 복원과 동일 poll의 대응 Anchor 기반 Owner-local 게임 패치를 통합하며, 원래 Stress 스냅샷의 변경 셀을 피해 불가 sink로 재검증한다. 설치 대상: `build/libs/physical-destroy-deform-0.6.1-astraFix.jar`. 실제 Gradle/JUnit/Actions/인게임 미검증. [검증 보고](docs/verification/PDD-0.6.1-astraFix.md).
+**현재 검증 후보: 0.6.1-astraFixFix.** 기존 정확/근사 패치를 보존하고 단일 불일치 Anchor의 제한적 부분 합의를 지원한다. Stress 변경 셀 검증을 일괄 처리하며 선택 진단은 기본 OFF다. JVM: `-Dpdd.logs=contact,force,stress` (쉼표 구분). 설치 대상: `build/libs/physical-destroy-deform-0.6.1-astraFixFix.jar`. 실제 Gradle/JUnit/Actions/인게임 미검증. [검증 보고](docs/verification/PDD-0.6.1-astraFixFix.md).
 
 **직전 배포판: 0.6.1-rogFix.** [검증 보고](docs/verification/PDD-0.6.1-rogFix.md).
 

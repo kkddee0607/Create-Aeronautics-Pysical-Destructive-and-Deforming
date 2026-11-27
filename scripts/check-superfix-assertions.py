@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only astraFix contact routing guard; not compilation or JUnit."""
+"""Read-only astraFixFix contact routing guard; not compilation or JUnit."""
 from pathlib import Path
 import re
 root=Path(__file__).resolve().parents[1]
@@ -26,5 +26,11 @@ for term in ('ownerLocalPatch()', 'CONTACT_PATCH_CONSENSUS'):
 for term in ('StressSnapshotRepair.retire(', 'StressSnapshotRepair.verifyPrefix('):
     if term not in stress:errors.append(f'missing bounded stress repair: {term}')
 if 'BILATERAL_CLOSED_ONLY' in bridge or 'speculativeDamageSeeds=0' in bridge:errors.append('stale face policy')
+patch=(main/'ContactFacePatch.java').read_text()
+logs=(main.parent/'diagnostics/LogSelection.java').read_text()
+for term in ('partialFit(', 'inliers.size()<4', 'patchReserve'):
+    if term not in patch+regions:errors.append(f'missing bounded partial patch: {term}')
+if 'job.validationIndex>=job.validation.size()' not in stress or 'invalidate(job,probe.getKey());return;' in stress:errors.append('stress must gather a full validation batch before replay')
+if 'System.getProperty("pdd.logs")' not in logs:errors.append('missing startup log selection')
 if errors:raise SystemExit('\n'.join(errors))
-print('AstraFix static contact routing guard PASS: exact/patch/ledger and stress repair wiring present')
+print('AstraFixFix static contact routing guard PASS: exact/patch/ledger and stress repair wiring present')

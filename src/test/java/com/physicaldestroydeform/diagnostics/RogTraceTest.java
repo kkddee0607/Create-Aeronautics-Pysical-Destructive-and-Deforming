@@ -68,6 +68,13 @@ class RogTraceTest {
         assertTrue(s.event(R06,"F_CREDIT_SUMMARY"));assertTrue(s.event(R06,"CONTACT_SIDE_SEAL"));
         assertEquals(3,s.seen(R04,"SEED"));assertEquals(2,s.selected(R04,"SEED"));
     }
+    @Test void legacyTrafficCannotSpendAggregateOrEvidenceBudget(){
+        var s=new RogTrace.State("s",64,8,1,100,16);s.begin(1);
+        for(int i=0;i<5;i++)assertTrue(s.legacy(LogSelection.Channel.CONTACT));
+        assertFalse(s.legacy(LogSelection.Channel.CONTACT));
+        assertTrue(s.event(R06,"F_CREDIT_SUMMARY"));assertTrue(s.evidence(R04,"CONTACT_SEED_COORDS"));
+        s.begin(2);assertTrue(s.legacy(LogSelection.Channel.CONTACT));
+    }
     @Test void aggregateEventCapZeroStillCounts(){
         var s=new RogTrace.State("s",0,0,1,100,0);s.begin(1);
         assertFalse(s.event(R06,"SEAL"));assertEquals(1,s.seen(R06,"SEAL"));

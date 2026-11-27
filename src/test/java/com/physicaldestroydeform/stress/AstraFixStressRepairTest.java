@@ -43,6 +43,16 @@ class AstraFixStressRepairTest {
         var first=session(r);first.advance(frozen(cells),100,2);j.sealProgress(r.creditId(),first,cells);
         assertNull(StressSnapshotRepair.retire(j.get(r.creditId()),cells,Set.of(node(1).cell())));
     }
+    @Test void batchRetirementKeepsEveryOldWeightAndDoesNotMutateOriginal()throws Exception{
+        var r=reservation("batch",Policy.defaults());var j=new StressReservationJournal(path.resolve("batch"));j.reserve(r);
+        var cells=graph(-1,1);var changed=new HashSet<Cell>();
+        for(int i=10;i<139;i++){var n=node(i);cells.put(n.cell(),Probe.solid(n));changed.add(n.cell());}
+        var repaired=StressSnapshotRepair.retire(j.get(r.creditId()),cells,changed);
+        assertNotNull(repaired);assertEquals(cells.size(),repaired.size());
+        for(var c:changed){assertEquals(State.SOLID,cells.get(c).state());assertEquals(Probe.denied(),repaired.get(c));}
+        var replay=session(r);replay.advance(frozen(repaired),101,512);
+        assertEquals(100,replay.ledger().accountedQ(),1e-12);
+    }
     @Test void alteredPublishedPrefixCannotBeReissued()throws Exception{
         var r=reservation("incompatible",Policy.defaults());var j=new StressReservationJournal(path.resolve("incompatible"));j.reserve(r);
         var cells=graph(0,2);var first=session(r);first.advance(frozen(cells),100,2);j.sealProgress(r.creditId(),first,cells);

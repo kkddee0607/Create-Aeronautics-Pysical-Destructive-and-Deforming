@@ -1,7 +1,9 @@
 package com.physicaldestroydeform.collision;
 
-import com.physicaldestroydeform.diagnostics.NativeCollisionTelemetry.Contact;
 import com.physicaldestroydeform.diagnostics.RogTrace;
+
+import com.physicaldestroydeform.diagnostics.NativeCollisionTelemetry.Contact;
+
 import com.physicaldestroydeform.diagnostics.RogTrace.Stage;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.phys.AABB;
@@ -19,8 +21,9 @@ final class ContactFacePatch {
     private static final double MIN_TRIANGLE=FIT*FIT;
     record Witness(Contact source,Frame frame) {}
     record Result(List<Match> pairs,Map<Contact,Set<GameImpactCredit.Target>> coveredA,
-                  Map<Contact,Set<GameImpactCredit.Target>> coveredB,int work,boolean incomplete) {
-        Result {pairs=List.copyOf(pairs);coveredA=Map.copyOf(coveredA);coveredB=Map.copyOf(coveredB);}
+                  Map<Contact,Set<GameImpactCredit.Target>> coveredB,int work,boolean incomplete,Map<String,Integer> outcomes) {
+        Result(List<Match> pairs,Map<Contact,Set<GameImpactCredit.Target>> coveredA,Map<Contact,Set<GameImpactCredit.Target>> coveredB,int work,boolean incomplete){this(pairs,coveredA,coveredB,work,incomplete,Map.of());}
+        Result {pairs=List.copyOf(pairs);coveredA=Map.copyOf(coveredA);coveredB=Map.copyOf(coveredB);outcomes=Map.copyOf(outcomes);}
     }
     private record Face(Cell cell,double plane,List<Point> polygon) {}
     private record Anchor(Contact source,Point a,Point b,List<Face> fa,List<Face> fb) {}
@@ -32,6 +35,7 @@ final class ContactFacePatch {
     private static final class Work {
         final int cap;int used;final ShapeReader reader;
         final Map<FaceKey,List<Face>> faces=new HashMap<>();
+        final Map<String,Integer> outcomes=new TreeMap<>();
         Work(int cap,ShapeReader reader){this.cap=cap;this.reader=reader;}
         void charge(){if(used>=cap||reader.budgetExhausted())throw new Limit();used++;}
         List<Face> faces(Frame f,int side,BlockPos pos){
@@ -83,14 +87,21 @@ final class ContactFacePatch {
                 .thenComparingInt(Group::bx).thenComparingInt(Group::bs).thenComparingDouble(Group::pb))).toList()){
             try{
                 var g=item.getKey();var anchors=item.getValue();
-                if(anchors.size()<3){trace("PATCH_INSUFFICIENT_ANCHORS",g,anchors.size(),0,0,work.used);continue;}
+                if(anchors.size()<3){trace("PATCH_INSUFFICIENT_ANCHORS",g,anchors.size(),0,0,work);continue;}
                 var unique=new LinkedHashSet<Anchor>(anchors);anchors=new ArrayList<>(unique);
                 anchors.sort(Comparator.comparingDouble((Anchor x)->x.a().x()).thenComparingDouble(x->x.a().y())
                         .thenComparingDouble(x->x.b().x()).thenComparingDouble(x->x.b().y()));
                 var ha=hull(anchors.stream().map(Anchor::a).toList());var hb=hull(anchors.stream().map(Anchor::b).toList());
-                if(polygonArea(ha)<=MIN_TRIANGLE||polygonArea(hb)<=MIN_TRIANGLE){trace("PATCH_DEGENERATE",g,anchors.size(),0,0,work.used);continue;}
+                if(polygonArea(ha)<=MIN_TRIANGLE||polygonArea(hb)<=MIN_TRIANGLE){trace("PATCH_DEGENERATE",g,anchors.size(),0,0,work);continue;}
                 var map=fit(anchors,g,work);
-                if(map==null){trace("PATCH_INCONSISTENT_CORRESPONDENCE",g,anchors.size(),0,0,work.used);continue;}
+                if(map==null){
+                    var consensus=partialFit(anchors,g,work);
+                    if(consensus==null){trace("PATCH_INCONSISTENT_CORRESPONDENCE",g,anchors.size(),0,0,work);continue;}
+                    trace("PATCH_PARTIAL_CONSENSUS",g,consensus.anchors().size(),0,0,work);
+                    anchors=new ArrayList<>(consensus.anchors());map=consensus.chart();
+                    ha=hull(anchors.stream().map(Anchor::a).toList());hb=hull(anchors.stream().map(Anchor::b).toList());
+                }
+                final var chart=map;
                 var frame=new Frame(g.a(),g.b(),axes(g.ax(),g.as()),axes(g.bx(),g.bs()),vec(g.ax(),g.pa(),ha.getFirst()),vec(g.bx(),g.pb(),hb.getFirst()));
                 var pieces=new ArrayList<Piece>();
                 // Both hulls are hard boundaries. The paired local chart is a
@@ -98,11 +109,11 @@ final class ContactFacePatch {
                 for(var pos:positions(g.ax(),g.as(),g.pa(),ha,work))for(var af:work.faces(frame,0,pos)){
                     if(af.plane()!=g.pa())continue;
                     work.charge();var ap=clip(af.polygon(),ha);if(polygonArea(ap)<=MIN_AREA)continue;
-                    var bp=clip(ccw(ap.stream().map(map::forward).toList()),hb);if(polygonArea(bp)<=MIN_AREA)continue;
+                    var bp=clip(ccw(ap.stream().map(chart::forward).toList()),hb);if(polygonArea(bp)<=MIN_AREA)continue;
                     for(var other:positions(g.bx(),g.bs(),g.pb(),bp,work))for(var bf:work.faces(frame,1,other)){
                         work.charge();if(bf.plane()!=g.pb())continue;
                         var intersection=clip(bp,bf.polygon());if(polygonArea(intersection)<=MIN_AREA)continue;
-                        var local=ccw(intersection.stream().map(map::inverse).toList());
+                        var local=ccw(intersection.stream().map(chart::inverse).toList());
                         if(polygonArea(local)<=MIN_AREA)continue;
                         pieces.add(new Piece(af,bf,local));if(pieces.size()>ContactCreditLedger.MAX_REGIONS)throw new Limit();
                     }
@@ -123,7 +134,7 @@ final class ContactFacePatch {
                     }
                     if(polygonArea(hull(support.stream().map(Anchor::a).toList()))<=MIN_TRIANGLE||polygonArea(hull(support.stream().map(Anchor::b).toList()))<=MIN_TRIANGLE)continue;
                     var supportA=hull(support.stream().map(Anchor::a).toList());
-                    var supportB=ccw(hull(support.stream().map(Anchor::b).toList()).stream().map(map::inverse).toList());
+                    var supportB=ccw(hull(support.stream().map(Anchor::b).toList()).stream().map(chart::inverse).toList());
                     var trimmed=new ArrayList<Piece>();
                     for(int i:component){work.charge();var p=pieces.get(i);var poly=clip(clip(p.polygon(),supportA),supportB);
                         if(polygonArea(poly)>MIN_AREA)trimmed.add(new Piece(p.a(),p.b(),poly));}
@@ -139,14 +150,15 @@ final class ContactFacePatch {
                 }
                 if((long)pairs.size()+localPairs.size()>ContactCreditLedger.MAX_REGIONS)throw new Limit();
                 pairs.addAll(localPairs);localA.forEach((k,v)->coveredA.merge(k,v,ContactFacePatch::union));localB.forEach((k,v)->coveredB.merge(k,v,ContactFacePatch::union));
-                trace(localPairs.isEmpty()?"PATCH_NO_CONNECTED_SUPPORT":"PATCH_MODEL_ACCEPTED",g,anchors.size(),polygonArea(ha),localPairs.size(),work.used);
-            }catch(Limit unknown){incomplete=true;trace("PATCH_UNKNOWN_OR_CAP",item.getKey(),item.getValue().size(),0,0,work.used);if(work.used>=work.cap||reader.budgetExhausted())break;}
-            catch(RuntimeException invalid){incomplete=true;trace("PATCH_INVALID_GEOMETRY",item.getKey(),item.getValue().size(),0,0,work.used);}
+                trace(localPairs.isEmpty()?"PATCH_NO_CONNECTED_SUPPORT":"PATCH_MODEL_ACCEPTED",g,anchors.size(),polygonArea(ha),localPairs.size(),work);
+            }catch(Limit unknown){incomplete=true;trace("PATCH_UNKNOWN_OR_CAP",item.getKey(),item.getValue().size(),0,0,work);if(work.used>=work.cap||reader.budgetExhausted())break;}
+            catch(RuntimeException invalid){incomplete=true;trace("PATCH_INVALID_GEOMETRY",item.getKey(),item.getValue().size(),0,0,work);}
         }
-        return new Result(new ArrayList<>(pairs),coveredA,coveredB,work.used,incomplete);
+        return new Result(new ArrayList<>(pairs),coveredA,coveredB,work.used,incomplete,work.outcomes);
     }
-    private static void trace(String reason,Group g,int anchors,double area,int pairs,int work){
-        if(RogTrace.sample(Stage.R04,reason))RogTrace.detail(Stage.R04,reason,"pollId={} scalar={} planeA={} planeB={} axisA={} axisB={} anchors={} hullArea={} modelPairs={} work={} exactSubstep=false authority=GAME_PATCH",g.poll(),g.scalar(),g.pa(),g.pb(),g.ax(),g.bx(),anchors,area,pairs,work);
+    private static void trace(String reason,Group g,int anchors,double area,int pairs,Work work){
+        work.outcomes.merge(reason,1,Integer::sum);
+        if(RogTrace.sample(Stage.R04,reason))RogTrace.detail(Stage.R04,reason,"pollId={} scalar={} planeA={} planeB={} axisA={} axisB={} anchors={} hullArea={} modelPairs={} work={} exactSubstep=false authority=GAME_PATCH",g.poll(),g.scalar(),g.pa(),g.pb(),g.ax(),g.bx(),anchors,area,pairs,work.used);
     }
     private static Set<GameImpactCredit.Target> union(Set<GameImpactCredit.Target> a,Set<GameImpactCredit.Target> b){var s=new HashSet<>(a);s.addAll(b);return Set.copyOf(s);}
     private static int sign(Frame f,int side){var a=f.inward(side);return a.x()+a.y()+a.z();}
@@ -196,6 +208,26 @@ final class ContactFacePatch {
         var map=new Chart(o.a(),o.b(),xx,xy,yx,yy,det);
         for(var p:points){work.charge();if(dist2(map.forward(p.a()),p.b())>FIT*FIT||dist2(map.inverse(p.b()),p.a())>FIT*FIT)return null;}
         return map;
+    }
+    private record Consensus(Chart chart,List<Anchor> anchors) {}
+    private static boolean agrees(Chart map,Anchor a){return dist2(map.forward(a.a()),a.b())<=FIT*FIT&&dist2(map.inverse(a.b()),a.a())<=FIT*FIT;}
+    private static Consensus partialFit(List<Anchor> anchors,Group g,Work work){
+        // ponytail: bounded leave-one-out hypotheses only. No combinatorial search;
+        // multiple incompatible outliers remain unresolved rather than inventing a patch.
+        if(anchors.size()<5)return null;
+        var unique=new LinkedHashMap<Point,Anchor>();
+        for(var a:anchors){work.charge();var old=unique.putIfAbsent(a.a(),a);if(old!=null&&!old.b().equals(a.b()))return null;}
+        var points=new ArrayList<>(unique.values());if(points.size()<5)return null;
+        Consensus best=null;boolean conflict=false;
+        for(int omitted=0;omitted<Math.min(points.size(),64);omitted++){
+            work.charge();var trial=new ArrayList<>(points);trial.remove(omitted);
+            var map=fit(trial,g,work);if(map==null)continue;
+            var inliers=new ArrayList<Anchor>();for(var a:points){work.charge();if(agrees(map,a))inliers.add(a);}
+            if(inliers.size()<4||inliers.size()*2<=points.size()||inliers.stream().map(Anchor::b).distinct().count()<4)continue;
+            if(best==null||inliers.size()>best.anchors().size()){best=new Consensus(map,List.copyOf(inliers));conflict=false;}
+            else if(inliers.size()==best.anchors().size()&&!inliers.equals(best.anchors()))conflict=true;
+        }
+        return conflict?null:best;
     }
     private static List<BlockPos> positions(int ax,int sign,double plane,List<Point> polygon,Work work){
         if(polygon.size()<3)return List.of();

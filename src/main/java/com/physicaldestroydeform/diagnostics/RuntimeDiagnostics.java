@@ -25,6 +25,7 @@ public final class RuntimeDiagnostics {
         lastReport=now;return true;
     }
     public void log(Logger logger){
+        if(!LogSelection.enabled(LogSelection.Channel.PERF))return;
         Runtime runtime=Runtime.getRuntime();
         long gcCount=-1,gcMillis=-1;
         try{
@@ -37,8 +38,13 @@ public final class RuntimeDiagnostics {
             }
             if(hasCount)gcCount=count;if(hasTime)gcMillis=time;
         }catch(RuntimeException|LinkageError unavailable){/* VM may omit management support. */}
-        logger.info("[PDD-MEMORY] heapUsed={} heapCommitted={} heapMax={} gcCount={} gcMillis={} nativeMemory=UNMEASURED",
-                runtime.totalMemory()-runtime.freeMemory(),runtime.totalMemory(),runtime.maxMemory(),gcCount,gcMillis);
+        long direct=-1,mapped=-1;
+        try{for(var pool:ManagementFactory.getPlatformMXBeans(java.lang.management.BufferPoolMXBean.class)){
+            if(pool.getName().equals("direct"))direct=pool.getMemoryUsed();
+            else if(pool.getName().equals("mapped"))mapped=pool.getMemoryUsed();
+        }}catch(RuntimeException|LinkageError unavailable){/* optional VM counter */}
+        logger.info("[PDD-MEMORY] heapUsed={} heapCommitted={} heapMax={} gcCount={} gcMillis={} directBufferBytes={} mappedBufferBytes={} nativeMemory=UNMEASURED",
+                runtime.totalMemory()-runtime.freeMemory(),runtime.totalMemory(),runtime.maxMemory(),gcCount,gcMillis,direct,mapped);
         var t=total.snapshot();var b=bridge.snapshot();
         logger.info("[PDD-PERFORMANCE] samples={} p50Nanos={} p95Nanos={} p99Nanos={} bridgeSamples={} bridgeP50Nanos={} bridgeP95Nanos={} bridgeP99Nanos={} maxNanos={} bridgeMaxNanos={} mode={}",
                 t.count(),t.p50(),t.p95(),t.p99(),b.count(),b.p50(),b.p95(),b.p99(),t.max(),b.max(),DiagnosticMode.current());

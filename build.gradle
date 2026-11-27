@@ -4,7 +4,7 @@ plugins {
 }
 
 group = 'com.physicaldestroydeform'
-version = '0.6.1-astraFix'
+version = '0.6.1-astraFixFix'
 base { archivesName = 'physical-destroy-deform' }
 java.toolchain.languageVersion = JavaLanguageVersion.of(21)
 neoForge {
@@ -49,6 +49,8 @@ sourceSets.test.runtimeClasspath += sourceSets.main.compileClasspath
 
 tasks.named('test', Test).configure {
     useJUnitPlatform()
+    // Regression fixtures explicitly exercise the opt-in observation path; production defaults OFF.
+    systemProperty 'pdd.logs', 'contact,force,commit' 
     reports.junitXml.required = true
     afterSuite { descriptor, result ->
         if (!descriptor.parent) logger.lifecycle("PDD JUnit: total=${result.testCount} passed=${result.successfulTestCount} failed=${result.failedTestCount} skipped=${result.skippedTestCount}")
@@ -70,7 +72,7 @@ jar {
             'Specification-Version': '0.6.1',
             'Implementation-Title': project.name,
             'Implementation-Version': project.version,
-            'PDD-Revision': '0.6.1-astraFix'
+            'PDD-Revision': '0.6.1-astraFixFix'
         ])
     }
 }

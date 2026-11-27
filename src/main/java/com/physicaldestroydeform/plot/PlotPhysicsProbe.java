@@ -1,5 +1,8 @@
 package com.physicaldestroydeform.plot;
 
+import com.physicaldestroydeform.diagnostics.LogSelection;
+import com.physicaldestroydeform.diagnostics.RogTrace;
+
 import dev.ryanhcode.sable.api.physics.mass.MassData;
 import dev.ryanhcode.sable.sublevel.ServerSubLevel;
 import it.unimi.dsi.fastutil.ints.Int2ObjectMap;
@@ -70,8 +73,8 @@ public final class PlotPhysicsProbe {
                 if(sub!=null&&!sub.isRemoved())snapshot("FIRST_ACTIVE_PRE_NATIVE_TICK",dim,sub,"BOOT");
                 if(++sampled>=MAX_BOOT_BODIES)break;
             }
-            LOG.info("[PDD-PHYSICS-LIFECYCLE] sessionId={} phase=BOOT_AUDIT dim={} sampled={} " +
-                    "nativeComUpload=UNVERIFIED",SESSION_ID,dim,sampled);
+            { if(RogTrace.legacySlot(LogSelection.Channel.NATIVE)) LOG.info("[PDD-PHYSICS-LIFECYCLE] sessionId={} phase=BOOT_AUDIT dim={} sampled={} " +
+                    "nativeComUpload=UNVERIFIED",SESSION_ID,dim,sampled); }
         }
         if(WATCHES.isEmpty())return;
         for(var entry:WATCHES.entrySet()){

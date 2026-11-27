@@ -62,6 +62,18 @@ class AstraFixContactPatchTest {
         var unknown=model(corners(5),surface(5,5,false,true),32768);assertTrue(unknown.incomplete());assertTrue(unknown.pairs().isEmpty());
         var capped=model(corners(5),surface(5,5,false,false),1);assertTrue(capped.incomplete());assertTrue(capped.pairs().isEmpty());
     }
+    @Test void fourIndependentAgreeingCornersSurviveOneOutlier(){
+        var records=new ArrayList<>(corners(5));records.add(witness(2.1,2.1,3.1,2.1,1,3000));
+        var r=model(records,surface(5,5,false,false),32768);
+        assertEquals(25,r.pairs().size());assertFalse(r.coveredA().containsKey(records.getLast()));
+        Collections.reverse(records);
+        assertEquals(new HashSet<>(r.pairs()),new HashSet<>(model(records,surface(5,5,false,false),32768).pairs()));
+    }
+    @Test void duplicateOutlierDoesNotCreateAdditionalIndependentSupport(){
+        var records=new ArrayList<>(corners(5));records.set(3,witness(4.9,4.9,3.9,4.9,1,3000));
+        records.add(records.getFirst());records.add(records.getFirst());
+        assertTrue(model(records,surface(5,5,false,false),32768).pairs().isEmpty());
+    }
     @Test void realDisjointIslandsCannotUseOneHullToBridgeGap(){
         var reader=new BilateralContactSurface.ShapeReader(){
             public BilateralContactSurface.Cell get(int side,BlockPos p){return p.getX()==2?null:surface(5,5,false,false).get(side,p);}

@@ -1,6 +1,9 @@
 package com.physicaldestroydeform.deform;
 
+import com.physicaldestroydeform.diagnostics.LogSelection;
 import com.physicaldestroydeform.diagnostics.RogTrace;
+
+
 import com.physicaldestroydeform.diagnostics.RogTrace.Stage;
 import com.physicaldestroydeform.DamageModel;
 import com.physicaldestroydeform.state.SparseStateKey;
@@ -14,7 +17,7 @@ import org.slf4j.Logger;
 
 /** One server-thread coordinator per storage domain. Never calls the physics callback. */
 public final class MoveRuntime {
-    private static final boolean TRACE=Boolean.parseBoolean(System.getProperty("pdd.deform.trace","true"));
+    private static final boolean TRACE=LogSelection.enabled(LogSelection.Channel.DEFORM)&&Boolean.parseBoolean(System.getProperty("pdd.deform.trace","true"));
     private static final int ROUTINE_TRACE_CAP=com.physicaldestroydeform.diagnostics.TraceBudget.cap(2,16);
     @FunctionalInterface public interface Planner {
         MoveTransactionJournal.BeforeImage build(WorldCommitCore.Intent intent,MovePlan plan,
@@ -63,8 +66,8 @@ public final class MoveRuntime {
         if(TRACE&&gameTick-lastTraceSummary>=100){
             lastTraceSummary=gameTick;
             if(suppressedBelowYield+suppressedUnknown+suppressedBreakFirst>0){
-                log.info("[PDD-DEFORM] phase=TRACE_SUMMARY gameTick={} suppressedBelowYield={} suppressedUnknown={} suppressedBreakFirst={}",
-                        gameTick,suppressedBelowYield,suppressedUnknown,suppressedBreakFirst);
+                { if(RogTrace.legacySlot(LogSelection.Channel.DEFORM)) log.info("[PDD-DEFORM] phase=TRACE_SUMMARY gameTick={} suppressedBelowYield={} suppressedUnknown={} suppressedBreakFirst={}",
+                        gameTick,suppressedBelowYield,suppressedUnknown,suppressedBreakFirst); }
                 suppressedBelowYield=suppressedUnknown=suppressedBreakFirst=0;
             }
         }
@@ -99,8 +102,8 @@ public final class MoveRuntime {
             }
             return;
         }
-        log.info("[PDD-DEFORM] phase=RESULT gameTick={} status={} id={} source={} steps={} K={} F={} FSource={} reservedQ={} blockedCandidateQ={} reservedCapQ={} shortfall={} normalFixed={} priorFixed={}",
-                tick,status,p.creditId(),p.source(),p.steps(),p.k(),p.sourceF(),p.sourceF()>0?"TARGET_EVIDENCE":"UNAVAILABLE",p.reservedQ(),candidate,paid,Math.max(0,candidate-paid),p.eventNormalDamageFixed(),p.damageBeforeFixed());
+        { if(RogTrace.legacySlot(LogSelection.Channel.DEFORM)) log.info("[PDD-DEFORM] phase=RESULT gameTick={} status={} id={} source={} steps={} K={} F={} FSource={} reservedQ={} blockedCandidateQ={} reservedCapQ={} shortfall={} normalFixed={} priorFixed={}",
+                tick,status,p.creditId(),p.source(),p.steps(),p.k(),p.sourceF(),p.sourceF()>0?"TARGET_EVIDENCE":"UNAVAILABLE",p.reservedQ(),candidate,paid,Math.max(0,candidate-paid),p.eventNormalDamageFixed(),p.damageBeforeFixed()); }
     }
     /** Coordinate-level lock independent of a block fingerprint. External changes invalidate CAS. */
     public static final class Fences {

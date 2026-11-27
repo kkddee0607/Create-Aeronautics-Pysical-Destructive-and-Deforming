@@ -1,5 +1,7 @@
 package com.physicaldestroydeform.collision;
 
+import com.physicaldestroydeform.diagnostics.RogTrace;
+
 import dev.ryanhcode.sable.api.sublevel.SubLevelContainer;
 import dev.ryanhcode.sable.sublevel.ServerSubLevel;
 import dev.ryanhcode.sable.sublevel.plot.LevelPlot;
@@ -219,8 +221,8 @@ public final class OwnerResolver {
                 evidence=new Cell(basic,boxes,pos);
                 cells.put(key,evidence);
                 if(basic.verified()&&com.physicaldestroydeform.material.CopycatMaterial.isCopycat(basic.key().fingerprint())
-                        &&com.physicaldestroydeform.diagnostics.RogTrace.sample(com.physicaldestroydeform.diagnostics.RogTrace.Stage.R07,"COPYCAT_SHAPE"))
-                    com.physicaldestroydeform.diagnostics.RogTrace.detail(com.physicaldestroydeform.diagnostics.RogTrace.Stage.R07,"COPYCAT_SHAPE","owner={} allocated={} fingerprint={} shapeBoxCount={}",owner,pos,basic.key().fingerprint(),boxes.size());
+                        &&RogTrace.sample(RogTrace.Stage.R07,"COPYCAT_SHAPE"))
+                    RogTrace.detail(RogTrace.Stage.R07,"COPYCAT_SHAPE","owner={} allocated={} fingerprint={} shapeBoxCount={}",owner,pos,basic.key().fingerprint(),boxes.size());
             } else reusedCells++;
             Check structural=evidence.identity();
             if(!structural.verified())return new Sample(structural,added);

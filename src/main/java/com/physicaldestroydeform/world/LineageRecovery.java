@@ -1,5 +1,8 @@
 package com.physicaldestroydeform.world;
 
+import com.physicaldestroydeform.diagnostics.LogSelection;
+import com.physicaldestroydeform.diagnostics.RogTrace;
+
 import com.physicaldestroydeform.material.CopycatMaterial;
 import com.physicaldestroydeform.plot.PlotCommitService;
 import com.physicaldestroydeform.plot.PlotIncarnation;
@@ -70,7 +73,7 @@ public final class LineageRecovery {
                     quarantine(e,now,"RECOVERY_CELL_ALIAS");
                 else pending.addLast(e);
             }
-            LOG.info("[PDD-TRANSFER] phase=RECOVERY_START proofPairs={}",pending.size());
+            { if(RogTrace.legacySlot(LogSelection.Channel.LINEAGE)) LOG.info("[PDD-TRANSFER] phase=RECOVERY_START proofPairs={}",pending.size()); }
             tick(server);
         }catch(IOException|RuntimeException|LinkageError failure){halt(failure);}
     }
@@ -127,8 +130,8 @@ public final class LineageRecovery {
                 if(proof==null){pending.addLast(new Entry(s,e.source(),e.destination(),e.attempts()+1));continue;}
                 LineageJournal.resume(s,e.source(),e.destination(),proof,now);
                 release(t.source().key(),t.outId(),true);release(t.destination(),t.inId(),true);
-                LOG.info("[PDD-TRANSFER] phase=RECOVERY id={} result=APPLIED damage={} remainder={} deformation={}",
-                        t.id(),t.source().damage(),t.source().remainder(),t.source().deformation());
+                { if(RogTrace.legacySlot(LogSelection.Channel.LINEAGE)) LOG.info("[PDD-TRANSFER] phase=RECOVERY id={} result=APPLIED damage={} remainder={} deformation={}",
+                        t.id(),t.source().damage(),t.source().remainder(),t.source().deformation()); }
             }catch(IOException failure){
                 if(failure.getMessage()==null||!failure.getMessage().startsWith("LINEAGE_")){halt(failure);return;}
                 try{quarantine(e,now,failure.getMessage());}

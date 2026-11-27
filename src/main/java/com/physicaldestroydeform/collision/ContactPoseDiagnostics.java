@@ -1,7 +1,9 @@
 package com.physicaldestroydeform.collision;
 
-import com.physicaldestroydeform.diagnostics.NativeCollisionTelemetry.Contact;
 import com.physicaldestroydeform.diagnostics.RogTrace;
+
+import com.physicaldestroydeform.diagnostics.NativeCollisionTelemetry.Contact;
+
 import com.physicaldestroydeform.diagnostics.RogTrace.Stage;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.phys.AABB;
@@ -75,12 +77,12 @@ final class ContactPoseDiagnostics {
         if(!RogTrace.enabled())return;
         try{
             var a=pose(c,true);var b=pose(c,false);var la=SableConsumerTargets.candidate(c,true);var lb=SableConsumerTargets.candidate(c,false);
-            if(!rigid(a)||!rigid(b)||la==null||lb==null){RogTrace.event(Stage.R03,"POSE_CALIBRATION","uniqueRecordIndex={} outcome=POSE_UNAVAILABLE substepKnown=false",index);return;}
+            if(!rigid(a)||!rigid(b)||la==null||lb==null){{ if(RogTrace.eventSlot(Stage.R03,"POSE_CALIBRATION"))RogTrace.detail(Stage.R03,"POSE_CALIBRATION","uniqueRecordIndex={} outcome=POSE_UNAVAILABLE substepKnown=false",index); }return;}
             var wa=a.toWorldPoint(la);var wb=b.toWorldPoint(lb);var na=a.toWorldNormal(normal(c,true));var nb=b.toWorldNormal(normal(c,false));
             var delta=wb.minus(wa);double along=delta.dot(na),tangent=Math.sqrt(delta.minus(na.times(along)).squareLength());
-            RogTrace.event(Stage.R03,"POSE_CALIBRATION","uniqueRecordIndex={} nativeA={} nativeB={} captureServerTick={} sourceGameTick={} rawA={} rawB={} normalA={} normalB={} effectPoseA={} effectPoseB={} allocatedA={} allocatedB={} worldA={} worldB={} along={} tangent={} normalDot={} roundTripA={} roundTripB={} preA={} preB={} substepKnown=false manifoldKnown=false authority=NONE",
+            { if(RogTrace.eventSlot(Stage.R03,"POSE_CALIBRATION"))RogTrace.detail(Stage.R03,"POSE_CALIBRATION","uniqueRecordIndex={} nativeA={} nativeB={} captureServerTick={} sourceGameTick={} rawA={} rawB={} normalA={} normalB={} effectPoseA={} effectPoseB={} allocatedA={} allocatedB={} worldA={} worldB={} along={} tangent={} normalDot={} roundTripA={} roundTripB={} preA={} preB={} substepKnown=false manifoldKnown=false authority=NONE",
                     index,c.idA(),c.idB(),c.captureServerTick(),c.serverTick(),raw(c,true),raw(c,false),normal(c,true),normal(c,false),a,b,la,lb,wa,wb,along,tangent,na.dot(nb),
-                    Math.sqrt(a.toLocalPoint(wa).minus(la).squareLength()),Math.sqrt(b.toLocalPoint(wb).minus(lb).squareLength()),preSummary(c,true,pre,a,la),preSummary(c,false,pre,b,lb));
+                    Math.sqrt(a.toLocalPoint(wa).minus(la).squareLength()),Math.sqrt(b.toLocalPoint(wb).minus(lb).squareLength()),preSummary(c,true,pre,a,la),preSummary(c,false,pre,b,lb)); }
             int side=SableConsumerTargets.sourceSide(pair.a().stableKey(),c,pair.dimension());
             if(side==0)return;
             String ownerA=side==1?pair.a().stableKey():pair.b().stableKey(),ownerB=side==1?pair.b().stableKey():pair.a().stableKey();
@@ -94,8 +96,8 @@ final class ContactPoseDiagnostics {
                     minGap=Math.min(minGap,separation);if(separation<=1e-5)overlaps++;
                 }
             }
-            RogTrace.event(Stage.R04,"SHADOW_OBB","uniqueRecordIndex={} effectBoxPairs={} overlapPairs={} minimumSatGap={} capped={} exactSubstep=false newWorldReads=0 authority=NONE",
-                    index,checked,overlaps,Double.isFinite(minGap)?minGap:Double.NaN,capped);
-        }catch(RuntimeException|LinkageError failure){RogTrace.event(Stage.R03,"POSE_CALIBRATION","uniqueRecordIndex={} outcome=DIAGNOSTIC_FAILURE type={} authority=NONE",index,failure.getClass().getSimpleName());}
+            { if(RogTrace.eventSlot(Stage.R04,"SHADOW_OBB"))RogTrace.detail(Stage.R04,"SHADOW_OBB","uniqueRecordIndex={} effectBoxPairs={} overlapPairs={} minimumSatGap={} capped={} exactSubstep=false newWorldReads=0 authority=NONE",
+                    index,checked,overlaps,Double.isFinite(minGap)?minGap:Double.NaN,capped); }
+        }catch(RuntimeException|LinkageError failure){{ if(RogTrace.eventSlot(Stage.R03,"POSE_CALIBRATION"))RogTrace.detail(Stage.R03,"POSE_CALIBRATION","uniqueRecordIndex={} outcome=DIAGNOSTIC_FAILURE type={} authority=NONE",index,failure.getClass().getSimpleName()); }}
     }
 }

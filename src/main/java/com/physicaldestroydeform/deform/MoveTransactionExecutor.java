@@ -1,6 +1,9 @@
 package com.physicaldestroydeform.deform;
 
+import com.physicaldestroydeform.diagnostics.LogSelection;
 import com.physicaldestroydeform.diagnostics.RogTrace;
+
+
 import com.physicaldestroydeform.diagnostics.RogTrace.Stage;
 import com.physicaldestroydeform.world.WorldPersistentJournal;
 import com.physicaldestroydeform.world.WorldReceiptJournal;
@@ -15,7 +18,7 @@ import org.slf4j.LoggerFactory;
  */
 public final class MoveTransactionExecutor {
     private static final Logger LOG=LoggerFactory.getLogger(MoveTransactionExecutor.class);
-    private static final boolean TRACE=Boolean.parseBoolean(System.getProperty("pdd.deform.trace","true"));
+    private static final boolean TRACE=LogSelection.enabled(LogSelection.Channel.DEFORM)&&Boolean.parseBoolean(System.getProperty("pdd.deform.trace","true"));
     public enum Gate { APPROVED, BLOCKED, DEFERRED, UNKNOWN }
     public enum Readback { CONFIRMED, WAITING, RESTORED_BEFORE_IMAGE, UNCERTAIN }
     public enum Outcome { APPLIED, BLOCKED, DEFERRED, UNKNOWN, QUARANTINED, DUPLICATE }
@@ -214,13 +217,13 @@ public final class MoveTransactionExecutor {
     }
     private static void trace(MoveTransactionJournal.BeforeImage b,String result){
         if(RogTrace.sample(Stage.R08,result))RogTrace.detail(Stage.R08,result,"moveId={} directId={} source={} destination={} epoch={} reservedQ={} candidateQ={} allocatedQ={} fixedIncrement={}",b.id(),b.directApplyId(),b.source(),b.destinationBefore(),b.transformEpoch(),b.reservedQ(),b.blockedCandidateQ(),b.blockedAppliedQ(),b.blockedFixedIncrement());
-        if(TRACE)LOG.info("[PDD-MOVE] id={} source={} destination={} result={} epoch={} reservedQ={} candidateQ={} allocatedQ={} shortfallQ={} fixedIncrement={}",
+        if(TRACE){ if(RogTrace.legacySlot(LogSelection.Channel.DEFORM)) LOG.info("[PDD-MOVE] id={} source={} destination={} result={} epoch={} reservedQ={} candidateQ={} allocatedQ={} shortfallQ={} fixedIncrement={}",
                 b.id(),b.source(),b.destinationBefore(),result,b.transformEpoch(),b.reservedQ(),b.blockedCandidateQ(),
-                b.blockedAppliedQ(),Math.max(0,b.blockedCandidateQ()-b.blockedAppliedQ()),b.blockedFixedIncrement());
+                b.blockedAppliedQ(),Math.max(0,b.blockedCandidateQ()-b.blockedAppliedQ()),b.blockedFixedIncrement()); }
         if(TRACE&&(result.equals("APPLIED")||result.equals("BLOCKED_RESERVE_SETTLED")||result.endsWith("_UNUSED"))){
             double spent=result.equals("BLOCKED_RESERVE_SETTLED")?b.blockedAppliedQ():0;
-            LOG.info("[PDD-DEFORM-Q] id={} result={} reservedQ={} spentQ={} unusedQ={}",
-                    b.id(),result,b.reservedQ(),spent,b.reservedQ()-spent);
+            { if(RogTrace.legacySlot(LogSelection.Channel.DEFORM)) LOG.info("[PDD-DEFORM-Q] id={} result={} reservedQ={} spentQ={} unusedQ={}",
+                    b.id(),result,b.reservedQ(),spent,b.reservedQ()-spent); }
         }
     }
     private Outcome uncertain(MoveTransactionJournal.BeforeImage b,Gateway gateway,String reason) {

@@ -1,6 +1,9 @@
 package com.physicaldestroydeform;
 
+import com.physicaldestroydeform.diagnostics.LogSelection;
 import com.physicaldestroydeform.diagnostics.RogTrace;
+
+
 import com.physicaldestroydeform.diagnostics.RogTrace.Stage;
 import com.physicaldestroydeform.collision.RealFixRuntimeBridge;
 import com.physicaldestroydeform.stress.StressRuntime;
@@ -37,7 +40,7 @@ import org.slf4j.LoggerFactory;
 @Mod(PhysicalDestroyDeform.MOD_ID)
 public final class PhysicalDestroyDeform {
     public static final String MOD_ID = "physical_destroy_deform";
-    public static final String BUILD_VERSION = "0.6.1-astraFix";
+    public static final String BUILD_VERSION = "0.6.1-astraFixFix";
     private static final Logger LOGGER = LoggerFactory.getLogger(PhysicalDestroyDeform.class);
     private final AcceptanceReport acceptanceReport = new AcceptanceReport();
     private final RealFixRuntimeBridge bridge = new RealFixRuntimeBridge();
@@ -73,14 +76,14 @@ public final class PhysicalDestroyDeform {
         lastNativeDropped=NativeCollisionTelemetry.dropped();lastCallbackDropped=SableContactQueue.dropped();
         TargetMaterials.clearSession();
         PlotPhysicsProbe.clear();
-        LOGGER.info("[PDD-SESSION] phase=START serverIdentity={} mode={}",System.identityHashCode(activeServer),com.physicaldestroydeform.diagnostics.DiagnosticMode.current());
+        LOGGER.info("[PDD-SESSION] phase=START serverIdentity={} mode={} logs={}",System.identityHashCode(activeServer),com.physicaldestroydeform.diagnostics.DiagnosticMode.current(),LogSelection.summary());
         MaterialRegistry.rebuild(event.getServer(), LOGGER);
-        LOGGER.info("[PDD-COPYCAT] phase=START compatibility={} policy={}",
-                com.physicaldestroydeform.material.CopycatMaterial.compatibilityStatus(),com.physicaldestroydeform.material.CopycatMaterial.POLICY);
+        { if(RogTrace.legacySlot(LogSelection.Channel.COPYCAT)) LOGGER.info("[PDD-COPYCAT] phase=START compatibility={} policy={}",
+                com.physicaldestroydeform.material.CopycatMaterial.compatibilityStatus(),com.physicaldestroydeform.material.CopycatMaterial.POLICY); }
         // Registry mismatch is external compatibility evidence, not a reason to remap blocks.
         var catwalk=net.minecraft.resources.ResourceLocation.tryParse("copycats:copycat_catwalk");
-        if(catwalk!=null)LOGGER.info("[PDD-COPYCAT] phase=REGISTRY id={} blockRegistered={} itemRegistered={} authority=NONE",
-                catwalk,net.minecraft.core.registries.BuiltInRegistries.BLOCK.containsKey(catwalk),net.minecraft.core.registries.BuiltInRegistries.ITEM.containsKey(catwalk));
+        if(catwalk!=null){ if(RogTrace.legacySlot(LogSelection.Channel.COPYCAT)) LOGGER.info("[PDD-COPYCAT] phase=REGISTRY id={} blockRegistered={} itemRegistered={} authority=NONE",
+                catwalk,net.minecraft.core.registries.BuiltInRegistries.BLOCK.containsKey(catwalk),net.minecraft.core.registries.BuiltInRegistries.ITEM.containsKey(catwalk)); }
         bridge.loadPreview(event.getServer(), LOGGER);
         try {
             worldCommit=new WorldCommitService(event.getServer(),
@@ -116,7 +119,7 @@ public final class PhysicalDestroyDeform {
             WorldBlockMutationTracker.attachPlot(null);
             LOGGER.error("[PDD-STRESS-LEDGER] phase=START status=HALTED reason=JOURNAL_INIT_FAILED mutations=OFF",unsafeStressJournal);
         }
-        LOGGER.info("[PDD-0.6.1] phase=START revision=0.6.1-astraFix CONTACT_ELASTIC_ALPHA04_PERSISTENT_CONTACT bridge=READ_ONLY nativeScalar=GAME_FORCE_PROXY " +
+        LOGGER.info("[PDD-0.6.1] phase=START revision=0.6.1-astraFixFix CONTACT_ELASTIC_ALPHA04_PERSISTENT_CONTACT bridge=READ_ONLY nativeScalar=GAME_FORCE_PROXY " +
                 "newNativeABI=NOT_REQUIRED customNullCallback=DISABLED faceRecovery=EXACT_PLUS_PAIRED_LOCAL_GAME_PATCH worldMutation={} plotMutation={} ",
                 worldCommit==null?"DISABLED":"WORLD_STATIC_ONLY",plotCommit==null?"DISABLED":"SABLE_PLOT");
     }
@@ -179,11 +182,11 @@ public final class PhysicalDestroyDeform {
             RogTrace.endTick();
             if(runtimeDiagnostics.reportDue(ended)){
                 try{if(RogTrace.sample(Stage.R13,"REPORT"))RogTrace.detail(Stage.R13,"REPORT","serverTick={} mutationHalted={} worldAvailable={} plotAvailable={} stressAvailable={}",event.getServer().getTickCount(),mutationHalted,worldCommit!=null,plotCommit!=null,stress!=null);runtimeDiagnostics.log(LOGGER);TargetMaterials.logPerformance(LOGGER);
-                    if(worldCommit!=null){LOGGER.info("[PDD-STORAGE-PERF] owner=WORLD {}",worldCommit.storagePerformance());
-                        LOGGER.info("[PDD-JOURNAL-IO] owner=WORLD {}",worldCommit.ioPerformance());}
-                    if(plotCommit!=null){LOGGER.info("[PDD-STORAGE-PERF] owner=PLOT {}",plotCommit.storagePerformance());
-                        LOGGER.info("[PDD-JOURNAL-IO] owner=PLOT {}",plotCommit.ioPerformance());}
-                    if(stress!=null)LOGGER.info("[PDD-STRESS-IO] {}",stress.ioPerformance());}
+                    if(worldCommit!=null){{ if(RogTrace.legacySlot(LogSelection.Channel.STORAGE)) LOGGER.info("[PDD-STORAGE-PERF] owner=WORLD {}",worldCommit.storagePerformance()); }
+                        { if(RogTrace.legacySlot(LogSelection.Channel.STORAGE)) LOGGER.info("[PDD-JOURNAL-IO] owner=WORLD {}",worldCommit.ioPerformance()); }}
+                    if(plotCommit!=null){{ if(RogTrace.legacySlot(LogSelection.Channel.STORAGE)) LOGGER.info("[PDD-STORAGE-PERF] owner=PLOT {}",plotCommit.storagePerformance()); }
+                        { if(RogTrace.legacySlot(LogSelection.Channel.STORAGE)) LOGGER.info("[PDD-JOURNAL-IO] owner=PLOT {}",plotCommit.ioPerformance()); }}
+                    if(stress!=null){ if(RogTrace.legacySlot(LogSelection.Channel.STRESS)) LOGGER.info("[PDD-STRESS-IO] {}",stress.ioPerformance()); }}
                 catch(RuntimeException|LinkageError unavailable){LOGGER.warn("[PDD-PERFORMANCE] status=DIAGNOSTICS_UNAVAILABLE",unavailable);}
             }
             runtimeDiagnostics.recordPhase(Phase.DIAGNOSTICS,System.nanoTime()-ended);
@@ -250,7 +253,7 @@ public final class PhysicalDestroyDeform {
         checkReceiptHealth();
         if(++ticks%100!=0)return;
         acceptanceReport.log(LOGGER);
-        LOGGER.info("[PDD-OBS] phase=SUMMARY physicsSnapshots={} nativeRecords={} callbackRecords={} " +
+        { if(RogTrace.legacySlot(LogSelection.Channel.CONTACT)) LOGGER.info("[PDD-OBS] phase=SUMMARY physicsSnapshots={} nativeRecords={} callbackRecords={} " +
                 "nativeDropped={} callbackDropped={} nativeMalformed={} nativeCapSaturatedPolls={} sourceTruncation=UNVERIFIED reason=READ_ONLY " +
                 "worldMutation={}",SableFrameCapture.summary(),
                 NativeCollisionTelemetry.total()-lastNative,
@@ -258,7 +261,7 @@ public final class PhysicalDestroyDeform {
                 NativeCollisionTelemetry.dropped()-lastNativeDropped,
                 SableContactQueue.dropped()-lastCallbackDropped,
                 NativeCollisionTelemetry.malformed(),NativeCollisionTelemetry.nativeCapSaturatedPolls(),
-                (mutationHalted||worldCommit==null?"OFF":"WORLD_STATIC")+"|"+(mutationHalted||plotCommit==null?"OFF":"SABLE_PLOT"));
+                (mutationHalted||worldCommit==null?"OFF":"WORLD_STATIC")+"|"+(mutationHalted||plotCommit==null?"OFF":"SABLE_PLOT")); }
         lastNative=NativeCollisionTelemetry.total();
         lastCallbacks=SableContactQueue.total();
         lastNativeDropped=NativeCollisionTelemetry.dropped();

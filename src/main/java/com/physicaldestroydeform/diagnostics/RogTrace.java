@@ -10,13 +10,13 @@ import org.slf4j.LoggerFactory;
 public final class RogTrace {
     public enum Stage { R01,R02,R03,R04,R05,R06,R07,R08,R09,R10,R11,R12,R13 }
     private static final Logger LOG=LoggerFactory.getLogger(RogTrace.class);
-    private static final boolean ENABLED=Boolean.parseBoolean(System.getProperty("pdd.rog.enabled","true"));
-    private static final boolean CLIENT_ENABLED=ENABLED&&Boolean.parseBoolean(System.getProperty("pdd.traceSublevelPackets","true"));
-    private static final int CAP=Math.max(0,Math.min(1024,Integer.getInteger("pdd.rog.maxPerTick",128)));
+    private static final boolean ENABLED=LogSelection.any()&&Boolean.parseBoolean(System.getProperty("pdd.rog.enabled","true"));
+    private static final boolean CLIENT_ENABLED=ENABLED&&LogSelection.enabled(LogSelection.Channel.NETWORK)&&Boolean.parseBoolean(System.getProperty("pdd.traceSublevelPackets","true"));
+    private static final int CAP=Math.max(0,Math.min(1024,Integer.getInteger("pdd.rog.maxPerTick",64)));
     private static final int INTERVAL=Math.max(20,Math.min(1200,Integer.getInteger("pdd.rog.summaryTicks",100)));
     private static final ThreadLocal<State> SERVER=new ThreadLocal<>();
     private static final int MAX_REASONS=64;
-    private static final int CHAR_CAP=Math.max(0,Math.min(1_048_576,Integer.getInteger("pdd.rog.maxCharsPerTick",131072)));
+    private static final int CHAR_CAP=Math.max(0,Math.min(1_048_576,Integer.getInteger("pdd.rog.maxCharsPerTick",32768)));
     private static final int LINE_CAP=8192;
     private static final int SEED_LIMIT=Math.max(0,Math.min(4096,Integer.getInteger("pdd.rog.seedLimit",128)));
     private static final long TRACE_EPISODE=Long.getLong("pdd.rog.traceEpisode",-1L);
@@ -42,8 +42,9 @@ public final class RogTrace {
         final LinkedHashMap<HoldKey,Hold> holds=new LinkedHashMap<>(16,.75f,true);
         final int[] stageLines=new int[Stage.values().length];
         long tick=Long.MIN_VALUE,lastSummary=Long.MIN_VALUE;
-        int lines,characters;
-        long loggingFailures,emittedLines,truncatedLines,characterSuppressed;
+        int lines,characters,legacyLines;
+        final int[] legacyByChannel=new int[LogSelection.Channel.values().length];
+        long loggingFailures,emittedLines,truncatedLines,characterSuppressed,legacySuppressed;
         Object dimension,runtimePair,pair;
         long nativeTick=-1,episode=-1;
         State(String session,int cap,int perStage,int repeat,long interval){this(session,cap,perStage,repeat,interval,0);}
@@ -52,7 +53,7 @@ public final class RogTrace {
             this.aggregateReserve=Math.max(0,Math.min(cap,aggregateReserve));
             for(var s:Stage.values())counts.put(s,new LinkedHashMap<>());
         }
-        void begin(long next){if(tick!=next){tick=next;lines=0;characters=0;Arrays.fill(stageLines,0);clearContext();}}
+        void begin(long next){if(tick!=next){tick=next;lines=0;characters=0;legacyLines=0;Arrays.fill(legacyByChannel,0);Arrays.fill(stageLines,0);clearContext();}}
         void clearContext(){dimension=null;runtimePair=null;pair=null;nativeTick=-1;episode=-1;}
         private Count count(Stage s,String reason){
             var map=counts.get(s);
@@ -84,6 +85,11 @@ public final class RogTrace {
             if(c.inWindow>=repeat)return false;
             c.last=tick;c.inWindow++;c.selected++;lines++;stageLines[stage]++;return true;
         }
+        boolean legacy(LogSelection.Channel channel){
+            int max=cap/4,perChannel=Math.max(1,max/3),i=channel.ordinal();
+            if(legacyLines>=max||legacyByChannel[i]>=perChannel){legacySuppressed++;return false;}
+            legacyLines++;legacyByChannel[i]++;return true;
+        }
         boolean due(){return lastSummary==Long.MIN_VALUE||tick<lastSummary||tick-lastSummary>=interval;}
         long seen(Stage s,String reason){var c=counts.get(s).get(reason);return c==null?0:c.seen;}
         long selected(Stage s,String reason){var c=counts.get(s).get(reason);return c==null?0:c.selected;}
@@ -96,7 +102,7 @@ public final class RogTrace {
     public static void start(){
         if(!ENABLED)return;
         try{
-            var s=new State(UUID.randomUUID().toString(),CAP,Math.min(CAP,Math.min(32,Math.max(1,CAP/Stage.values().length))),DiagnosticMode.debug()?8:1,INTERVAL,CAP==0?0:Math.max(1,CAP/4));
+            var s=new State(UUID.randomUUID().toString(),CAP,Math.min(CAP,Math.min(32,Math.max(1,CAP/Stage.values().length))),1,INTERVAL,CAP==0?0:Math.max(1,CAP/4));
             SERVER.set(s);s.begin(0);
             LOG.info("[PDD-ROG-R13] phase=START session={} cap={} aggregateReserve={} perStage={} repeat={} summaryTicks={} mode={} charCap={} seedLimit={} traceEpisode={} authority=NONE",s.session,CAP,s.aggregateReserve,s.perStage,s.repeat,INTERVAL,DiagnosticMode.current(),CHAR_CAP,SEED_LIMIT,TRACE_EPISODE);
         }catch(RuntimeException|LinkageError ignored){SERVER.remove();}
@@ -108,7 +114,7 @@ public final class RogTrace {
     public static void episode(long episode){if(ENABLED){var s=SERVER.get();if(s!=null)s.episode=episode;}}
     public static void clearContext(){if(ENABLED){var s=SERVER.get();if(s!=null)s.clearContext();}}
     public static void plotGate(String dimension,String owner,long generation,String reason,long tick,Object pending,boolean forceLive){
-        if(!ENABLED)return;
+        if(!ENABLED||!LogSelection.stage(Stage.R09))return;
         try{
             var s=SERVER.get();if(s==null)return;
             var key=new HoldKey(dimension,owner,generation);
@@ -126,13 +132,18 @@ public final class RogTrace {
     /** One compact aggregate per already bounded authorization audit or credit.
      * Never use for per-cell or per-edge loops. */
     public static boolean enabled(){return ENABLED&&SERVER.get()!=null;}
+    /** Ordinary legacy INFO is separate from the protected contact/ledger evidence budget. */
+    public static boolean legacySlot(LogSelection.Channel channel){
+        if(!LogSelection.enabled(channel))return false;
+        var s=SERVER.get();return s==null||s.legacy(channel);
+    }
     public static boolean eventSlot(Stage stage,String reason){
-        if(!ENABLED)return false;
+        if(!ENABLED||!LogSelection.stage(stage))return false;
         try{var s=SERVER.get();return s!=null&&s.event(stage,reason)&&LOG.isInfoEnabled();}
         catch(RuntimeException|LinkageError ignored){return false;}
     }
     public static boolean evidenceSlot(Stage stage,String reason){
-        if(!ENABLED)return false;
+        if(!ENABLED||!LogSelection.stage(stage))return false;
         try{var s=SERVER.get();return s!=null&&s.evidence(stage,reason)&&LOG.isInfoEnabled();}
         catch(RuntimeException|LinkageError ignored){return false;}
     }
@@ -141,17 +152,21 @@ public final class RogTrace {
     }
     /** Only controls detailed evidence output, never physics or ledger state. */
     public static boolean traceSelected(){
-        if(!ENABLED||!DiagnosticMode.debug())return false;
+        if(!ENABLED)return false;
         var s=SERVER.get();return s!=null&&(TRACE_EPISODE<0||s.episode==TRACE_EPISODE);
     }
+    public static boolean stageEnabled(Stage stage){return enabled()&&LogSelection.stage(stage);}
+    public static boolean rawSelected(){return traceSelected()&&(DiagnosticMode.trace()||TRACE_EPISODE>=0)&&stageEnabled(Stage.R01);}
     public static int seedLimit(){return SEED_LIMIT;}
     public static boolean sample(Stage stage,String reason){
-        if(!ENABLED)return false;
-        try{var s=SERVER.get();return s!=null&&s.sample(stage,reason)&&LOG.isInfoEnabled();}
+        if(!ENABLED||!LogSelection.stage(stage))return false;
+        try{var s=SERVER.get();if(s==null)return false;
+            if((!DiagnosticMode.trace()&&(TRACE_EPISODE<0||s.episode!=TRACE_EPISODE))||s.lines>=Math.max(0,(s.cap-s.aggregateReserve)/2)||s.characters>=CHAR_CAP/2){s.count(stage,reason);return false;}
+            return s.sample(stage,reason)&&LOG.isInfoEnabled();}
         catch(RuntimeException|LinkageError ignored){return false;}
     }
     public static void detail(Stage stage,String reason,String format,Object... args){
-        try{var s=SERVER.get();if(s==null)return;emit(s,stage,reason,format,args);}
+        try{var s=SERVER.get();if(s==null||!LogSelection.stage(stage))return;emit(s,stage,reason,format,args);}
         catch(RuntimeException|LinkageError ignored){/* diagnostic failure never changes physics */}
     }
     private static void emit(State s,Stage stage,String reason,String format,Object... args){
@@ -178,7 +193,7 @@ public final class RogTrace {
                 LOG.info("[PDD-ROG-{}] phase={} session={} windowTick={} counts=seen/selected/suppressed {} loggingFailures={} authority=NONE",stage,phase,s.session,s.tick,s.summary(stage),s.loggingFailures);
             long seen=0,selected=0;
             for(var map:s.counts.values())for(var count:map.values()){seen+=count.seen;selected+=count.selected;}
-            LOG.info("[PDD-ROG-R13] reason=DIAGNOSTIC_COVERAGE_SUMMARY phase={} session={} windowTick={} seen={} selected={} suppressed={} emitted={} characterSuppressed={} truncatedLines={} loggingFailures={} authority=NONE",phase,s.session,s.tick,seen,selected,seen-selected,s.emittedLines,s.characterSuppressed,s.truncatedLines,s.loggingFailures);
+            LOG.info("[PDD-ROG-R13] reason=DIAGNOSTIC_COVERAGE_SUMMARY phase={} session={} windowTick={} seen={} selected={} suppressed={} emitted={} characterSuppressed={} truncatedLines={} loggingFailures={} legacySuppressed={} authority=NONE",phase,s.session,s.tick,seen,selected,seen-selected,s.emittedLines,s.characterSuppressed,s.truncatedLines,s.loggingFailures,s.legacySuppressed);
             s.lastSummary=s.tick;
         }catch(RuntimeException|LinkageError ignored){s.loggingFailures++;}
     }

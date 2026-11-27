@@ -1,6 +1,8 @@
 package com.physicaldestroydeform.collision;
 
 import com.physicaldestroydeform.diagnostics.RogTrace;
+
+
 import com.physicaldestroydeform.diagnostics.RogTrace.Stage;
 import com.physicaldestroydeform.DamageModel;
 import com.physicaldestroydeform.MaterialProperties;
@@ -24,7 +26,7 @@ import java.util.function.Function;
 public final class ContactCreditLedger {
     public static final String LEGACY_ALGORITHM_REVISION = "PDD-IDS-1.0.7/0.4.1-spreadFix-MULTIFACE-70-30";
     public static final String PREVIOUS_ALGORITHM_REVISION = "PDD-IDS-1.0.9/0.6.1-CONTACT-ELASTIC-CHAIN";
-    public static final String ALGORITHM_REVISION = "PDD-IDS-1.0.9/0.6.1-astraFix-PAIRED-LOCAL-PATCH-ALPHA04";
+    public static final String ALGORITHM_REVISION = "PDD-IDS-1.0.9/0.6.1-astraFixFix-PAIRED-LOCAL-PATCH-ALPHA04";
     // Bounded but large enough for a 100x100 fully verified planar contact patch.
     public static final int MAX_TARGETS_PER_SIDE = 16_384;
     public static final int MAX_REGIONS = 2 * MAX_TARGETS_PER_SIDE;
@@ -314,7 +316,7 @@ public final class ContactCreditLedger {
         }
         List<ForcePropagation.Trace> traces=trace==null?null:new ArrayList<>();
         Grant issued;
-        List<SeedAudit> seedAudits=bilateral&&RogTrace.enabled()?new ArrayList<>(2):null;
+        List<SeedAudit> seedAudits=bilateral&&RogTrace.stageEnabled(Stage.R06)?new ArrayList<>(2):null;
         planning.add(validated.id());
         try {
             List<GameImpactCredit.Target> seedsA=!materialOnly&&decision.allocation().sideA()==0?List.of():validated.a().stream().sorted(CONTACT_ORDER).toList();
@@ -407,10 +409,10 @@ public final class ContactCreditLedger {
 
     private record SeedAudit(String owner,List<GameImpactCredit.Target> seeds,Map<GameImpactCredit.Target,Double> effective,double split,double sideF,int reserved,double unresolved,double damped,int exact,int consensus,int patchConsensus,int withheld,int missingMaterial,int mixedMaterial,int unproved){
         void emit(CreditId credit){
-            RogTrace.event(Stage.R06,"CONTACT_SIDE_SEAL","credit={} owner={} sideF={} forwardF={} contactDampedF={} unresolvedF={} exact={} consensus={} patchConsensus={} withheld={} missingMaterial={} mixedE={} unproved={} seedCount={} reservedUnknown={} effectiveCount={}",credit,owner,sideF,sideF-damped-unresolved,damped,unresolved,exact,consensus,patchConsensus,withheld,missingMaterial,mixedMaterial,unproved,seeds.size(),reserved,effective.size());
+            { if(RogTrace.eventSlot(Stage.R06,"CONTACT_SIDE_SEAL"))RogTrace.detail(Stage.R06,"CONTACT_SIDE_SEAL","credit={} owner={} sideF={} forwardF={} contactDampedF={} unresolvedF={} exact={} consensus={} patchConsensus={} withheld={} missingMaterial={} mixedE={} unproved={} seedCount={} reservedUnknown={} effectiveCount={}",credit,owner,sideF,sideF-damped-unresolved,damped,unresolved,exact,consensus,patchConsensus,withheld,missingMaterial,mixedMaterial,unproved,seeds.size(),reserved,effective.size()); }
             if(!RogTrace.traceSelected())return;
             int count=Math.min(seeds.size(),RogTrace.seedLimit());
-            RogTrace.event(Stage.R06,"CONTACT_SEED_EFFECTIVE_SUMMARY","credit={} owner={} seedCount={} effectiveCount={} sideF={} preContactSeedF={} reservedUnknown={} unresolvedF={} contactDampedF={} listedLimit={} truncated={}",credit,owner,seeds.size(),effective.size(),sideF,split,reserved,unresolved,damped,count,count<seeds.size());
+            { if(RogTrace.eventSlot(Stage.R06,"CONTACT_SEED_EFFECTIVE_SUMMARY"))RogTrace.detail(Stage.R06,"CONTACT_SEED_EFFECTIVE_SUMMARY","credit={} owner={} seedCount={} effectiveCount={} sideF={} preContactSeedF={} reservedUnknown={} unresolvedF={} contactDampedF={} listedLimit={} truncated={}",credit,owner,seeds.size(),effective.size(),sideF,split,reserved,unresolved,damped,count,count<seeds.size()); }
             for(int offset=0;offset<count;offset+=16){
                 if(!RogTrace.evidenceSlot(Stage.R06,"CONTACT_SEED_EFFECTIVE"))break;
                 var entries=new ArrayList<String>();int end=Math.min(count,offset+16);

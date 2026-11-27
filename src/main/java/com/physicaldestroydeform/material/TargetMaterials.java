@@ -1,6 +1,9 @@
 package com.physicaldestroydeform.material;
 
+import com.physicaldestroydeform.diagnostics.LogSelection;
 import com.physicaldestroydeform.diagnostics.RogTrace;
+
+
 import com.physicaldestroydeform.diagnostics.RogTrace.Stage;
 import com.physicaldestroydeform.collision.GameImpactCredit;
 import com.physicaldestroydeform.diagnostics.DiagnosticMode;
@@ -20,7 +23,7 @@ import java.util.*;
 /** Per-credit immutable-on-first-read target cache; cross-event reuse is pure calculation only. */
 public final class TargetMaterials {
     private static final org.slf4j.Logger LOG=LoggerFactory.getLogger(TargetMaterials.class);
-    private static final boolean TRACE=Boolean.parseBoolean(System.getProperty("pdd.copycat.trace","true"));
+    private static final boolean TRACE=LogSelection.enabled(LogSelection.Channel.COPYCAT)&&Boolean.parseBoolean(System.getProperty("pdd.copycat.trace","true"));
     private static final int TRACE_CAP=Math.max(0,Math.min(128,Integer.getInteger("pdd.copycat.trace.maxPerTick",16)));
     private static final boolean TRACE_EVERY_READ=Boolean.parseBoolean(System.getProperty("pdd.copycat.trace.everyRead",Boolean.toString(DiagnosticMode.trace())));
     private static final TraceHistory TRACE_HISTORY=new TraceHistory(2048);
@@ -53,7 +56,7 @@ public final class TargetMaterials {
     }
     public static synchronized void logPerformance(org.slf4j.Logger logger){
         var stats=CopycatMaterial.calculationStats();
-        logger.info("[PDD-COPYCAT-PERF] liveReads={} targetReads={} cacheHits={} cacheMisses={} cacheEntries={} cacheEvictions={} invalidations={} traceEntries={} traceEmitted={} traceDuplicates={} traceLimited={}",
+        if(LogSelection.enabled(LogSelection.Channel.PERF))logger.info("[PDD-COPYCAT-PERF] liveReads={} targetReads={} cacheHits={} cacheMisses={} cacheEntries={} cacheEvictions={} invalidations={} traceEntries={} traceEmitted={} traceDuplicates={} traceLimited={}",
                 CopycatMaterial.liveReads(),traceReads,stats.hits(),stats.misses(),stats.entries(),stats.evictions(),stats.invalidations(),TRACE_HISTORY.size(),traceEmitted,traceDuplicates,traceLimited);
     }
     private final MinecraftServer server;private final String dimension;private final MaterialRegistry.Snapshot snapshot;
@@ -109,6 +112,7 @@ public final class TargetMaterials {
         trace(server,dimension,owner,local,fp,snapshot,new CopycatMaterial.Capture(null,reason,"",0));return null;
     }
     private static synchronized void trace(MinecraftServer server,String dimension,String owner,String local,String fp,MaterialRegistry.Snapshot snapshot,CopycatMaterial.Capture capture){
+        if(!TRACE&&!RogTrace.stageEnabled(Stage.R07))return;
         traceReads++;
         if(RogTrace.sample(Stage.R07,capture.reason()))RogTrace.detail(Stage.R07,capture.reason(),"dimension={} owner={} local={} fingerprint={} generation={} material={} slots={} k={}",dimension,owner,local,fp,snapshot.generation(),capture.resolved(),capture.slots(),capture.k());
         if(!TRACE||TRACE_CAP==0||!LOG.isInfoEnabled())return;
@@ -120,8 +124,8 @@ public final class TargetMaterials {
         if(decision==TraceDecision.CAP){traceLimited++;return;}
         traces++;traceEmitted++;
         var r=capture.resolved();var m=r==null?null:r.material();
-        LOG.info("[PDD-COPYCAT] phase=SNAPSHOT tick={} dimension={} owner={} local={} state={} generation={} status={} reason={} slots={} k={} H={} T={} D={} E={} revision={} safeDecorativeBE={}",
+        { if(RogTrace.legacySlot(LogSelection.Channel.COPYCAT)) LOG.info("[PDD-COPYCAT] phase=SNAPSHOT tick={} dimension={} owner={} local={} state={} generation={} status={} reason={} slots={} k={} H={} T={} D={} E={} revision={} safeDecorativeBE={}",
                 tick,dimension,owner,local,fp,snapshot.generation(),r==null?"REJECT":"RESOLVED",capture.reason(),capture.slots(),capture.k(),
-                m==null?null:m.hardness(),m==null?null:m.threshold(),m==null?null:m.ductilityPercent(),m==null?null:m.elasticityPercent(),r==null?"":r.revision(),r!=null&&r.safeDecorativeBE());
+                m==null?null:m.hardness(),m==null?null:m.threshold(),m==null?null:m.ductilityPercent(),m==null?null:m.elasticityPercent(),r==null?"":r.revision(),r!=null&&r.safeDecorativeBE()); }
     }
 }

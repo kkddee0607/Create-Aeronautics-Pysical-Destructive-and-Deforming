@@ -95,7 +95,7 @@ public final class SableFrameCapture {
         try {
             // PRE is authoritative. Keep full POST audit available on demand,
             // but do not walk every Plot twice per substep in normal mode.
-            if(com.physicaldestroydeform.diagnostics.DiagnosticMode.debug())capture(system,epoch,Phase.POST_SOLVER);
+            if(com.physicaldestroydeform.diagnostics.LogSelection.enabled(com.physicaldestroydeform.diagnostics.LogSelection.Channel.NATIVE)&&com.physicaldestroydeform.diagnostics.DiagnosticMode.debug())capture(system,epoch,Phase.POST_SOLVER);
             LAST_POST.put(system,Boolean.TRUE);
             POST.increment();
         } catch (RuntimeException unsafe) {

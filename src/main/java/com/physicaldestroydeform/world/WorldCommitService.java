@@ -1,5 +1,8 @@
 package com.physicaldestroydeform.world;
 
+import com.physicaldestroydeform.diagnostics.LogSelection;
+import com.physicaldestroydeform.diagnostics.RogTrace;
+
 import com.physicaldestroydeform.DamageModel;
 import com.physicaldestroydeform.deform.*;
 import com.physicaldestroydeform.stress.*;
@@ -101,26 +104,26 @@ public final class WorldCommitService {
                 startupPrepared++;
             }else if(receipt.status()==WorldReceiptJournal.Status.DEFERRED)startupDeferred++;
         }
-        log.info("[PDD-RECOVERY] phase=HISTORICAL_QUARANTINE total={} " +
+        { if(RogTrace.legacySlot(LogSelection.Channel.STORAGE)) log.info("[PDD-RECOVERY] phase=HISTORICAL_QUARANTINE total={} " +
                         "provenNeverExecutedDeferred={} trueMutationUncertain={} " +
                         "action=KEEP_RECEIPTS_AND_PROTECT_PREPARED_OR_UNKNOWN",
-                historicalQuarantined,historicalDeferredSafe,historicalTrueQuarantine);
-        log.info("[PDD-RECOVERY] phase=START legacyDeferred={} prepared={} restoredPending={} " +
+                historicalQuarantined,historicalDeferredSafe,historicalTrueQuarantine); }
+        { if(RogTrace.legacySlot(LogSelection.Channel.STORAGE)) log.info("[PDD-RECOVERY] phase=START legacyDeferred={} prepared={} restoredPending={} " +
                         "policy=DURABLE_DEFERRED_RESUME_LEGACY_ABORT_PREPARED_QUARANTINE " +
                         "intentPayloadPersisted=true forceChunkLoad=false traceEach={}",
-                startupDeferred,startupPrepared,restored,TRACE_RECOVERY);
+                startupDeferred,startupPrepared,restored,TRACE_RECOVERY); }
         movement.recover();
         journal.enableWalChannelReuse();
         WorldBlockMutationTracker.attach(this);
-        log.info("[PDD-WORLD-POLICY] revision=0.4.1-spreadFix blockTypeVeto=OFF " +
+        { if(RogTrace.legacySlot(LogSelection.Channel.COMMIT)) log.info("[PDD-WORLD-POLICY] revision=0.4.1-spreadFix blockTypeVeto=OFF " +
                 "blockEntities=VETO multiBlock=VETO " +
                 "unbreakableMaterials=VETO loadedChunk=REQUIRED " +
-                "ownerCAS=REQUIRED breakEventVeto=ON claims=ENFORCED");
-        log.info("[PDD-PERSIST] phase=START legacySchema={} newSchema={} " +
+                "ownerCAS=REQUIRED breakEventVeto=ON claims=ENFORCED"); }
+        { if(RogTrace.legacySlot(LogSelection.Channel.COMMIT)) log.info("[PDD-PERSIST] phase=START legacySchema={} newSchema={} " +
                         "legacyMigration={} restoredDamage={} restoredReceipts={} " +
                         "restartUncertain={} storage={} mode=SHARDED_CHECKPOINT_FSYNC",
                 WorldReceiptJournal.VERSION,WorldPersistentJournal.SCHEMA,journal.migrated(),
-                journal.size(),journal.receiptCount(),unresolved.size(),journal.storageStatus());
+                journal.size(),journal.receiptCount(),unresolved.size(),journal.storageStatus()); }
         if(journal.repairedTailBytes()>0)log.warn(
                 "[PDD-PERSIST] phase=RECOVERY_TAIL_REPAIR truncatedUncommittedBytes={} " +
                 "validFramesPreserved=true completeCRCFailure=FAIL_CLOSED",
@@ -157,8 +160,8 @@ public final class WorldCommitService {
                 if(stress!=null){
                     boolean reserved=stress.reserve(projected.world(),materials,damageSettings);
                     if(VERBOSE&&(!projected.world().isEmpty()||projected.missingIncarnationQ()>0||projected.rejectedQ()>0))
-                        log.info("[PDD-COMMIT] phase=RESERVED credit={} worldIntents={} QWorld={} queued={} reserved={} materialGeneration={} QPlotDeferred={} QMissingMaterial={} QInvalidOwner={} QMissingWorldOrQuarantine={} QUnusedSource={} handoff=BOUNDED_STRESS_SPOOL",
-                                grant.id(),projected.world().size(),projected.world().stream().mapToDouble(WorldCommitCore.Intent::sealedQ).sum(),core.queued(),reserved,materials.generation(),projected.plotQ(),projected.missingMaterialQ(),projected.rejectedQ(),projected.missingIncarnationQ(),grant.unused());
+                        { if(RogTrace.legacySlot(LogSelection.Channel.COMMIT)) log.info("[PDD-COMMIT] phase=RESERVED credit={} worldIntents={} QWorld={} queued={} reserved={} materialGeneration={} QPlotDeferred={} QMissingMaterial={} QInvalidOwner={} QMissingWorldOrQuarantine={} QUnusedSource={} handoff=BOUNDED_STRESS_SPOOL",
+                                grant.id(),projected.world().size(),projected.world().stream().mapToDouble(WorldCommitCore.Intent::sealedQ).sum(),core.queued(),reserved,materials.generation(),projected.plotQ(),projected.missingMaterialQ(),projected.rejectedQ(),projected.missingIncarnationQ(),grant.unused()); }
                     return;
                 }
             }catch(StressReservationJournal.CapacityException pressure){
@@ -179,13 +182,13 @@ public final class WorldCommitService {
                 }
             }
             if(VERBOSE && (count>0 || projected.missingIncarnationQ()>0 || projected.rejectedQ()>0))
-                log.info("[PDD-COMMIT] phase=OFFER credit={} materialGeneration={} worldIntents={} " +
+                { if(RogTrace.legacySlot(LogSelection.Channel.COMMIT)) log.info("[PDD-COMMIT] phase=OFFER credit={} materialGeneration={} worldIntents={} " +
                                 "QWorld={} QPlotDeferred={} QMissingMaterial={} QInvalidOwner={} " +
                                 "QMissingWorldOrQuarantine={} QUnusedSource={} queue={}",
                         grant.id(),materials.generation(),count,
                         projected.world().stream().mapToDouble(WorldCommitCore.Intent::sealedQ).sum(),
                         projected.plotQ(),projected.missingMaterialQ(),projected.rejectedQ(),
-                        projected.missingIncarnationQ(),grant.unused(),core.queued());
+                        projected.missingIncarnationQ(),grant.unused(),core.queued()); }
         }catch(IOException|RuntimeException unexpected){
             rejected++;log.error("[PDD-COMMIT] phase=OFFER reason=INVALID_PLAN credit={} Q={} " +
                     "effect=NOT_COMMITTED",grant.id(),grant.issuedQ(),unexpected);
@@ -222,7 +225,7 @@ public final class WorldCommitService {
             }
             if(result.result()==WorldCommitCore.Outcome.ABORTED)recoveredDeferredAborted++;
             else if(result.result()==WorldCommitCore.Outcome.QUARANTINED)recoveredPreparedQuarantined++;
-            if(TRACE_RECOVERY || recoverySamples<MAX_RECOVERY_SAMPLES){
+            if(result.result()==WorldCommitCore.Outcome.QUARANTINED || LogSelection.enabled(LogSelection.Channel.STORAGE)&&(TRACE_RECOVERY || recoverySamples<MAX_RECOVERY_SAMPLES)){
                 recoverySamples++;
                 String format="[PDD-RECOVERY] phase=RESOLVE id={} prior={} result={} reason={} " +
                         "actualLoaded={} actualAir={} observedFingerprint={} key={} " +
@@ -253,14 +256,17 @@ public final class WorldCommitService {
             // Always retain physical breaks and quarantines; sample routine damage rows.
             if(result.result()==WorldCommitCore.Outcome.APPLIED_BREAK || result.result()==WorldCommitCore.Outcome.QUARANTINED || shown++<MAX_COMMIT_LOGS_PER_TICK){
                 var receipt=result.receipt();
-                var damage=receipt==null?null:journal.get(receipt.key());
-                log.info(receipt!=null&&receipt.id().startsWith("STRESS:")?"[PDD-STRESS-APPLY] phase=RESULT result={} reason={} id={} key={} damageU16={} remainderU8={} materialGeneration={} receiptStatus={} walBytes={}":"[PDD-COMMIT] phase=RESULT result={} reason={} id={} " +
+                if(result.result()==WorldCommitCore.Outcome.QUARANTINED)log.warn("[PDD-COMMIT] owner=WORLD status=QUARANTINED id={} reason={}",receipt==null?"NONE":receipt.id(),result.reason());
+                if(RogTrace.legacySlot(receipt!=null&&receipt.id().startsWith("STRESS:")?LogSelection.Channel.STRESS:LogSelection.Channel.COMMIT)){
+                    var damage=receipt==null?null:journal.get(receipt.key());
+                    log.info(receipt!=null&&receipt.id().startsWith("STRESS:")?"[PDD-STRESS-APPLY] phase=RESULT result={} reason={} id={} key={} damageU16={} remainderU8={} materialGeneration={} receiptStatus={} walBytes={}":"[PDD-COMMIT] phase=RESULT result={} reason={} id={} " +
                                 "key={} damageU16={} remainderU8={} materialGeneration={} " +
                                 "receiptStatus={} walBytes={}",
                         result.result(),result.reason(),receipt==null?"NONE":receipt.id(),
                         receipt==null?"NONE":receipt.key(),damage==null?0:damage.damage(),
                         damage==null?0:damage.remainder(),damage==null?"NONE":damage.materialGeneration(),
                         receipt==null?"NONE":receipt.status(),journal.bytes());
+                }
             }else suppressedCommitLogs++;
         }
         // Recovery WAL transitions are already fsynced. Snapshot I/O has a bounded
@@ -271,10 +277,10 @@ public final class WorldCommitService {
                 int flushed=journal.checkpointBatch(WorldPersistentJournal.SAVE_DIRTY_BATCH);
                 var after=journal.stats();
                 if(flushed>0 && (VERBOSE || before.generation()!=after.generation()))
-                    log.info("[PDD-PERSIST] phase=CHECKPOINT flushedShards={} " +
+                    { if(RogTrace.legacySlot(LogSelection.Channel.COMMIT)) log.info("[PDD-PERSIST] phase=CHECKPOINT flushedShards={} " +
                                     "generationBefore={} generationAfter={} pending={} state={} receipt={} walBytes={}",
                             flushed,before.generation(),after.generation(),after.checkpointing(),
-                            after.states(),after.receipts(),after.walBytes());
+                            after.states(),after.receipts(),after.walBytes()); }
             }catch(IOException checkpointFailure){
                 fault=true;
                 log.error("[PDD-PERSIST] phase=CHECKPOINT status=IO_FAULT " +
@@ -284,18 +290,18 @@ public final class WorldCommitService {
         }
         if(tick-lastSummaryTick>=100) {
             lastSummaryTick=tick;
-            log.info("[PDD-SAVE] phase=SUMMARY accepted={} appliedDamage={} appliedBreak={} " +
+            { if(RogTrace.legacySlot(LogSelection.Channel.STORAGE)) log.info("[PDD-SAVE] phase=SUMMARY accepted={} appliedDamage={} appliedBreak={} " +
                             "rejected={} quarantined={} queued={} restorePending={} retainedDamage={} " +
                             "receipts={} walBytes={} fault={} suppressedCommitLogs={}",
                     accepted,appliedDamage,appliedBreak,rejected,blocked,core.queued(),unresolved.size(),
-                    journal.size(),journal.receiptCount(),journal.bytes(),fault||core.ioFault(),suppressedCommitLogs);
+                    journal.size(),journal.receiptCount(),journal.bytes(),fault||core.ioFault(),suppressedCommitLogs); }
             if(recoveredDeferredAborted>0 || recoveredPreparedQuarantined>0 || !unresolved.isEmpty())
-                log.info("[PDD-RECOVERY] phase=SUMMARY deferredAborted={} " +
+                { if(RogTrace.legacySlot(LogSelection.Channel.STORAGE)) log.info("[PDD-RECOVERY] phase=SUMMARY deferredAborted={} " +
                                 "preparedQuarantined={} awaitingLoaded={} loadMissAttempts={} " +
                                 "manualRepairOnlyForPrepared=true",
                         recoveredDeferredAborted,recoveredPreparedQuarantined,
-                        unresolved.size(),recoveryLoadMisses);
-            if(VERBOSE)log.info("[PDD-PERSIST] phase=STORAGE {}",journal.storageStatus());
+                        unresolved.size(),recoveryLoadMisses); }
+            if(VERBOSE){ if(RogTrace.legacySlot(LogSelection.Channel.COMMIT)) log.info("[PDD-PERSIST] phase=STORAGE {}",journal.storageStatus()); }
         }
     }
     boolean isQuarantined(SparseStateKey key){return quarantined.contains(new Cell(key))||movement.fences.quarantined(key)
@@ -347,7 +353,7 @@ public final class WorldCommitService {
     long moveRevision(SparseStateKey key){return journal.revision(key.dimension(),key.x(),key.y(),key.z());}
     MoveTransactionExecutor.Settlement settleBlockedMove(MoveTransactionJournal.BeforeImage b){
         var result=core.settleBlockedMove(gateway,b,server.getTickCount(),server.overworld().getGameTime());
-        log.info("[PDD-DEFORM-BLOCKED] owner=WORLD id={} result={} candidateQ={} appliedCapQ={} fixed={} receipt={}",b.id(),result,b.blockedCandidateQ(),b.blockedAppliedQ(),b.blockedFixedIncrement(),journal.receipt(b.blockedApplyId()));
+        { if(RogTrace.legacySlot(LogSelection.Channel.DEFORM)) log.info("[PDD-DEFORM-BLOCKED] owner=WORLD id={} result={} candidateQ={} appliedCapQ={} fixed={} receipt={}",b.id(),result,b.blockedCandidateQ(),b.blockedAppliedQ(),b.blockedFixedIncrement(),journal.receipt(b.blockedApplyId())); }
         return result;
     }
     private void releasePending(Cell cell) {
@@ -398,9 +404,9 @@ public final class WorldCommitService {
             // old ambiguous ApplyIds stay terminal in the receipt ledger.
             quarantined.remove(cell);
             // Durable generation + tombstone share a single WAL frame.
-            if(VERBOSE)log.info("[PDD-PERSIST] phase=REPLACEMENT dimension={} " +
+            if(VERBOSE){ if(RogTrace.legacySlot(LogSelection.Channel.COMMIT)) log.info("[PDD-PERSIST] phase=REPLACEMENT dimension={} " +
                     "x={} y={} z={} incarnationRevision={} damageInvalidated=true",
-                    cell.dimension(),cell.x(),cell.y(),cell.z(),revision);
+                    cell.dimension(),cell.x(),cell.y(),cell.z(),revision); }
             // Intents already queued will fail their preflight if this block is replaced.
             releaseIfIdle(cell);
         }catch(IOException|RuntimeException unexpected) {
@@ -498,8 +504,8 @@ public final class WorldCommitService {
             do {
                 flushed+=journal.checkpointBatch(WorldPersistentJournal.SAVE_DIRTY_BATCH);
             }while(journal.checkpointPending() && ++passes<4096);
-            log.info("[PDD-PERSIST] phase=STOP_CHECKPOINT writtenShards={} pending={} {}",
-                    flushed,journal.checkpointPending(),journal.storageStatus());
+            { if(RogTrace.legacySlot(LogSelection.Channel.COMMIT)) log.info("[PDD-PERSIST] phase=STOP_CHECKPOINT writtenShards={} pending={} {}",
+                    flushed,journal.checkpointPending(),journal.storageStatus()); }
             }
         }catch(IOException failed){
             fault=true;log.error("[PDD-PERSIST] phase=STOP_CHECKPOINT status=FAILED " +
@@ -507,15 +513,15 @@ public final class WorldCommitService {
         }finally{
             try{journal.close();}catch(IOException failed){fault=true;log.error("[PDD-PERSIST] phase=STOP_CHANNEL status=FAILED wal=RETAINED",failed);}
         }
-        log.info("[PDD-RECOVERY] phase=STOP deferredAborted={} " +
+        { if(RogTrace.legacySlot(LogSelection.Channel.STORAGE)) log.info("[PDD-RECOVERY] phase=STOP deferredAborted={} " +
                         "preparedQuarantined={} awaitingLoaded={} loadMissAttempts={} " +
                         "requiresManualRepair={}",
                 recoveredDeferredAborted,recoveredPreparedQuarantined,unresolved.size(),
-                recoveryLoadMisses,recoveredPreparedQuarantined);
-        log.info("[PDD-SAVE] phase=STOP status={} pending={} restorePending={} " +
+                recoveryLoadMisses,recoveredPreparedQuarantined); }
+        { if(RogTrace.legacySlot(LogSelection.Channel.STORAGE)) log.info("[PDD-SAVE] phase=STOP status={} pending={} restorePending={} " +
                         "states={} receipts={} bytes={} mode=SHARDED_FSYNC",
                 fault||core.ioFault()?"IO_FAULT":"CLEAN",core.queued(),unresolved.size(),
-                journal.size(),journal.receiptCount(),journal.bytes());
+                journal.size(),journal.receiptCount(),journal.bytes()); }
         watched.clear();quarantined.clear();pendingCells.clear();unresolved.clear();
         lineageActive.clear();lineageQuarantine.clear();
     }

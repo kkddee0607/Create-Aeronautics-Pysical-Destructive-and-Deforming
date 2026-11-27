@@ -1,6 +1,9 @@
 package com.physicaldestroydeform.plot;
 
+import com.physicaldestroydeform.diagnostics.LogSelection;
 import com.physicaldestroydeform.diagnostics.RogTrace;
+
+
 import com.physicaldestroydeform.diagnostics.RogTrace.Stage;
 import com.mojang.authlib.GameProfile;
 import com.physicaldestroydeform.DamageModel;
@@ -101,7 +104,7 @@ public final class NeoForgePlotGateway implements WorldCommitCore.WorldGateway,M
     private long heatMapHolds,spacingHolds,tickWitnessHolds;
     private static final int MOVE_FLAGS=Block.UPDATE_ALL|Block.UPDATE_MOVE_BY_PISTON;
     private static final String UNOBSERVED_DEST="PDD:MOVE_DESTINATION_UNAVAILABLE";
-    private static final boolean TRACE_MOVES=Boolean.parseBoolean(System.getProperty("pdd.deform.trace","true"));
+    private static final boolean TRACE_MOVES=LogSelection.enabled(LogSelection.Channel.DEFORM)&&Boolean.parseBoolean(System.getProperty("pdd.deform.trace","true"));
     private record MoveWait(long tick,MoveTransactionExecutor.Readback expected,double expectedMass) {}
     private final Map<PlotOwnerFence.Owner,String> ownerMoves=new HashMap<>();
     private final Map<String,MoveWait> moveWaits=new HashMap<>();
@@ -322,7 +325,7 @@ public final class NeoForgePlotGateway implements WorldCommitCore.WorldGateway,M
                         suspendedContainers.remove(owner);
                         changedTicks.put(owner,(long)server.getTickCount());
                         if(RogTrace.sample(Stage.R12,"SERVER_REBOUND"))RogTrace.detail(Stage.R12,"SERVER_REBOUND","dimension={} owner={} generation={} runtimeId={}",dim,owner.uuid(),owner.generation(),sub.getRuntimeId());
-                        LOG.info("[PDD-PLOT-LIFECYCLE] phase=REBOUND dim={} owner={} generation={} runtimeBodyId={} proof=UNLOAD_ADD_SAME_CENTER",dim,owner.uuid(),owner.generation(),sub.getRuntimeId());
+                        { if(RogTrace.legacySlot(LogSelection.Channel.COMMIT)) LOG.info("[PDD-PLOT-LIFECYCLE] phase=REBOUND dim={} owner={} generation={} runtimeBodyId={} proof=UNLOAD_ADD_SAME_CENTER",dim,owner.uuid(),owner.generation(),sub.getRuntimeId()); }
                         continue;
                     }
                 }
@@ -379,12 +382,12 @@ public final class NeoForgePlotGateway implements WorldCommitCore.WorldGateway,M
                 RogTrace.plotGate(cell.real().dimension(),cell.real().ownerId(),cell.real().ownerGeneration(),"HEATMAP_PENDING",tick,pending,forceLive);
                 if(RogTrace.sample(Stage.R09,"HEATMAP_PENDING"))RogTrace.detail(Stage.R09,"HEATMAP_PENDING","key={} serverTick={} forceLive={} pending={}",cell.real(),tick,forceLive,pending);
                 if(++heatMapHolds==1 || heatMapHolds%256==0)
-                    LOG.warn("[PDD-PLOT-SAFE] phase=WAIT_SABLE_HEATMAP " +
+                    { if(RogTrace.legacySlot(LogSelection.Channel.COMMIT)) LOG.warn("[PDD-PLOT-SAFE] phase=WAIT_SABLE_HEATMAP " +
                                     "owner={} generation={} runtimeBodyId={} initialized={} " +
                                     "splitComplete={} floodfill={} removed={} newStarts={} splitCells={} " +
                                     "holdCount={} action=DEFER_BEFORE_PREPARED",
                             cell.sub().getUniqueId(),cell.real().ownerGeneration(),cell.sub().getRuntimeId(),
-                            pending.initialized(),pending.complete(),pending.flood(),pending.removed(),pending.starts(),pending.splitCells(),heatMapHolds);
+                            pending.initialized(),pending.complete(),pending.flood(),pending.removed(),pending.starts(),pending.splitCells(),heatMapHolds); }
                 return "SABLE_HEATMAP_PENDING_SPLIT";
             }
             var owner=PlotOwnerFence.Owner.of(cell.real());
@@ -397,9 +400,9 @@ public final class NeoForgePlotGateway implements WorldCommitCore.WorldGateway,M
             if("PLOT_BREAK_SPACING".equals(hold)) spacingHolds++;
             else if(hold!=null) {
                 if(++tickWitnessHolds==1 || tickWitnessHolds%256==0)
-                    LOG.warn("[PDD-PLOT-SAFE] phase=WAIT_SABLE_TICK owner={} generation={} " +
+                    { if(RogTrace.legacySlot(LogSelection.Channel.COMMIT)) LOG.warn("[PDD-PLOT-SAFE] phase=WAIT_SABLE_TICK owner={} generation={} " +
                                     "serverTick={} completedHeatMapTick={} holdCount={} action=DEFER_BEFORE_PREPARED",
-                            owner.uuid(),owner.generation(),tick,completed,tickWitnessHolds);
+                            owner.uuid(),owner.generation(),tick,completed,tickWitnessHolds); }
             }
             return hold;
         } catch(RuntimeException|LinkageError unsafe) {
@@ -523,8 +526,8 @@ public final class NeoForgePlotGateway implements WorldCommitCore.WorldGateway,M
     private MoveTransactionExecutor.Gate gate(MoveTransactionJournal.BeforeImage b,MoveTransactionExecutor.Gate result,String reason){
         if(RogTrace.sample(Stage.R08,reason))RogTrace.detail(Stage.R08,reason,"moveId={} directId={} source={} target={} gate={} epoch={} reservedQ={}",b.id(),b.directApplyId(),b.source(),b.destinationBefore(),result,b.transformEpoch(),b.reservedQ());
         if(TRACE_MOVES&&(result==MoveTransactionExecutor.Gate.BLOCKED||result==MoveTransactionExecutor.Gate.UNKNOWN))
-            LOG.info("[PDD-DEFORM] phase=PLOT_GATE moveId={} owner={} source={} target={} result={} reason={} reservedQ={} blockedCandidateQ={} blockedAppliedQ={}",
-                    b.id(),owner(b).uuid(),b.source(),b.destinationBefore(),result,reason,b.reservedQ(),b.blockedCandidateQ(),b.blockedAppliedQ());
+            { if(RogTrace.legacySlot(LogSelection.Channel.DEFORM)) LOG.info("[PDD-DEFORM] phase=PLOT_GATE moveId={} owner={} source={} target={} result={} reason={} reservedQ={} blockedCandidateQ={} blockedAppliedQ={}",
+                    b.id(),owner(b).uuid(),b.source(),b.destinationBefore(),result,reason,b.reservedQ(),b.blockedCandidateQ(),b.blockedAppliedQ()); }
         return result;
     }
     private Cell local(Cell c,BlockPos p){return locate(PlotKeyCodec.storage(at(c.real(),p,"PDD:MOVE_PROBE")),false);}
@@ -698,8 +701,8 @@ public final class NeoForgePlotGateway implements WorldCommitCore.WorldGateway,M
     private MoveTransactionExecutor.Readback waitForHeat(MoveTransactionJournal.BeforeImage b,MoveTransactionExecutor.Readback expected,double expectedMass){
         if(!Double.isFinite(expectedMass)||expectedMass<=0)return MoveTransactionExecutor.Readback.UNCERTAIN;
         moveWaits.put(b.id(),new MoveWait(server.getTickCount(),expected,expectedMass));
-        if(TRACE_MOVES)LOG.info("[PDD-DEFORM] phase=PLOT_HEATMAP_WAIT moveId={} owner={} source={} dest={} mutationServerTick={} expected={} expectedSelfMass={}",
-                b.id(),owner(b).uuid(),b.source(),b.destinationAfter().key(),server.getTickCount(),expected,expectedMass);
+        if(TRACE_MOVES){ if(RogTrace.legacySlot(LogSelection.Channel.DEFORM)) LOG.info("[PDD-DEFORM] phase=PLOT_HEATMAP_WAIT moveId={} owner={} source={} dest={} mutationServerTick={} expected={} expectedSelfMass={}",
+                b.id(),owner(b).uuid(),b.source(),b.destinationAfter().key(),server.getTickCount(),expected,expectedMass); }
         return MoveTransactionExecutor.Readback.WAITING;
     }
     private MoveTransactionExecutor.Readback rollbackDestination(MoveTransactionJournal.BeforeImage b,BlockState oldDestination,double originalMass){
@@ -767,8 +770,8 @@ public final class NeoForgePlotGateway implements WorldCommitCore.WorldGateway,M
                 LOG.warn("[PDD-DEFORM] phase=PLOT_MASS_MISMATCH moveId={} expectedMass={} actualMass={} tolerance={} action=QUARANTINE",b.id(),wait.expectedMass(),actualMass,tolerance);
                 return MoveTransactionExecutor.Readback.UNCERTAIN;
             }
-            if(TRACE_MOVES)LOG.info("[PDD-DEFORM] phase=PLOT_POSTSTATE moveId={} owner={} source={} dest={} mutationTick={} completedHeatMapTick={} result={} reservedQ={} expectedSelfMass={} actualSelfMass={} nativeUpdate=NORMAL_SETTER_COLLIDER_NOT_INDEPENDENTLY_MEASURED",
-                    b.id(),owner(b).uuid(),b.source(),b.destinationAfter().key(),wait.tick(),complete,wait.expected(),b.reservedQ(),wait.expectedMass(),actualMass);
+            if(TRACE_MOVES){ if(RogTrace.legacySlot(LogSelection.Channel.DEFORM)) LOG.info("[PDD-DEFORM] phase=PLOT_POSTSTATE moveId={} owner={} source={} dest={} mutationTick={} completedHeatMapTick={} result={} reservedQ={} expectedSelfMass={} actualSelfMass={} nativeUpdate=NORMAL_SETTER_COLLIDER_NOT_INDEPENDENTLY_MEASURED",
+                    b.id(),owner(b).uuid(),b.source(),b.destinationAfter().key(),wait.tick(),complete,wait.expected(),b.reservedQ(),wait.expectedMass(),actualMass); }
             lastBreakAttempt.put(owner(b),new PlotBreakPacing.Attempt(server.getTickCount(),true));
             return wait.expected();
         }catch(RuntimeException|LinkageError unsafe){return MoveTransactionExecutor.Readback.UNCERTAIN;}
@@ -839,10 +842,10 @@ public final class NeoForgePlotGateway implements WorldCommitCore.WorldGateway,M
         }
         if(status==WorldCommitCore.BreakReadback.CONFIRMED_AIR)return;
         if(status==WorldCommitCore.BreakReadback.CONFIRMED_AIR_MUTATION_WITNESS){
-            LOG.info("[PDD-PLOT-WITNESS] sessionId={} phase=CONFIRMED_BLOCK_TO_AIR " +
+            { if(RogTrace.legacySlot(LogSelection.Channel.COMMIT)) LOG.info("[PDD-PLOT-WITNESS] sessionId={} phase=CONFIRMED_BLOCK_TO_AIR " +
                     "key={} result=APPLIED_BREAK source=LEVEL_CHUNK_RETURN " +
                     "nativeMassCollider=UNVERIFIED",
-                    PlotPhysicsProbe.sessionId(),virtual);
+                    PlotPhysicsProbe.sessionId(),virtual); }
             return;
         }
         String explanation=reread==null?readbackMissingReason(virtual):

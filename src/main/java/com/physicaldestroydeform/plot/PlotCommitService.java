@@ -1,5 +1,8 @@
 package com.physicaldestroydeform.plot;
 
+import com.physicaldestroydeform.diagnostics.LogSelection;
+import com.physicaldestroydeform.diagnostics.RogTrace;
+
 import com.physicaldestroydeform.DamageModel;
 import com.physicaldestroydeform.deform.*;
 import com.physicaldestroydeform.stress.*;
@@ -110,29 +113,29 @@ public final class PlotCommitService {
             }
         }
         movement.recover();
-        log.info("[PDD-PLOT-RECOVERY] phase=START restoredPending={} legacyOrPrepared={} intentPayloadPersisted=true",
-                restored,unresolved.size());
+        { if(RogTrace.legacySlot(LogSelection.Channel.STORAGE)) log.info("[PDD-PLOT-RECOVERY] phase=START restoredPending={} legacyOrPrepared={} intentPayloadPersisted=true",
+                restored,unresolved.size()); }
         // Power loss after the durable orphan marker but before state tombstones:
         // re-queue cleanup without allowing stale data to become live.
         for(var owner:quarantined){
             for(Coordinate cell:active.getOrDefault(owner,Set.of()))queueOrphanCleanup(cell);
             removeActiveOwner(owner);
-            log.info("[PDD-PLOT-ORPHAN] phase=RECOVERY owner={} generation={} " +
+            { if(RogTrace.legacySlot(LogSelection.Channel.COMMIT)) log.info("[PDD-PLOT-ORPHAN] phase=RECOVERY owner={} generation={} " +
                     "cleanupQueued={} marker=RESTORED transfer=FORBIDDEN",
-                    owner.uuid(),owner.generation(),orphanCleanup.size());
+                    owner.uuid(),owner.generation(),orphanCleanup.size()); }
         }
         // No old sparse damage may become live merely because a new ship uses the same coordinates.
-        log.info("[PDD-PLOT] phase=START revision=0.5.1 cap={} BE=VETO_UNSAFE " +
+        { if(RogTrace.legacySlot(LogSelection.Channel.COMMIT)) log.info("[PDD-PLOT] phase=START revision=0.5.1 cap={} BE=VETO_UNSAFE " +
                         "loaded=REQUIRED ownerEpoch=REQUIRED split=ORPHAN_QUARANTINE " +
                         "storedDamage={} receipt={} unresolved={} orphaned={} schema={} " +
                         "massCollider=SABLE_NORMAL_BLOCK_CHANGE_HOOK_NOT_INDEPENDENTLY_VERIFIED",
                 cap,journal.size(),journal.receiptCount(),unresolved.size(),quarantined.size(),
-                WorldPersistentJournal.SCHEMA);
+                WorldPersistentJournal.SCHEMA); }
         journal.enableWalChannelReuse();
-        log.info("[PDD-PLOT-SAFE] phase=POLICY source=SABLE_2_0_6_HEATMAP_READ_ONLY tickWitness=REQUIRED_CURRENT_SERVER_TICK " +
+        { if(RogTrace.legacySlot(LogSelection.Channel.COMMIT)) log.info("[PDD-PLOT-SAFE] phase=POLICY source=SABLE_2_0_6_HEATMAP_READ_ONLY tickWitness=REQUIRED_CURRENT_SERVER_TICK " +
                 "breakSpacingTicks={} uncertainSpacingMin=3 pendingAction=DEFER_BEFORE_PREPARED " +
                 "unknownState=FAIL_CLOSED splitAndNativeSave=NOT_INDEPENDENTLY_VERIFIED",
-                gateway.breakSpacingTicks());
+                gateway.breakSpacingTicks()); }
     }
     private void unregisterState(SparseStateKey virtual){
         if(!PlotKeyCodec.isPlotStorage(virtual))return;
@@ -187,8 +190,8 @@ public final class PlotCommitService {
                 if(stress!=null){
                     boolean reserved=stress.reserve(projection.plot(),materials,damageSettings);
                     if(!projection.plot().isEmpty()||projection.missingOwnerQ()>0)
-                        log.info("[PDD-PLOT] phase=RESERVED credit={} plotTargets={} QPlot={} queued={} reserved={} QWorldUnchanged={} QMissingMaterial={} QUnavailableOwner={} QRejected={} QUnused={} handoff=BOUNDED_STRESS_SPOOL",
-                                grant.id(),projection.plot().size(),projection.plot().stream().mapToDouble(WorldCommitCore.Intent::sealedQ).sum(),core.queued(),reserved,projection.worldQ(),projection.missingMaterialQ(),projection.missingOwnerQ(),projection.rejectedQ(),grant.unused());
+                        { if(RogTrace.legacySlot(LogSelection.Channel.COMMIT)) log.info("[PDD-PLOT] phase=RESERVED credit={} plotTargets={} QPlot={} queued={} reserved={} QWorldUnchanged={} QMissingMaterial={} QUnavailableOwner={} QRejected={} QUnused={} handoff=BOUNDED_STRESS_SPOOL",
+                                grant.id(),projection.plot().size(),projection.plot().stream().mapToDouble(WorldCommitCore.Intent::sealedQ).sum(),core.queued(),reserved,projection.worldQ(),projection.missingMaterialQ(),projection.missingOwnerQ(),projection.rejectedQ(),grant.unused()); }
                     return;
                 }
             }catch(StressReservationJournal.CapacityException pressure){
@@ -205,13 +208,13 @@ public final class PlotCommitService {
                 }
             }
             if(!projection.plot().isEmpty() || projection.missingOwnerQ()>0){
-                log.info("[PDD-PLOT] phase=OFFER credit={} plotTargets={} QPlot={} " +
+                { if(RogTrace.legacySlot(LogSelection.Channel.COMMIT)) log.info("[PDD-PLOT] phase=OFFER credit={} plotTargets={} QPlot={} " +
                                 "QWorldUnchanged={} QMissingMaterial={} QUnavailableOwner={} " +
                                 "QRejected={} QUnused={} queued={}",
                         grant.id(),projection.plot().size(),
                         projection.plot().stream().mapToDouble(WorldCommitCore.Intent::sealedQ).sum(),
                         projection.worldQ(),projection.missingMaterialQ(),projection.missingOwnerQ(),
-                        projection.rejectedQ(),grant.unused(),core.queued());
+                        projection.rejectedQ(),grant.unused(),core.queued()); }
             }
         }catch(IOException|RuntimeException failed){
             rejected++;log.error("[PDD-PLOT] phase=OFFER reason=INVALID_SEALED_PLAN " +
@@ -293,7 +296,7 @@ public final class PlotCommitService {
         verifiedLineage.put(dimension+"|"+child.getUniqueId(),parent.getUniqueId());
         gateway.lineageChanged(dimension,parent.getUniqueId());
         gateway.lineageChanged(dimension,child.getUniqueId());
-        log.info("[PDD-LINEAGE] parent={} child={} proof=NATIVE_MOVE_BLOCKS",parent.getUniqueId(),child.getUniqueId());
+        { if(RogTrace.legacySlot(LogSelection.Channel.LINEAGE)) log.info("[PDD-LINEAGE] parent={} child={} proof=NATIVE_MOVE_BLOCKS",parent.getUniqueId(),child.getUniqueId()); }
     }
     public boolean verifiedLineage(String dimension,UUID parent,UUID child){
         return parent.equals(verifiedLineage.get(dimension+"|"+child));
@@ -406,8 +409,8 @@ public final class PlotCommitService {
                 long revision=journal.replaceBlock(cell.dimension(),cell.x(),cell.y(),cell.z());
                 if(!lineageActive.contains(cell)&&revision>lineageQuarantine.getOrDefault(cell,Long.MAX_VALUE))lineageQuarantine.remove(cell);
                 if(!lineageActive.contains(cell)&&!lineageQuarantine.containsKey(cell))unregisterState(sample);
-                log.info("[PDD-PLOT] phase=REPLACEMENT owner={} local={} " +
-                                "old={} next={} retainedDamage=INVALIDATED",owner.uuid(),rel,before,after);
+                { if(RogTrace.legacySlot(LogSelection.Channel.COMMIT)) log.info("[PDD-PLOT] phase=REPLACEMENT owner={} local={} " +
+                                "old={} next={} retainedDamage=INVALIDATED",owner.uuid(),rel,before,after); }
             }
         }catch(IOException e){
             fault=true;log.error("[PDD-PLOT] phase=REPLACEMENT status=IO_FAULT action=HALT",e);
@@ -436,7 +439,7 @@ public final class PlotCommitService {
     long moveRevision(SparseStateKey key){return journal.revision(key.dimension(),key.x(),key.y(),key.z());}
     MoveTransactionExecutor.Settlement settleBlockedMove(MoveTransactionJournal.BeforeImage b){
         var result=core.settleBlockedMove(gateway,b,server.getTickCount(),server.overworld().getGameTime());
-        log.info("[PDD-DEFORM-BLOCKED] owner=PLOT id={} result={} candidateQ={} appliedCapQ={} fixed={} receipt={}",b.id(),result,b.blockedCandidateQ(),b.blockedAppliedQ(),b.blockedFixedIncrement(),journal.receipt(b.blockedApplyId()));
+        { if(RogTrace.legacySlot(LogSelection.Channel.DEFORM)) log.info("[PDD-DEFORM-BLOCKED] owner=PLOT id={} result={} candidateQ={} appliedCapQ={} fixed={} receipt={}",b.id(),result,b.blockedCandidateQ(),b.blockedAppliedQ(),b.blockedFixedIncrement(),journal.receipt(b.blockedApplyId())); }
         return result;
     }
     public void tick(long tick){
@@ -487,14 +490,18 @@ public final class PlotCommitService {
             if(result.result()==WorldCommitCore.Outcome.QUARANTINED)blocked++;
             if(result.result()==WorldCommitCore.Outcome.DEFERRED)continue;
             if(result.result()==WorldCommitCore.Outcome.APPLIED_BREAK || result.result()==WorldCommitCore.Outcome.QUARANTINED || count++<MAX_LOGS_PER_TICK){
-                var r=result.receipt();var state=r==null?null:journal.get(r.key());
-                log.info(r!=null&&r.id().startsWith("STRESS:")?"[PDD-STRESS-APPLY] phase=COMMIT serverTick={} result={} reason={} id={} target={} damage={} remainder={} status={} blockMutation={} sableLifecycle=SABLE_NORMAL_HOOK":"[PDD-PLOT] phase=COMMIT serverTick={} result={} reason={} id={} target={} " +
+                var r=result.receipt();
+                if(result.result()==WorldCommitCore.Outcome.QUARANTINED)log.warn("[PDD-COMMIT] owner=PLOT status=QUARANTINED id={} reason={}",r==null?"NONE":r.id(),result.reason());
+                if(RogTrace.legacySlot(r!=null&&r.id().startsWith("STRESS:")?LogSelection.Channel.STRESS:LogSelection.Channel.COMMIT)){
+                    var state=r==null?null:journal.get(r.key());
+                    log.info(r!=null&&r.id().startsWith("STRESS:")?"[PDD-STRESS-APPLY] phase=COMMIT serverTick={} result={} reason={} id={} target={} damage={} remainder={} status={} blockMutation={} sableLifecycle=SABLE_NORMAL_HOOK":"[PDD-PLOT] phase=COMMIT serverTick={} result={} reason={} id={} target={} " +
                                 "damage={} remainder={} status={} blockMutation={} " +
                                 "sableLifecycle=VANILLA_CHANGE_HOOK_REQUIRES_INGAME_VERIFICATION",
                         tick,result.result(),result.reason(),r==null?"NONE":r.id(),
                         r==null?"NONE":PlotKeyCodec.real(r.key()),
                         state==null?0:state.damage(),state==null?0:state.remainder(),
                         r==null?"NONE":r.status(),result.result()==WorldCommitCore.Outcome.APPLIED_BREAK);
+                }
             }else suppressedCommitLogs++;
         }
         if(journal.checkpointNeeded() || tick%100==0){
@@ -503,12 +510,12 @@ public final class PlotCommitService {
         }
         if(tick-lastSummary>=100){
             lastSummary=tick;
-            log.info("[PDD-PLOT] phase=SUMMARY accepted={} damaged={} broken={} rejected={} " +
+            { if(RogTrace.legacySlot(LogSelection.Channel.COMMIT)) log.info("[PDD-PLOT] phase=SUMMARY accepted={} damaged={} broken={} rejected={} " +
                             "blocked={} splitOrphans={} pending={} orphanCleanup={} persistentStates={} receipts={} " +
                             "walBytes={} fault={} heatMapHolds={} breakSpacingHolds={} " +
                             "breakSpacingTicks={} tickWitnessHolds={} suppressedCommitLogs={}",accepted,damaged,broken,rejected,blocked,splitOrphans,
                     core.queued(),orphanCleanup.size(),journal.size(),journal.receiptCount(),journal.bytes(),
-                    fault||core.ioFault(),gateway.heatMapHolds(),gateway.spacingHolds(),gateway.breakSpacingTicks(),gateway.tickWitnessHolds(),suppressedCommitLogs);
+                    fault||core.ioFault(),gateway.heatMapHolds(),gateway.spacingHolds(),gateway.breakSpacingTicks(),gateway.tickWitnessHolds(),suppressedCommitLogs); }
         }
     }
     public void attachStress(StressRuntime runtime){
@@ -601,8 +608,8 @@ public final class PlotCommitService {
             int n=0;
             do{journal.checkpointBatch(WorldPersistentJournal.SAVE_DIRTY_BATCH);}
             while(journal.checkpointPending()&&++n<4096);
-            log.info("[PDD-PLOT] phase=STOP checkpointPending={} retained={} receipts={} pending={}",
-                    journal.checkpointPending(),journal.size(),journal.receiptCount(),core.queued());
+            { if(RogTrace.legacySlot(LogSelection.Channel.COMMIT)) log.info("[PDD-PLOT] phase=STOP checkpointPending={} retained={} receipts={} pending={}",
+                    journal.checkpointPending(),journal.size(),journal.receiptCount(),core.queued()); }
             }
         }catch(IOException failed){
             fault=true;

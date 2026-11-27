@@ -1,6 +1,8 @@
 package com.physicaldestroydeform.collision;
 
 import com.physicaldestroydeform.diagnostics.RogTrace;
+
+
 import com.physicaldestroydeform.diagnostics.RogTrace.Stage;
 import com.physicaldestroydeform.diagnostics.NativeCollisionTelemetry;
 import net.minecraft.server.MinecraftServer;
@@ -243,6 +245,11 @@ public final class SableContactRegions {
             return collected;
         String[] owners={pair.a().stableKey(),pair.b().stableKey()};
         int[] remainingSurface={RUNTIME_MAX_UNIQUE_CELLS_PER_SIDE-collected.checksA(),RUNTIME_MAX_UNIQUE_CELLS_PER_SIDE-collected.checksB()};
+        var polls=new HashMap<Long,Integer>();
+        boolean patchEligible=false;
+        for(var c:new LinkedHashSet<>(records))if(c!=null&&c.pollId()>0&&polls.merge(c.pollId(),1,Integer::sum)>=3){patchEligible=true;break;}
+        int[] patchReserve=patchEligible?new int[]{remainingSurface[0]/4,remainingSurface[1]/4}:new int[2];
+        remainingSurface[0]-=patchReserve[0];remainingSurface[1]-=patchReserve[1];
         boolean[] surfaceReadLimited={false,false};
         int surfacePairChecks=0,surfaceMatches=0,surfaceRejected=0;
         var visitedRecords=new LinkedHashSet<>(records);
@@ -258,7 +265,7 @@ public final class SableContactRegions {
                     var frame=BilateralContactSurface.fromRecord(pair,witness,witness.serverTick(),directions.diagnosticPreFrames());
                     if(frame==null){
                         surfaceRejected++;
-                        if(!calibrationLogged&&RogTrace.enabled()&&DiagnosticMode.debug()){
+                        if(!calibrationLogged&&RogTrace.rawSelected()){
                             ContactPoseDiagnostics.observe(pair,witness,index,directions.diagnosticPreFrames(),nativeBatch);
                             calibrationLogged=true;
                         }
@@ -280,6 +287,8 @@ public final class SableContactRegions {
                 }
             }
         var merged=mergeBilateralPairs(collected.regions(),surfaceEvidence);
+        // Unused exact allowance and the protected patch share become the next path's allowance.
+        remainingSurface[0]+=patchReserve[0];remainingSurface[1]+=patchReserve[1];
         int ca=RUNTIME_MAX_UNIQUE_CELLS_PER_SIDE-remainingSurface[0],cb=RUNTIME_MAX_UNIQUE_CELLS_PER_SIDE-remainingSurface[1];
         var a=new HashSet<GameImpactCredit.Target>();var b=new HashSet<GameImpactCredit.Target>();
         for(var r:merged){if(r.a()!=null)a.add(r.a());if(r.b()!=null)b.add(r.b());}
@@ -296,8 +305,8 @@ public final class SableContactRegions {
                 (long)b.size()+reservedB>ContactCreditLedger.MAX_TARGETS_PER_SIDE)return withStats(new Result(collected.regions(),collected.status(),ca,cb,collected.rejected(),collected.methodA(),collected.methodB(),collected.trace(),collected.ambiguousA(),collected.ambiguousB(),collected.unknownA(),collected.unknownB(),collected.groupsA(),collected.groupsB(),Set.of(),collected.sourceGroupsA(),collected.sourceGroupsB()),nativeBatch);
         // Expanded blocks are material/force seeds, not independently proved move axes.
         for(var r:merged){if(r.a()!=null)directions.seed(r.a());if(r.b()!=null)directions.seed(r.b());}
-        RogTrace.event(Stage.R04,"BILATERAL_COVERAGE","baseRegions={} finalRegions={} bilateralPairs={} surfaceChecks={} rejected={} reservedA={} reservedB={} authority=NONE",
-                collected.regions().size(),merged.size(),surfaceMatches,surfacePairChecks,surfaceRejected,reservedA,reservedB);
+        { if(RogTrace.eventSlot(Stage.R04,"BILATERAL_COVERAGE"))RogTrace.detail(Stage.R04,"BILATERAL_COVERAGE","baseRegions={} finalRegions={} bilateralPairs={} surfaceChecks={} rejected={} reservedA={} reservedB={} authority=NONE",
+                collected.regions().size(),merged.size(),surfaceMatches,surfacePairChecks,surfaceRejected,reservedA,reservedB); }
         return withStats(next,nativeBatch);
     }
     private static BilateralContactSurface.ShapeReader shapeReader(OwnerResolver.NativeAuditBatch nativeBatch,
@@ -386,8 +395,8 @@ public final class SableContactRegions {
                 t.detail()+" modelPairs="+model.pairs().size()+" patchSeeds="+r.patchSeeds().size()+" patchWork="+model.work()+" patchIncomplete="+model.incomplete()),
                 r.ambiguousA(),r.ambiguousB(),r.unknownA(),r.unknownB(),r.groupsA(),r.groupsB(),r.patchSeeds(),r.sourceGroupsA(),r.sourceGroupsB(),r.reservedA(),r.reservedB());
         for(var seed:r.patchSeeds())directions.seed(seed); // no direction inferred by the patch
-        RogTrace.event(Stage.R04,"CONTACT_COVERAGE","baseRegions={} exactRegions={} finalRegions={} modelPairs={} ownerLocalPatchSeeds={} patchWork={} patchIncomplete={} reservedA={} reservedB={} exactSubstep=UNAVAILABLE authority=GAME_PROXY",
-                direct.regions().size(),exact.regions().size(),r.regions().size(),model.pairs().size(),r.patchSeeds().size(),model.work(),model.incomplete(),r.reservedA(),r.reservedB());
+        { if(RogTrace.eventSlot(Stage.R04,"CONTACT_COVERAGE"))RogTrace.detail(Stage.R04,"CONTACT_COVERAGE","baseRegions={} exactRegions={} finalRegions={} modelPairs={} ownerLocalPatchSeeds={} patchWork={} patchIncomplete={} reservedA={} reservedB={} patchOutcomes={} exactSubstep=UNAVAILABLE authority=GAME_PROXY",
+                direct.regions().size(),exact.regions().size(),r.regions().size(),model.pairs().size(),r.patchSeeds().size(),model.work(),model.incomplete(),r.reservedA(),r.reservedB(),model.outcomes()); }
         return withStats(r,batch);
     }
     private static Set<GameImpactCredit.Target> targets(List<ContactCreditLedger.Region> regions,boolean a){

@@ -1,5 +1,8 @@
 package com.physicaldestroydeform.material;
 
+import com.physicaldestroydeform.diagnostics.LogSelection;
+import com.physicaldestroydeform.diagnostics.RogTrace;
+
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
@@ -166,7 +169,7 @@ public final class MaterialRegistry {
         current=next;
         // A successful publication invalidates derived caches; failed reloads retain the prior snapshot.
         TargetMaterials.invalidateCaches();
-        logger.info("[PDD-MATERIAL] rebuild generation={} policy={} blockTypes={} items={} recipesInferred={} " +
+        if(LogSelection.enabled(LogSelection.Channel.DAMAGE))logger.info("[PDD-MATERIAL] rebuild generation={} policy={} blockTypes={} items={} recipesInferred={} " +
                 "explicitProfiles={} stateProfiles={} jarBlockRows={} jsonOverrides={} externalBlockRows={} " +
                 "invalidExternalRows={} duplicateExternalIds={} unregisteredExternalIds={} miningFallback={} " +
                 "sources={} storage=IMMUTABLE_DEFINITION_AND_STATE",
@@ -270,7 +273,7 @@ public final class MaterialRegistry {
                         b==null?null:new StringReader(new String(b,StandardCharsets.UTF_8)),
                         i==null?null:new StringReader(new String(i,StandardCharsets.UTF_8)),
                         id->registeredBlock(id),id->registeredItem(id));
-                logger.info("[PDD-MATERIAL] source=USER_CSV blocks={} items={} duplicate={} invalid={} unregistered={}",
+                if(LogSelection.enabled(LogSelection.Channel.DAMAGE))logger.info("[PDD-MATERIAL] source=USER_CSV blocks={} items={} duplicate={} invalid={} unregistered={}",
                         external.blocks().size(),external.items().size(),external.duplicateIds(),
                         external.invalidRows(),external.unregisteredIds());
             }
@@ -319,7 +322,7 @@ public final class MaterialRegistry {
             if(id==null||!definitions.containsKey(id))continue;
             var old=definitions.get(id);var user=entry.getValue();
             MaterialProperties replacement=user.resolve(old);
-            if(!old.equals(replacement)&&logged++<20)log.info("[PDD-MATERIAL] source=USER_CSV reason=OVERRIDE id={} before={} after={} precedence=CSV_GT_JSON",id,old,replacement);
+            if(!old.equals(replacement)&&logged++<20){ if(RogTrace.legacySlot(LogSelection.Channel.DAMAGE)) log.info("[PDD-MATERIAL] source=USER_CSV reason=OVERRIDE id={} before={} after={} precedence=CSV_GT_JSON",id,old,replacement); }
             definitions.put(id,replacement);
             String prefix=id+"|";
             states.replaceAll((key,value)->key.startsWith(prefix)?user.resolve(value):value);
@@ -343,8 +346,8 @@ public final class MaterialRegistry {
             if(!old.equals(value))changed++;
             items.put(id,value);
         }
-        log.info("[PDD-MATERIAL] source=ITEM_CSV jarItems={} mergedItems={} externalChanges={}",
-                sources.bundled().items().size(),items.size(),changed);
+        { if(RogTrace.legacySlot(LogSelection.Channel.DAMAGE)) log.info("[PDD-MATERIAL] source=ITEM_CSV jarItems={} mergedItems={} externalChanges={}",
+                sources.bundled().items().size(),items.size(),changed); }
         return items;
     }
 

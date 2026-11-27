@@ -1,5 +1,8 @@
 package com.physicaldestroydeform.world;
 
+import com.physicaldestroydeform.diagnostics.LogSelection;
+import com.physicaldestroydeform.diagnostics.RogTrace;
+
 import com.physicaldestroydeform.material.CopycatMaterial;
 import com.physicaldestroydeform.plot.PlotCommitService;
 import com.physicaldestroydeform.plot.PlotKeyCodec;
@@ -362,15 +365,15 @@ public final class NativeLineageTransfer {
                         c.release(w.from,t.source().key(),t.outId(),success);
                         c.release(w.to,t.destination(),t.inId(),success);
                     }catch(RuntimeException unsafe){c.fault(unsafe);}
-                    LOG.info("[PDD-TRANSFER] id={} result={} from={} to={} damage={} remainder={} deformation={}",
+                    { if(RogTrace.legacySlot(LogSelection.Channel.LINEAGE)) LOG.info("[PDD-TRANSFER] id={} result={} from={} to={} damage={} remainder={} deformation={}",
                             t.id(),success?"APPLIED":defer?"RECOVERY_PENDING":"QUARANTINED",t.source().key(),t.destination(),
-                            t.source().damage(),t.source().remainder(),t.source().deformation());
+                            t.source().damage(),t.source().remainder(),t.source().deformation()); }
                 }
             }
         }
         if(!c.unsafe)for(var pair:proved)try{c.plot.confirmLineage(pair.from(),pair.to());}
             catch(RuntimeException unsafe){c.fault(unsafe);}
-        if(c.prepared>0||c.unresolved>0)LOG.info("[PDD-LINEAGE] phase=RETURN prepared={} unresolved={} capUnresolved={} owners={} nativeReturn={}",
-                c.prepared,c.unresolved,c.overCap,proved.size(),normalReturn);
+        if(c.prepared>0||c.unresolved>0){ if(RogTrace.legacySlot(LogSelection.Channel.LINEAGE)) LOG.info("[PDD-LINEAGE] phase=RETURN prepared={} unresolved={} capUnresolved={} owners={} nativeReturn={}",
+                c.prepared,c.unresolved,c.overCap,proved.size(),normalReturn); }
     }
 }

@@ -21,7 +21,7 @@ public final class AcceptanceReport {
         long total = SableContactQueue.total();
         long dropped = SableContactQueue.dropped();
         long errors = SableContactQueue.captureErrors();
-        logger.info("[PDD-G-COL-01] rawDelta={} rawTotal={} rawDroppedDelta={} rawDroppedTotal={} captureErrorsDelta={} " +
+        if(LogSelection.enabled(LogSelection.Channel.NATIVE))logger.info("[PDD-G-COL-01] rawDelta={} rawTotal={} rawDroppedDelta={} rawDroppedTotal={} captureErrorsDelta={} " +
                 "original={} ordinary={} nativeCallbacks={} directCallbacks={} stone={} wood={} fragile={} belt={} tnt={} " +
                 "wrappedWithOriginal={} wrappedNull={} queueSize={} status=RUNTIME_EVIDENCE_ONLY",
                 total-previousTotal, total, dropped-previousDrop, dropped, errors-previousErrors,

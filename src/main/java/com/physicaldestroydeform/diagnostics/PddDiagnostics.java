@@ -16,7 +16,7 @@ public final class PddDiagnostics {
         int checks = 0;
         try {
             MaterialProperties material = new MaterialProperties(128, 25, 40);
-            logger.info("[PDD-DIAG] SELFTEST material_properties status=PASS hardness={} ductilityPercent={} elasticityPercent={}",
+            if(LogSelection.enabled(LogSelection.Channel.PERF))logger.info("[PDD-DIAG] SELFTEST material_properties status=PASS hardness={} ductilityPercent={} elasticityPercent={}",
                     material.hardness(), material.ductilityPercent(), material.elasticityPercent());
             checks++;
             double direct = DamageModel.effectiveLocalDamage(10, material);
@@ -28,32 +28,32 @@ public final class PddDiagnostics {
             near(5.0,plan.accountedQ());
             if(plan.fixedIncrement()<=0 || plan.plannedRemainderU8()<0 || plan.plannedRemainderU8()>255)
                 throw new IllegalStateException("fixed-point or Q accounting invalid");
-            logger.info("[PDD-DIAG] SELFTEST damage_model status=PASS revision={} " +
+            if(LogSelection.enabled(LogSelection.Channel.PERF))logger.info("[PDD-DIAG] SELFTEST damage_model status=PASS revision={} " +
                     "directDamage={} rawDamage={} fixedIncrement={} elasticityOnce=true plasticStressUnused=true",
                     DamageModel.ALGORITHM_REVISION,direct,plan.rawDamage(),plan.fixedIncrement());
             checks++;
             ImpactSample impact = new ImpactSample(20, 2, 5);
             near(2, DamageModel.baseDamageFromEnergy(impact, 10));
-            logger.info("[PDD-DIAG] SELFTEST impact_sample status=PASS scope=SYNTHETIC_ONLY");
+            if(LogSelection.enabled(LogSelection.Channel.PERF))logger.info("[PDD-DIAG] SELFTEST impact_sample status=PASS scope=SYNTHETIC_ONLY");
             checks++;
             BlockDamageState state = new BlockDamageState();
             state.addDamage(7); state.addDeformation(3); state.setCrackVisual(9);
             BlockDamageState roundtrip = BlockDamageState.unpack24(state.pack24());
             if (roundtrip.damage() != 7 || roundtrip.deformation() != 3 || roundtrip.crackVisual() != 9)
                 throw new IllegalStateException("packed state mismatch");
-            logger.info("[PDD-DIAG] SELFTEST block_damage_state status=PASS packed24={}", state.pack24());
+            if(LogSelection.enabled(LogSelection.Channel.PERF))logger.info("[PDD-DIAG] SELFTEST block_damage_state status=PASS packed24={}", state.pack24());
             checks++;
             var hit = new CollisionObservation.BlockCoordinate(1, 64, 1);
             var record = new CollisionObservation(0, 0, "synthetic", "unknown", hit, null, 0, 0, 0, -1.25, false);
             ObservationBuffer buffer = new ObservationBuffer(1);
             if (!buffer.record(record) || buffer.record(record) || buffer.droppedCount() != 1)
                 throw new IllegalStateException("bounded observation mismatch");
-            logger.info("[PDD-DIAG] SELFTEST observation_buffer status=PASS capacity=1 dropped=1");
+            if(LogSelection.enabled(LogSelection.Channel.PERF))logger.info("[PDD-DIAG] SELFTEST observation_buffer status=PASS capacity=1 dropped=1");
             checks++;
             if (HardnessScale.fromMinecraft(0, 0) != 0 || HardnessScale.fromMinecraft(-1, 0) != 255
                     || HardnessScale.fromMinecraft(55, 1200,1) != 255)
                 throw new IllegalStateException("hardness conversion boundaries mismatch");
-            logger.info("[PDD-DIAG] SELFTEST hardness_scale status=PASS empty=0 unbreakable=255 saturated=255");
+            if(LogSelection.enabled(LogSelection.Channel.PERF))logger.info("[PDD-DIAG] SELFTEST hardness_scale status=PASS empty=0 unbreakable=255 saturated=255");
             checks++;
             Vec zero=new Vec(0,0,0), normal=new Vec(1,0,0);
             var rigid=new ImpactMath.Body(false,2,0.5,ImpactMath.Tensor.zero(),zero,
@@ -73,10 +73,10 @@ public final class PddDiagnostics {
                     ImpactMath.Body.staticWorld(),normal,true,true,false,false),
                     new ImpactMath.ProxyPolicy(true,.5,10)).approved())
                 throw new IllegalStateException("unverified normal approved");
-            logger.info("[PDD-G-MATH-01] SELFTEST status=PASS exactSynthetic={} proxySynthetic={} " +
+            if(LogSelection.enabled(LogSelection.Channel.PERF))logger.info("[PDD-G-MATH-01] SELFTEST status=PASS exactSynthetic={} proxySynthetic={} " +
                     "directionRejected=true scope=API_INDEPENDENT_SYNTHETIC_ONLY",exact.budget(),proxy.budget());
             checks++;
-            logger.info("[PDD-DIAG] SELFTEST_SUMMARY status=PASS checks={} scope=API_INDEPENDENT_SYNTHETIC_ONLY liveCollisionObserved=false", checks);
+            if(LogSelection.enabled(LogSelection.Channel.PERF))logger.info("[PDD-DIAG] SELFTEST_SUMMARY status=PASS checks={} scope=API_INDEPENDENT_SYNTHETIC_ONLY liveCollisionObserved=false", checks);
             return true;
         } catch (RuntimeException exception) {
             logger.error("[PDD-DIAG] SELFTEST_SUMMARY status=FAIL completed={}", checks, exception);

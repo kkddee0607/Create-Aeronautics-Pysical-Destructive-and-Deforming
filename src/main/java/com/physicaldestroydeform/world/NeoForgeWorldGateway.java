@@ -1,6 +1,9 @@
 package com.physicaldestroydeform.world;
 
+import com.physicaldestroydeform.diagnostics.LogSelection;
 import com.physicaldestroydeform.diagnostics.RogTrace;
+
+
 import com.physicaldestroydeform.diagnostics.RogTrace.Stage;
 import com.mojang.authlib.GameProfile;
 import com.physicaldestroydeform.DamageModel;
@@ -254,8 +257,8 @@ public final class NeoForgeWorldGateway implements WorldCommitCore.WorldGateway,
     }
     private Gate reason(BeforeImage b,Gate gate,String reason){
         if(RogTrace.sample(Stage.R08,reason))RogTrace.detail(Stage.R08,reason,"moveId={} directId={} source={} target={} gate={} epoch={} reservedQ={}",b.id(),b.directApplyId(),b.source(),b.destinationBefore(),gate,b.transformEpoch(),b.reservedQ());
-        if(TRACE)LOG.info("[PDD-MOVE] phase=WORLD_VALIDATE id={} from={} to={} gate={} reason={}",
-                b.id(),pos(b.source()),pos(b.destinationBefore()),gate,reason);
+        if(TRACE){ if(RogTrace.legacySlot(LogSelection.Channel.DEFORM)) LOG.info("[PDD-MOVE] phase=WORLD_VALIDATE id={} from={} to={} gate={} reason={}",
+                b.id(),pos(b.source()),pos(b.destinationBefore()),gate,reason); }
         return gate;
     }
     @Override public Gate validate(BeforeImage b){

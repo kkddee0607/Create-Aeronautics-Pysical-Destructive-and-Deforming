@@ -24,6 +24,15 @@ class StressRuntimeProtocolTest {
     static Graph line(int last){return cell->cell.y()==64&&cell.z()==0&&cell.x()>=0&&cell.x()<=last?Probe.solid(node(cell.x())):Probe.empty();}
     static WorldCommitCore.Intent intent(Reservation r,PlannedNode p){return new WorldCommitCore.Intent(applyId(r.creditId(),p.node().cell()),
             StressCommitHandoff.keyFor(p.node().cell(),p.node().fingerprint()),p.node().incarnation(),p.incomingQ(),p.node().material(),r.materialGeneration(),90,false);}
+    @Test void terminalReceiptSurvivesOlderWorldClockWithoutReissue()throws Exception {
+        var journal=new WorldPersistentJournal(path.resolve("rollback-terminal"),path.resolve("legacy"));
+        var receipt=new WorldReceiptJournal.Receipt("terminal",key(0),WorldReceiptJournal.Status.APPLIED,"COMMITTED",500);
+        journal.transition(receipt,null);
+        var core=new WorldCommitCore(journal,SETTINGS,64);
+        var decision=core.reconcileRestart(receipt,null,100);
+        assertEquals(WorldCommitCore.Outcome.DUPLICATE,decision.result());
+        assertEquals(receipt,journal.receipt(receipt.id()));assertEquals(0,core.queued());
+    }
     @Test void capSealsDamageEarlyAndRetainsResidualUnderOriginalDeadline()throws Exception {
         var r=reservation("cap",new Policy(1,128,512,1.0/256,1200));
         var session=new Session(r.seeds(),r.policy(),r.settings(),r.createdGameTick(),true);
