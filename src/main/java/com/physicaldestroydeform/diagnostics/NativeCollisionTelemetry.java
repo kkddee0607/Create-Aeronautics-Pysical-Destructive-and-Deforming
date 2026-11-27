@@ -49,7 +49,7 @@ public final class NativeCollisionTelemetry {
     }
     private static void capture(double[] nativeData,String dimension,long serverTick,
                                IntFunction<OwnerFrame> frameReader,ContactBatchStamp runtimeStamp) {
-        POLLS.incrementAndGet();
+        long pollId=POLLS.incrementAndGet();
         if (nativeData == null || nativeData.length % FIELDS != 0) {
             MALFORMED.incrementAndGet();
             return;
@@ -88,7 +88,7 @@ public final class NativeCollisionTelemetry {
                     nativeData[offset+12], nativeData[offset+13], nativeData[offset+14],
                     dimension,serverTick,
                     frame(frameReader,(int)nativeData[offset],frames),frame(frameReader,(int)nativeData[offset+1],frames),
-                    n==NATIVE_EFFECT_MAX_RECORDS,runtimeStamp));
+                    n==NATIVE_EFFECT_MAX_RECORDS,runtimeStamp,pollId));
         }
     }
     private static OwnerFrame frame(IntFunction<OwnerFrame> reader,int id,java.util.Map<Integer,java.util.Optional<OwnerFrame>> frames) {
@@ -122,9 +122,16 @@ public final class NativeCollisionTelemetry {
             double contactAX, double contactAY, double contactAZ,
             double contactBX, double contactBY, double contactBZ,
             String dimension,long serverTick,OwnerFrame frameA,OwnerFrame frameB,
-            boolean capSaturated,ContactBatchStamp runtimeStamp) {
+            boolean capSaturated,ContactBatchStamp runtimeStamp,long pollId) {
         public Contact {if(runtimeStamp==null)runtimeStamp=ContactBatchStamp.UNKNOWN;}
         public long captureServerTick(){return runtimeStamp.captureServerTick();}
+        // Legacy fixtures do not establish a native poll identity.
+        public Contact(int idA,int idB,double rawImpactScalar,double ax,double ay,double az,double bx,double by,double bz,
+                       double contactAX,double contactAY,double contactAZ,double contactBX,double contactBY,double contactBZ,
+                       String dimension,long serverTick,OwnerFrame frameA,OwnerFrame frameB,boolean capSaturated,ContactBatchStamp runtimeStamp){
+            this(idA,idB,rawImpactScalar,ax,ay,az,bx,by,bz,contactAX,contactAY,contactAZ,contactBX,contactBY,contactBZ,
+                    dimension,serverTick,frameA,frameB,capSaturated,runtimeStamp,0);
+        }
         public Contact(int idA,int idB,double rawImpactScalar,
                        double ax,double ay,double az,double bx,double by,double bz,
                        double contactAX,double contactAY,double contactAZ,

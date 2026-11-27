@@ -101,6 +101,8 @@ public final class StressRuntime {
         long parkedSince=-1,parkedTicks;
         String parkedReason="NONE";int retiredSnapshotCells;
         Cell invalidatedCell;
+        final Set<Cell> invalidatedCells=new HashSet<>();
+        boolean repairing;long repairs;
         long retryAt,lastProgressTick;
         int waitStreak;
         boolean waitedThisTurn;
@@ -302,13 +304,16 @@ public final class StressRuntime {
         for(String id:watches.getOrDefault(cell,Set.of())){
             Job job=jobs.get(id);if(job==null||job.finished)continue;
             Entry entry=journal.get(id);
-            if(!job.published.contains(entry,cell)){
-                job.invalidated=true;job.invalidatedCell=cell;
+            if(!job.published.contains(entry,cell)&&!StressSnapshotRepair.frozenSink(job.snapshot.get(cell))){
+                invalidate(job,cell);
                 // Mutation invalidation must wake a dependency retry immediately.
                 // Finished residuals have no future graph work to invalidate.
                 wakeIndex.wakeOne(id,order);
             }
         }
+    }
+    private static void invalidate(Job job,Cell cell){
+        job.invalidated=true;job.invalidatedCell=cell;job.invalidatedCells.add(cell);
     }
     private Probe live(Job job,Cell cell){
         charge();watch(job,cell);
@@ -479,9 +484,23 @@ public final class StressRuntime {
             if(RogTrace.sample(Stage.R11,"MATERIAL_CHANGED_UNUSED"))RogTrace.detail(Stage.R11,"MATERIAL_CHANGED_UNUSED","job={} expected={} tick={}",job.id,r.materialGeneration(),tick);
             entry=journal.get(job.id);
         }else if(job.invalidated&&!job.finished){
-            charge();journal.deferResidual(job.id,"SNAPSHOT_REPLACED_DEFERRED_BOUNDED");job.finished=true;
-            RogTrace.event(Stage.R11,"SNAPSHOT_INVALIDATED","job={} tick={} snapshotCells={} changedCell={} publishedPlans={} originalDeadline={}",job.id,tick,job.snapshot.size(),job.invalidatedCell,entry.plans().size(),deadline(r));
-            entry=journal.get(job.id);
+            charge();
+            var repaired=StressSnapshotRepair.retire(entry,job.snapshot,job.invalidatedCells);
+            if(repaired==null){
+                journal.deferResidual(job.id,"SNAPSHOT_REPLACED_DEFERRED_BOUNDED");job.finished=true;job.repairing=false;
+                RogTrace.event(Stage.R11,"SNAPSHOT_INVALIDATED","job={} tick={} changedCell={} changedCount={} publishedPlans={} result=UNPROVED_DEPENDENCY_DEFERRED originalDeadline={}",job.id,tick,job.invalidatedCell,job.invalidatedCells.size(),entry.plans().size(),deadline(r));
+            }else{
+                // RESERVED has no published prefix; persist retired graph cells now.
+                // For SEALED, keep the prior graph durable until replay proves the
+                // exact old prefix and partitions. A crash then revalidates the old graph.
+                if(entry.phase()==Phase.RESERVED)journal.snapshot(job.id,repaired);
+                if(job.session!=null){job.session=null;activeSessions--;}
+                job.snapshot.clear();job.snapshot.putAll(repaired);job.probes.clear();
+                job.validation=null;job.validationIndex=0;job.retryAt=0;job.waitStreak=0;
+                job.invalidated=false;job.repairing=true;job.repairs++;
+                RogTrace.event(Stage.R11,"STRESS_PARTIAL_REPLAY","job={} tick={} changedCell={} changedCount={} frozenCells={} publishedPlans={} reservedQ={} originalDeadline={} QReissue=false",job.id,tick,job.invalidatedCell,job.invalidatedCells.size(),job.snapshot.size(),entry.plans().size(),r.reservedQ(),deadline(r));
+            }
+            job.invalidatedCells.clear();entry=journal.get(job.id);
         }
         boolean originsAttempted=!entry.holdsOrigins();
         if(originsAttempted)deliverOrigins(job);
@@ -505,14 +524,14 @@ public final class StressRuntime {
                 // frozen observations, but do not repeatedly CAS the entire
                 // growing graph. Validate once at the root publication barrier.
                 if(!job.session.rootsExpanded()){
-                    journal.snapshot(job.id,job.snapshot);
+                    if(!job.repairing)journal.snapshot(job.id,job.snapshot);
                     return;
                 }
                 if(!entry.holdsOrigins()&&!job.session.finished()&&!job.session.waiting()&&r.seeds().size()>256){
                     // Let a large graph finish a bounded planning slice before
                     // revalidating its full prefix again. Direct roots already
                     // own their original durable partition.
-                    journal.snapshot(job.id,job.snapshot);
+                    if(!job.repairing)journal.snapshot(job.id,job.snapshot);
                     return;
                 }
                 // Persist observations before they may influence a later durable output.
@@ -529,7 +548,7 @@ public final class StressRuntime {
                         job.validation.add(Map.entry(probe.getKey(),probe.getValue()));
                 }
                 job.validationIndex=0;
-                if(entry.phase()==Phase.RESERVED){
+                if(entry.phase()==Phase.RESERVED&&!job.repairing){
                     journal.snapshot(job.id,job.snapshot);
                     if(journal.get(job.id)==entry)snapshotWritesAvoided++;
                 }
@@ -547,20 +566,34 @@ public final class StressRuntime {
                         if(now.state()==State.UNAVAILABLE)return;
                         var current=now.node();
                         if(now.state()==State.DENIED||current!=null&&current.incarnation().equals(saved.incarnation())&&!current.materialRevision().equals(saved.materialRevision())){
-                            job.invalidated=true;job.invalidatedCell=probe.getKey();return;
+                            invalidate(job,probe.getKey());return;
                         }
                     }else charge();
                     job.validationIndex++;continue;
                 }
-                // Unloaded neighbors remain retries under the original deadline, never assumed AIR.
-                if(probe.getValue().state()==State.UNAVAILABLE){charge();job.validationIndex++;continue;}
+                // A frozen empty edge or denied sink can never grant new Q.
+                // Replacing an old solid with DENIED must retain its old weight,
+                // not re-read a replacement block or redistribute that branch.
+                // Unloaded neighbors remain retries under the original deadline.
+                if(probe.getValue().state()==State.UNAVAILABLE||StressSnapshotRepair.frozenSink(probe.getValue())){charge();job.validationIndex++;continue;}
                 Probe actual=live(job,probe.getKey());
                 if(actual.state()==State.UNAVAILABLE)return;
-                if(!actual.equals(probe.getValue())){job.invalidated=true;job.invalidatedCell=probe.getKey();return;}
+                if(!actual.equals(probe.getValue())){invalidate(job,probe.getKey());return;}
                 job.validationIndex++;
             }}finally{workTime(WorkPhase.VALIDATE,validateStarted);}
             if(job.validationIndex<job.validation.size())return;
             if(job.invalidated)return;
+            // A replay has to retain every published node and settled partition.
+            // Do not let a shortened/changed prefix throw a global journal fault.
+            if(job.repairing){
+                var verdict=StressSnapshotRepair.verifyPrefix(entry,job.session);
+                if(verdict==StressSnapshotRepair.Verdict.INCOMPATIBLE){
+                    charge();journal.deferResidual(job.id,"SNAPSHOT_REPLAY_PREFIX_OR_PARTITION_CHANGED");job.finished=true;job.repairing=false;
+                    RogTrace.event(Stage.R11,"STRESS_REPLAY_DEFERRED","job={} oldPlans={} replayPlans={} reason={} originalDeadline={}",job.id,entry.plans().size(),job.session.plannedNodes(),verdict,deadline(r));
+                    job.validation=null;return;
+                }
+                if(verdict==StressSnapshotRepair.Verdict.WAIT){job.validation=null;return;}
+            }
             // Recovery recomputes from saved graph; do not publish an incomplete old prefix.
             if(job.session.plannedNodes()>=entry.plans().size()){
                 charge();var beforeSeal=journal.get(job.id);
@@ -568,6 +601,7 @@ public final class StressRuntime {
                 try{journal.sealProgress(job.id,job.session,job.snapshot);}
                 finally{workTime(WorkPhase.SEAL,sealStarted);}
                 var sealed=journal.get(job.id);job.finished=job.session.finished();
+                if(job.repairing){job.repairing=false;RogTrace.event(Stage.R11,"STRESS_REPLAY_SEALED","job={} publishedPrefix={} totalPlans={} pendingQ={} unusedQ={} originalDeadline={} QReissue=false",job.id,entry.plans().size(),sealed.plans().size(),sealed.ledger().pendingQ(),sealed.ledger().unusedQ(),deadline(r));}
                 if(sealed==beforeSeal)sealWritesAvoided++;
                 else{
                     seals++;
@@ -677,7 +711,7 @@ public final class StressRuntime {
             rollbackJobsRemaining--;
             rollbackJobsReconciled++;
         }
-        RogTrace.event(Stage.R11,"STRESS_JOB_SUMMARY","job={} restored={} phase={} reason={} created={} deadline={} turns={} idleTurns={} parkedTicks={} budgetEnds={} pressureDeferrals={} snapshotCells={} planCount={} delivered={} origins={} rollback={} sessionCapDeferrals={} waitDeferrals={} lastProgressTick={} lastWaitCell={} invalidatedCell={} ledger={}",job.id,job.restoredFromDisk,entry.phase(),entry.reason(),job.reservation.createdGameTick(),deadline(job.reservation),job.observedTurns,job.idleTurns,job.parkedTicks,job.budgetEnds,job.pressureDeferrals,Math.max(job.retiredSnapshotCells,job.snapshot.size()),entry.plans().size(),job.deliveryIndex,job.originIndex,job.clockRolledBack,job.sessionCapDeferrals,job.waitDeferrals,job.lastProgressTick,job.lastWaitCell,job.invalidatedCell,entry.ledger());
+        RogTrace.event(Stage.R11,"STRESS_JOB_SUMMARY","job={} restored={} phase={} reason={} created={} deadline={} turns={} idleTurns={} parkedTicks={} budgetEnds={} pressureDeferrals={} snapshotCells={} planCount={} delivered={} origins={} rollback={} sessionCapDeferrals={} waitDeferrals={} lastProgressTick={} lastWaitCell={} invalidatedCell={} partialRepairs={} ledger={}",job.id,job.restoredFromDisk,entry.phase(),entry.reason(),job.reservation.createdGameTick(),deadline(job.reservation),job.observedTurns,job.idleTurns,job.parkedTicks,job.budgetEnds,job.pressureDeferrals,Math.max(job.retiredSnapshotCells,job.snapshot.size()),entry.plans().size(),job.deliveryIndex,job.originIndex,job.clockRolledBack,job.sessionCapDeferrals,job.waitDeferrals,job.lastProgressTick,job.lastWaitCell,job.invalidatedCell,job.repairs,entry.ledger());
         remove(job);
     }
     private static WorldCommitCore.Intent derivedIntent(Job job,PlannedNode plan){
@@ -689,7 +723,7 @@ public final class StressRuntime {
     private void releasePlanning(Job job){
         if(job.session!=null){job.session=null;activeSessions--;}
         job.retiredSnapshotCells=Math.max(job.retiredSnapshotCells,job.snapshot.size());
-        job.snapshot.clear();job.validation=null;job.probes.clear();job.published.clear();job.observedPlotOwners.clear();
+        job.snapshot.clear();job.validation=null;job.probes.clear();job.invalidatedCells.clear();job.published.clear();job.observedPlotOwners.clear();
         for(var cell:job.watched){
             Set<String> owners=watches.get(cell);if(owners==null)continue;owners.remove(job.id);
             if(owners.isEmpty()){

@@ -16,12 +16,12 @@ import java.util.*;
  */
 final class BilateralContactSurface {
     private BilateralContactSurface() {}
-    private static final double PENETRATION=1.0/32.0; // Actual shape-to-shape separation bound; NOT loosened.
+    static final double PENETRATION=1.0/32.0; // Actual shape-to-shape separation bound; NOT loosened.
     // Native impact witnesses can be noisy. Candidate acceptance is NOT damage authorization:
     // real opposing exterior shapes must pass positiveOverlap() before any F is assigned.
-    private static final double FACE_OPPOSITION=.98;
+    static final double FACE_OPPOSITION=.98;
     private static final double EPS=1.0e-5;
-    private static final double MIN_AREA=1.0e-10;
+    static final double MIN_AREA=1.0e-10;
     private static final int MAX_PAIRS=ContactCreditLedger.MAX_REGIONS;
     private static final int MAX_FACE_PIECES=128, MAX_FACE_WORK=4096;
     private static final int MAX_CANDIDATE_CELLS=64; // Existing transformed-face budget; not Native contact records
@@ -66,7 +66,7 @@ final class BilateralContactSurface {
         FrameMath.Vec contact(int side){return side==0?contactA:contactB;}
     }
     private record Pair(BlockPos a,BlockPos b) {}
-    private record Point(double x,double y) {}
+    record Point(double x,double y) {}
     private record Rect(double u0,double v0,double u1,double v1) {}
     private enum Overlap { MATCH, NONE, UNKNOWN }
     private static final class FaceBudget {
@@ -80,6 +80,13 @@ final class BilateralContactSurface {
         return fromRecord(pair,record,tick,List.of());
     }
     static Frame fromRecord(GameImpactCredit.Pair pair,Contact record,long tick,List<CollisionFrame.Snapshot> pre) {
+        return frameFromRecord(pair,record,tick,pre,false);
+    }
+    /** Only local anchor interpretation: never a reconstructed solver pose. */
+    static Frame patchFrame(GameImpactCredit.Pair pair,Contact record,long tick){
+        return frameFromRecord(pair,record,tick,List.of(),true);
+    }
+    private static Frame frameFromRecord(GameImpactCredit.Pair pair,Contact record,long tick,List<CollisionFrame.Snapshot> pre,boolean localPatch) {
         if(pair==null||record==null){if(RogTrace.sample(Stage.R03,"RECORD_MISSING"))RogTrace.detail(Stage.R03,"RECORD_MISSING","pair={} recordPresent={}",pair,record!=null);return null;}
         if(record.serverTick()!=tick){if(RogTrace.sample(Stage.R03,"RECORD_TICK_MISMATCH"))RogTrace.detail(Stage.R03,"RECORD_TICK_MISMATCH","actual={} expected={}",record.serverTick(),tick);return null;}
         if(record.rawImpactScalar()<=0){if(RogTrace.sample(Stage.R03,"RECORD_NONPOSITIVE"))RogTrace.detail(Stage.R03,"RECORD_NONPOSITIVE","scalar={}",record.rawImpactScalar());return null;}
@@ -97,12 +104,13 @@ final class BilateralContactSurface {
             var rawA=normal(record,aSide==1).unit();var rawB=normal(record,bSide==1).unit();
             var worldA=a.toWorldNormal(rawA);var worldB=b.toWorldNormal(rawB);
             double opposition=worldA.dot(worldB);
-            if(opposition>-.80){if(RogTrace.sample(Stage.R03,"NATIVE_NORMAL_OPPOSITION"))RogTrace.detail(Stage.R03,"NATIVE_NORMAL_OPPOSITION","dot={} limit=-0.80 normalA={} normalB={}",opposition,worldA,worldB);return null;} // Candidate hint, not face proof.
+            if(!localPatch&&opposition>-.80){if(RogTrace.sample(Stage.R03,"NATIVE_NORMAL_OPPOSITION"))RogTrace.detail(Stage.R03,"NATIVE_NORMAL_OPPOSITION","dot={} limit=-0.80 normalA={} normalB={}",opposition,worldA,worldB);return null;} // Candidate hint, not face proof.
             var aa=axis(rawA,tick);var bb=axis(rawB,tick);
             if(aa==null||bb==null){if(RogTrace.sample(Stage.R03,"DOMINANT_AXIS"))RogTrace.detail(Stage.R03,"DOMINANT_AXIS","localNormalA={} localNormalB={} min=0.75",rawA,rawB);return null;}
             // The two native witnesses are independent local anchors, not an
             // assertion that their effect-phase world positions coincide.
             var frame=new Frame(a,b,aa,bb,localA,localB);
+            if(localPatch)return frame;
             var sweep=observedSweep(frame,record,aSide==1,pre);
             if(RogTrace.sample(Stage.R03,"FRAME_ANCHOR"))RogTrace.detail(Stage.R03,"FRAME_ANCHOR",
                     "aSide={} bSide={} localA={} localB={} axisA={} axisB={} dot={} normalSweep={}",aSide,bSide,localA,localB,aa,bb,opposition,sweep);
@@ -183,9 +191,9 @@ final class BilateralContactSurface {
         int sign=component>0?-1:1; // Inward: positive means LOW face.
         return new MovePlan.SignedAxes(axis==0?sign:0,axis==1?sign:0,axis==2?sign:0,true,tick);
     }
-    private static int axis(MovePlan.SignedAxes axes){return axes.x()!=0?0:axes.y()!=0?1:2;}
+    static int axis(MovePlan.SignedAxes axes){return axes.x()!=0?0:axes.y()!=0?1:2;}
 
-    private static double coordinate(FrameMath.Vec p,int axis){return axis==0?p.x():axis==1?p.y():p.z();}
+    static double coordinate(FrameMath.Vec p,int axis){return axis==0?p.x():axis==1?p.y():p.z();}
     private static boolean onAnchorPlane(Frame f,List<FrameMath.Vec> face,int side){
         int ax=axis(f.inward(side));return Math.abs(coordinate(face.getFirst(),ax)-coordinate(f.contact(side),ax))<=PENETRATION;
     }
@@ -448,7 +456,7 @@ final class BilateralContactSurface {
             out.add(new BlockPos(x,y,z));
         return out;
     }
-    private static List<FrameMath.Vec> faceCorners(AABB box,BlockPos pos,int axis,MovePlan.SignedAxes inward){
+    static List<FrameMath.Vec> faceCorners(AABB box,BlockPos pos,int axis,MovePlan.SignedAxes inward){
         double[] low={box.minX,box.minY,box.minZ},high={box.maxX,box.maxY,box.maxZ};
         int sign=axis==0?inward.x():axis==1?inward.y():inward.z();
         double face=sign>0?low[axis]:high[axis];
@@ -477,14 +485,17 @@ final class BilateralContactSurface {
         }return false;
     }
     static boolean positiveOverlap(Frame f,ShapeReader source,Cell a,Cell b){return overlap(f,source,a,b)==Overlap.MATCH;}
-    private static double lo(AABB b,int a){return a==0?b.minX:a==1?b.minY:b.minZ;}
-    private static double hi(AABB b,int a){return a==0?b.maxX:a==1?b.maxY:b.maxZ;}
-    private static int coord(BlockPos p,int a){return a==0?p.getX():a==1?p.getY():p.getZ();}
+    static double lo(AABB b,int a){return a==0?b.minX:a==1?b.minY:b.minZ;}
+    static double hi(AABB b,int a){return a==0?b.maxX:a==1?b.maxY:b.maxZ;}
+    static int coord(BlockPos p,int a){return a==0?p.getX():a==1?p.getY():p.getZ();}
     private static void addRect(List<Rect> out,double u0,double v0,double u1,double v1){
         if(u1>u0&&v1>v0)out.add(new Rect(u0,v0,u1,v1));
     }
     /** Disjoint rectangle subtraction in owner-local coordinates. Work/fragment
      * exhaustion is UNKNOWN, not an empty exterior. No synthetic surface is added. */
+    static List<AABB> exteriorFaces(Frame f,ShapeReader source,Cell cell,int side){
+        return exteriorFaces(f,source,cell,side,new FaceBudget());
+    }
     private static List<AABB> exteriorFaces(Frame f,ShapeReader source,Cell cell,int side,FaceBudget budget){
         var out=new ArrayList<AABB>();int ax=axis(f.inward(side)),u=(ax+1)%3,v=(ax+2)%3;
         boolean low=coordinate(outward(f.inward(side)),ax)<0;
@@ -624,18 +635,20 @@ final class BilateralContactSurface {
         var out=new ArrayList<Point>(world.size());
         for(var p:world){var d=p.minus(o);out.add(new Point(d.dot(u),d.dot(v)));}return out;
     }
-    private static List<Point> ccw(List<Point> polygon){
+    static List<Point> ccw(List<Point> polygon){
         if(signedArea(polygon)>=0)return polygon;
         var back=new ArrayList<>(polygon);Collections.reverse(back);return back;
     }
     private static double signedArea(List<Point> p){
-        double a=0;for(int i=0;i<p.size();i++){
-            Point x=p.get(i),y=p.get((i+1)%p.size());a+=x.x()*y.y()-y.x()*x.y();
-        }return a*.5;
+        if(p.size()<3)return 0;
+        // Translate before the area sum: Sable's allocated plot coordinates can
+        // be millions of blocks from zero. Avoid subtracting huge products.
+        double a=0;Point origin=p.getFirst();for(int i=1;i+1<p.size();i++)a+=cross(origin,p.get(i),p.get(i+1));
+        return a*.5;
     }
-    private static double polygonArea(List<Point> p){return p.size()<3?0:Math.abs(signedArea(p));}
-    private static double cross(Point a,Point b,Point p){return (b.x()-a.x())*(p.y()-a.y())-(b.y()-a.y())*(p.x()-a.x());}
-    private static List<Point> clip(List<Point> subject,List<Point> boundary){
+    static double polygonArea(List<Point> p){return p.size()<3?0:Math.abs(signedArea(p));}
+    static double cross(Point a,Point b,Point p){return (b.x()-a.x())*(p.y()-a.y())-(b.y()-a.y())*(p.x()-a.x());}
+    static List<Point> clip(List<Point> subject,List<Point> boundary){
         var out=new ArrayList<>(subject);
         for(int i=0;i<boundary.size()&&!out.isEmpty();i++){
             Point a=boundary.get(i),b=boundary.get((i+1)%boundary.size());

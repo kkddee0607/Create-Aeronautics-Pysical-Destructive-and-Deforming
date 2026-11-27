@@ -32,6 +32,7 @@ public final class RegionalContactProof {
     public static boolean hasNewCells(Snapshot previous, List<ContactCreditLedger.Region> now) {
         if (previous == null) return false;
         for (var r : now) {
+            if (r.ownerLocalPatch()) continue; // paid model seeds are history, never fresh authorization
             if (r.a() != null && !previous.a().contains(r.a().localBlock())) return true;
             if (r.b() != null && !previous.b().contains(r.b().localBlock())) return true;
         }

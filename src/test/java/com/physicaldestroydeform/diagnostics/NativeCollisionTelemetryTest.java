@@ -16,7 +16,7 @@ public class NativeCollisionTelemetryTest {
         var c=items.getFirst();
         assertEquals(1,c.idA()); assertEquals(2,c.idB());
         assertEquals(-1,c.captureServerTick());assertFalse(c.runtimeStamp().known());
-        assertFalse(c.capSaturated());
+        assertFalse(c.capSaturated());assertEquals(calls+1,c.pollId());
         assertEquals(3,c.rawImpactScalar()); assertEquals(12,c.contactAZ());
         assertEquals(15,c.contactBZ());
         if (System.getProperty("pdd.debugCollisions") == null) assertTrue(NativeCollisionTelemetry.ENABLED);
@@ -67,6 +67,9 @@ public class NativeCollisionTelemetryTest {
         NativeCollisionTelemetry.capture(raw,"minecraft:overworld",12,id->{calls.incrementAndGet();return new NativeCollisionTelemetry.OwnerFrame(uuid,pose);});
         var samples=NativeCollisionTelemetry.drain();assertEquals(3,samples.size());assertEquals(1,calls.get());
         assertArrayEquals(before,raw);assertSame(samples.getFirst().frameA(),samples.getLast().frameA());
+        assertTrue(samples.getFirst().pollId()>0);assertTrue(samples.stream().allMatch(c->c.pollId()==samples.getFirst().pollId()));
+        NativeCollisionTelemetry.capture(one,"minecraft:overworld",12);var second=NativeCollisionTelemetry.drain().getFirst();
+        assertTrue(second.pollId()>samples.getFirst().pollId());
     }
     @Test void nativeHundredRecordCapSaturationIsNotReportedAsConfirmedDrop() {
         NativeCollisionTelemetry.drain();

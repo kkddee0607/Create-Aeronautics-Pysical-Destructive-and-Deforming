@@ -3,7 +3,7 @@
 from pathlib import Path
 import re,sys
 root=Path(__file__).resolve().parents[1]
-release='0.6.1-rogFix'
+release='0.6.1-astraFix'
 errors=[]
 def source(name):return (root/name).read_text(encoding='utf8')
 mod=source('src/main/resources/META-INF/neoforge.mods.toml')
@@ -27,7 +27,7 @@ for path in files:
     if re.search(r'\bDamageModel\s*\.',stripped) and not re.search(r'^\s*package\s+com\.physicaldestroydeform\s*;',text,re.M) and not re.search(r'^\s*import\s+com\.physicaldestroydeform\.(?:DamageModel|\*)\s*;',text,re.M) and not re.search(r'\bcom\.physicaldestroydeform\.DamageModel\.',stripped):
         errors.append(str(path.relative_to(root))+': missing DamageModel import')
 count=sum(len(re.findall(r'@Test\b',p.read_text(encoding='utf8'))) for p in files)
-if count != 841: errors.append(f'JUnit method inventory changed unexpectedly: {count} vs expected 841')
+if count != 856: errors.append(f'JUnit method inventory changed unexpectedly: {count} vs expected 856')
 if errors:
     print('PDD static contract FAIL:',*errors,sep='\n - ',file=sys.stderr)
     raise SystemExit(1)

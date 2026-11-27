@@ -24,7 +24,7 @@ import java.util.function.Function;
 public final class ContactCreditLedger {
     public static final String LEGACY_ALGORITHM_REVISION = "PDD-IDS-1.0.7/0.4.1-spreadFix-MULTIFACE-70-30";
     public static final String PREVIOUS_ALGORITHM_REVISION = "PDD-IDS-1.0.9/0.6.1-CONTACT-ELASTIC-CHAIN";
-    public static final String ALGORITHM_REVISION = "PDD-IDS-1.0.9/0.6.1-rogFix-BILATERAL-SEEDS-ALPHA04";
+    public static final String ALGORITHM_REVISION = "PDD-IDS-1.0.9/0.6.1-astraFix-PAIRED-LOCAL-PATCH-ALPHA04";
     // Bounded but large enough for a 100x100 fully verified planar contact patch.
     public static final int MAX_TARGETS_PER_SIDE = 16_384;
     public static final int MAX_REGIONS = 2 * MAX_TARGETS_PER_SIDE;
@@ -43,10 +43,12 @@ public final class ContactCreditLedger {
     /** One source observation. A singleton may retain its exhaustive opposite
      * candidate set without claiming an exact block correspondence. */
     public record Region(GameImpactCredit.Target a, GameImpactCredit.Target b,
-                         List<GameImpactCredit.Target> opposingCandidates) {
-        public Region(GameImpactCredit.Target a,GameImpactCredit.Target b){this(a,b,List.of());}
+                         List<GameImpactCredit.Target> opposingCandidates,boolean ownerLocalPatch) {
+        public Region(GameImpactCredit.Target a,GameImpactCredit.Target b){this(a,b,List.of(),false);}
+        public Region(GameImpactCredit.Target a,GameImpactCredit.Target b,List<GameImpactCredit.Target> opposingCandidates){this(a,b,opposingCandidates,false);}
         public Region {
             if (a == null && b == null) throw new IllegalArgumentException("empty contact region");
+            if(ownerLocalPatch&&a!=null&&b!=null)throw new IllegalArgumentException("game patch is not an exact native pair");
             Objects.requireNonNull(opposingCandidates);
             if(opposingCandidates.size()>SableConsumerTargets.MAX_CANDIDATES||
                     a!=null&&b!=null&&!opposingCandidates.isEmpty())throw new IllegalArgumentException("invalid opposite evidence");
@@ -174,8 +176,16 @@ public final class ContactCreditLedger {
             return new SeedValidation(id,Status.INVALID_TARGET_SET,Set.of(),Set.of());
         Set<GameImpactCredit.Target> a=new HashSet<>(), b=new HashSet<>();
         Map<String,String> aCells=new HashMap<>(), bCells=new HashMap<>();
+        var model=new HashMap<GameImpactCredit.Target,List<GameImpactCredit.Target>>();var independent=new HashSet<GameImpactCredit.Target>();
         for(Region region:evidence) {
             if (region==null) return new SeedValidation(id,Status.INVALID_TARGET_SET,Set.of(),Set.of());
+            if(region.ownerLocalPatch()){
+                if(!materialOnly||source!=Source.SABLE_POST_EFFECT)return new SeedValidation(id,Status.INVALID_TARGET_SET,Set.of(),Set.of());
+                var target=region.a()!=null?region.a():region.b();var prior=model.putIfAbsent(target,region.opposingCandidates());
+                if(prior!=null&&!prior.equals(region.opposingCandidates()))return new SeedValidation(id,Status.INVALID_TARGET_SET,Set.of(),Set.of());
+            }else{
+                if(region.a()!=null)independent.add(region.a());if(region.b()!=null)independent.add(region.b());
+            }
             if(region.a()!=null) {
                 if(!region.a().ownerKey().equals(pair.a().stableKey()))
                     return new SeedValidation(id,Status.INVALID_TARGET_SET,Set.of(),Set.of());
@@ -193,6 +203,8 @@ public final class ContactCreditLedger {
                 b.add(region.b());
             }
         }
+        if(!model.isEmpty()&&(independent.isEmpty()||model.keySet().stream().anyMatch(independent::contains)))
+            return new SeedValidation(id,Status.INVALID_TARGET_SET,Set.of(),Set.of());
         if(a.size()>MAX_TARGETS_PER_SIDE || b.size()>MAX_TARGETS_PER_SIDE || a.isEmpty()&&b.isEmpty())
             return new SeedValidation(id,Status.INVALID_TARGET_SET,Set.of(),Set.of());
         if(reservedA<0||reservedB<0||(long)a.size()+reservedA>MAX_TARGETS_PER_SIDE
@@ -393,9 +405,9 @@ public final class ContactCreditLedger {
         return issued;
     }
 
-    private record SeedAudit(String owner,List<GameImpactCredit.Target> seeds,Map<GameImpactCredit.Target,Double> effective,double split,double sideF,int reserved,double unresolved,double damped,int exact,int consensus,int withheld,int missingMaterial,int mixedMaterial,int unproved){
+    private record SeedAudit(String owner,List<GameImpactCredit.Target> seeds,Map<GameImpactCredit.Target,Double> effective,double split,double sideF,int reserved,double unresolved,double damped,int exact,int consensus,int patchConsensus,int withheld,int missingMaterial,int mixedMaterial,int unproved){
         void emit(CreditId credit){
-            RogTrace.event(Stage.R06,"CONTACT_SIDE_SEAL","credit={} owner={} sideF={} forwardF={} contactDampedF={} unresolvedF={} exact={} consensus={} withheld={} missingMaterial={} mixedE={} unproved={} seedCount={} reservedUnknown={} effectiveCount={}",credit,owner,sideF,sideF-damped-unresolved,damped,unresolved,exact,consensus,withheld,missingMaterial,mixedMaterial,unproved,seeds.size(),reserved,effective.size());
+            RogTrace.event(Stage.R06,"CONTACT_SIDE_SEAL","credit={} owner={} sideF={} forwardF={} contactDampedF={} unresolvedF={} exact={} consensus={} patchConsensus={} withheld={} missingMaterial={} mixedE={} unproved={} seedCount={} reservedUnknown={} effectiveCount={}",credit,owner,sideF,sideF-damped-unresolved,damped,unresolved,exact,consensus,patchConsensus,withheld,missingMaterial,mixedMaterial,unproved,seeds.size(),reserved,effective.size());
             if(!RogTrace.traceSelected())return;
             int count=Math.min(seeds.size(),RogTrace.seedLimit());
             RogTrace.event(Stage.R06,"CONTACT_SEED_EFFECTIVE_SUMMARY","credit={} owner={} seedCount={} effectiveCount={} sideF={} preContactSeedF={} reservedUnknown={} unresolvedF={} contactDampedF={} listedLimit={} truncated={}",credit,owner,seeds.size(),effective.size(),sideF,split,reserved,unresolved,damped,count,count<seeds.size());
@@ -447,15 +459,17 @@ public final class ContactCreditLedger {
              java.util.function.Consumer<ForcePropagation.Trace> trace,ForcePropagation.CrossOwnerContext crossOwner,List<SeedAudit> seedAudits) {
         if(!Double.isFinite(sideF)||sideF<0)throw new IllegalArgumentException("invalid contact F");
         var opponents=new HashMap<GameImpactCredit.Target,Set<List<GameImpactCredit.Target>>>();
+        var patchSeeds=new HashSet<GameImpactCredit.Target>();
         for(var region:evidence){
             var self=onA?region.a():region.b();var other=onA?region.b():region.a();
             if(self==null)continue;
+            if(region.ownerLocalPatch())patchSeeds.add(self);
             opponents.computeIfAbsent(self,k->new HashSet<>()).add(other==null?region.opposingCandidates():List.of(other));
         }
         var effective=new HashMap<GameImpactCredit.Target,Double>();
         double split=seeds.isEmpty()?0:sideF/(seeds.size()+reserved);
         double contactDamped=0,unresolved=seeds.isEmpty()?sideF:split*reserved,forwardF=0;
-        int exact=0,consensus=0,withheld=0,missingMaterial=0,mixedMaterial=0,unproved=0;
+        int exact=0,consensus=0,patchConsensus=0,withheld=0,missingMaterial=0,mixedMaterial=0,unproved=0;
         for(var seed:seeds){
             var candidates=opponents.get(seed);
             if(candidates==null||candidates.isEmpty()){
@@ -473,23 +487,25 @@ public final class ContactCreditLedger {
             for(var possible:ordered){
                 int e=consensusElasticity(possible,materials);
                 if(e<0){unresolved+=part;withheld++;if(e==-2)missingMaterial++;else if(e==-3)mixedMaterial++;else unproved++;if(RogTrace.sample(Stage.R06,e==-2?"CONTACT_MISSING_MATERIAL":e==-3?"CONTACT_MIXED_E":"CONTACT_UNPROVED_CANDIDATES"))RogTrace.detail(Stage.R06,e==-2?"CONTACT_MISSING_MATERIAL":e==-3?"CONTACT_MIXED_E":"CONTACT_UNPROVED_CANDIDATES","seed={} candidates={} candidateCount={} withheldF={} elasticityStatus={}",seed,com.physicaldestroydeform.diagnostics.TraceBudget.sample(possible,4),possible.size(),part,e);continue;}
-                if(possible.size()==1)exact++;else consensus++;
+                boolean patch=patchSeeds.contains(seed);
+                if(patch)patchConsensus++;else if(possible.size()==1)exact++;else consensus++;
                 double retained=part*DamageModel.contactElasticityTransmissionPercent(e,damage);
                 received+=retained;
                 contactDamped+=part-retained;
-                if(RogTrace.sample(Stage.R06,possible.size()==1?"CONTACT_EXACT":"CONTACT_CONSENSUS"))RogTrace.detail(Stage.R06,possible.size()==1?"CONTACT_EXACT":"CONTACT_CONSENSUS","seed={} candidates={} candidateCount={} incomingF={} retainedF={} dampedF={} opposingE={}",seed,com.physicaldestroydeform.diagnostics.TraceBudget.sample(possible,4),possible.size(),part,retained,part-retained,e);
+                String proof=patch?"CONTACT_PATCH_CONSENSUS":possible.size()==1?"CONTACT_EXACT":"CONTACT_CONSENSUS";
+                if(RogTrace.sample(Stage.R06,proof))RogTrace.detail(Stage.R06,proof,"seed={} candidates={} candidateCount={} incomingF={} retainedF={} dampedF={} opposingE={}",seed,com.physicaldestroydeform.diagnostics.TraceBudget.sample(possible,4),possible.size(),part,retained,part-retained,e);
             }
             if(received>0){effective.put(seed,received);forwardF+=received;}
         }
         double tolerance=Math.max(1e-7,sideF*1e-7);
         if(!Double.isFinite(forwardF)||Math.abs(sideF-forwardF-contactDamped-unresolved)>tolerance)
             throw new IllegalStateException("direct contact F ledger mismatch");
-        if(seedAudits!=null)seedAudits.add(new SeedAudit(owner,seeds,effective,split,sideF,reserved,unresolved,contactDamped,exact,consensus,withheld,missingMaterial,mixedMaterial,unproved));
+        if(seedAudits!=null)seedAudits.add(new SeedAudit(owner,seeds,effective,split,sideF,reserved,unresolved,contactDamped,exact,consensus,patchConsensus,withheld,missingMaterial,mixedMaterial,unproved));
         var plan=ForcePropagation.planTargets(owner,effective,neighbors,materials,forces,damage,direction,trace,crossOwner);
         if(Math.abs(plan.inputF()-forwardF)>tolerance)throw new IllegalStateException("seed F budget mismatch");
         return new ForcePropagation.Result(plan.shares(),sideF,plan.assignedF(),plan.dampedF(),
                 plan.unresolvedF()+unresolved,plan.candidateQ(),plan.finalQ(),plan.dampedQ(),
-                plan.endReason()+" CONTACT_EXACT="+exact+" CONTACT_CONSENSUS="+consensus+" CONTACT_WITHHELD="+withheld+
+                plan.endReason()+" CONTACT_EXACT="+exact+" CONTACT_CONSENSUS="+consensus+" CONTACT_PATCH_CONSENSUS="+patchConsensus+" CONTACT_WITHHELD="+withheld+
                         " CONTACT_UNPROVED="+unproved+" CONTACT_MISSING_MATERIAL="+missingMaterial+" CONTACT_MIXED_E="+mixedMaterial,plan.audit(),
                 plan.contactDampedF()+contactDamped,unresolved,contactDamped);
     }

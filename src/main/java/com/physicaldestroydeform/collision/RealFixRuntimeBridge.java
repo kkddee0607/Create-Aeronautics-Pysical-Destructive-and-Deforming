@@ -6,6 +6,7 @@ import com.physicaldestroydeform.diagnostics.NativeCollisionTelemetry;
 import com.physicaldestroydeform.diagnostics.DiagnosticMode;
 import com.physicaldestroydeform.diagnostics.TraceBudget;
 import com.physicaldestroydeform.material.MaterialRegistry;
+import com.physicaldestroydeform.material.CopycatMaterial;
 import com.physicaldestroydeform.material.PreviewDamageLedger;
 import com.physicaldestroydeform.material.TargetMaterials;
 import com.physicaldestroydeform.world.WorldCommitService;
@@ -267,9 +268,9 @@ public final class RealFixRuntimeBridge {
                 DamageModel.PLASTIC_SHARE,DamageModel.STRESS_SHARE,
                 com.physicaldestroydeform.BlockDamageState.FIXED_SCALE,
                 ForcePropagation.MAX_NODES_PER_SIDE,ForcePropagation.MIN_PROPAGATED_F);
-        log.info("[PDD-FACE-POLICY] revision=originlastFix-DIRECT-SEEDS nativeWitnesses=1+ " +
+        log.info("[PDD-FACE-POLICY] revision=astraFix-PAIRED-LOCAL-PATCH nativeWitnesses=1+ " +
                 "maxFaceArea=16384 ownerLocalShapeProof=REQUIRED sourceBudget=ONE_COLLISION " +
-                "expansion=BILATERAL_CLOSED_ONLY speculativeDamageSeeds=0 syntheticNativeContact=NONE");
+                "expansion=BILATERAL_EXACT_THEN_PAIRED_LOCAL_GAME_PATCH syntheticNativeContact=NONE");
         log.info("[PDD-F-SPREAD-POLICY] revision=spreadFix-DIRECTION-70-30 " +
                 "inwardWeight=0.70 lateralWeight=0.30 transferShare=0.50 " +
                 "reverseEdges=FORBIDDEN verifiedNeighbors=REQUIRED " +
@@ -586,7 +587,7 @@ public final class RealFixRuntimeBridge {
                 // Never use a newly expanded cell as regional reimpact evidence.
                 var regions=prepared!=null&&!directRegions.verified()&&
                         (preSolverClosing||beforeAudit.phase()==Phase.ARMED||beforeAudit.hasUnspentAuthorization())
-                        ?prepared.expand():directRegions;
+                        ?prepared.exact():directRegions;
                 long r2Nanos=auditEligible?System.nanoTime()-r2Start:0;
                 if(auditEligible){
                     r2Audits++;r2ShapeChecks+=regions.checksA()+regions.checksB();
@@ -856,7 +857,12 @@ public final class RealFixRuntimeBridge {
                     }
                     // Freeze optional geometry on the same server-thread snapshot,
                     // before deferred graph/propagation offers can mutate any owner.
+                    var reservedMaterialSnapshot=MaterialRegistry.snapshot();
+                    long reservedMaterialGeneration=reservedMaterialSnapshot.generation();
+                    if(result.credited())RogTrace.event(Stage.R06,"CONTACT_CREDIT_RESERVED","episode={} eventF={} sideF={} state=COLLECTING mutation=OFF",result.episodeGeneration(),result.peakForce(),result.peakForce()/2);
                     var damageRegions=result.credited()&&prepared!=null?prepared.expand():regions;
+                    var positionalMaterials=result.credited()?freezePositionalMaterials(server,stamp.dimension,reservedMaterialSnapshot,damageRegions.regions()):Map.<Target,Optional<CopycatMaterial.Resolved>>of();
+                    if(result.credited())RogTrace.event(Stage.R06,"CONTACT_CREDIT_SEALED_INPUT","episode={} regions={} patchSeeds={} state=SEALED mutation=OFF",result.episodeGeneration(),damageRegions.regions().size(),damageRegions.patchSeeds().size());
                     if(result.credited()&&damageRegions!=regions)
                         r2ShapeChecks+=Math.max(0,damageRegions.checksA()+damageRegions.checksB()-regions.checksA()-regions.checksB());
                     // Freeze decisions in batch order; all plans/offers run
@@ -869,7 +875,11 @@ public final class RealFixRuntimeBridge {
                             ||currentGeneration(stamp.dimension,pair.b().stableKey())!=pair.b().generation()))
                         throw new IllegalStateException("stale owner generation before deferred plan");
                     var materialSnapshot=MaterialRegistry.snapshot();
+                    if(result.credited()&&materialSnapshot.generation()!=reservedMaterialGeneration)
+                        throw new IllegalStateException("material generation changed before contact seal");
                     var targetMaterials=new TargetMaterials(server,stamp.dimension,materialSnapshot);
+                    for(var item:positionalMaterials.entrySet())if(!item.getValue().equals(Optional.ofNullable(targetMaterials.resolve(item.getKey()))))
+                        throw new IllegalStateException("positional material revision changed before seal");
                     targetMaterials.setDirections(targetDirections);
                     // Sable 2.0.6 exports opposing local manifold normals per
                     // native record. Validate each pair, then average all
@@ -951,7 +961,7 @@ public final class RealFixRuntimeBridge {
                                 grant==null?"NULL":grant.status(),regionLedger.lastPropagationFailure(),aborted);
                     }
                     if(granted) {
-                        RogTrace.event(Stage.R06,"CONTACT_SEED_SEALED","credit={} directRegions={} finalRegions={} reservedA={} reservedB={} speculativeDamageSeeds=0",grant.id(),directRegions.regions().size(),damageRegions.regions().size(),reserveA,reserveB);
+                        RogTrace.event(Stage.R06,"CONTACT_SEED_SEALED","credit={} directRegions={} finalRegions={} reservedA={} reservedB={} ownerLocalPatchSeeds={} state=ISSUED",grant.id(),directRegions.regions().size(),damageRegions.regions().size(),reserveA,reserveB,damageRegions.patchSeeds().size());
                         if(RogTrace.sample(Stage.R06,"SEALED_CREDIT"))RogTrace.detail(Stage.R06,"SEALED_CREDIT","credit={} propagationA={} propagationB={} owners={} rawF={} cappedF={} Q={}",grant.id(),grant.propagationA()==null?"NONE":grant.propagationA().endReason(),grant.propagationB()==null?"NONE":grant.propagationB().endReason(),nativeNormal.owners(),currentPeak,result.peakForce(),grant.issuedQ());
                         targetDirections.bind(grant,credit.settings(),targetMaterials::material);
                         if(DETAIL_ENABLED)log.info("[PDD-DEFORM-EVIDENCE] credit={} {}",grant.id(),targetDirections.summary());
@@ -1349,6 +1359,22 @@ public final class RealFixRuntimeBridge {
         }
     }
 
+    /** Only position-dependent material needs a second read at the seal boundary.
+     * Ordinary materials are immutable under the already checked generation. */
+    private static Map<Target,Optional<CopycatMaterial.Resolved>> freezePositionalMaterials(
+            MinecraftServer server,String dimension,MaterialRegistry.Snapshot snapshot,List<ContactCreditLedger.Region> regions){
+        var targets=new HashSet<Target>();
+        for(var r:regions){
+            if(r.a()!=null&&CopycatMaterial.isCopycat(r.a().fingerprint()))targets.add(r.a());
+            if(r.b()!=null&&CopycatMaterial.isCopycat(r.b().fingerprint()))targets.add(r.b());
+            for(var t:r.opposingCandidates())if(CopycatMaterial.isCopycat(t.fingerprint()))targets.add(t);
+        }
+        if(targets.isEmpty())return Map.of();
+        var reader=new TargetMaterials(server,dimension,snapshot);var out=new HashMap<Target,Optional<CopycatMaterial.Resolved>>();
+        for(var t:targets)out.put(t,Optional.ofNullable(reader.resolve(t)));
+        return Map.copyOf(out);
+    }
+
     private static void traceSealedContact(ContactCreditLedger.CreditId creditId,List<NativeCollisionTelemetry.Contact> records,
                                            SableContactRegions.Result direct,SableContactRegions.Result sealed){
         if(!RogTrace.traceSelected())return;
@@ -1358,7 +1384,7 @@ public final class RealFixRuntimeBridge {
             for(int i=0;i<cap;i++){
                 if(!RogTrace.evidenceSlot(Stage.R01,"NATIVE_CONTACT_RECORD"))break;
                 var c=records.get(i);
-                RogTrace.detail(Stage.R01,"NATIVE_CONTACT_RECORD","credit={} index={} ids={}/{} scalar={} localA={}/{}/{} localB={}/{}/{} normalA={}/{}/{} normalB={}/{}/{} frameA={} frameB={} nativeTick={} captureTick={} saturated={}",creditId,i,c.idA(),c.idB(),c.rawImpactScalar(),c.contactAX(),c.contactAY(),c.contactAZ(),c.contactBX(),c.contactBY(),c.contactBZ(),c.ax(),c.ay(),c.az(),c.bx(),c.by(),c.bz(),c.frameA(),c.frameB(),c.serverTick(),c.captureServerTick(),c.capSaturated());
+                RogTrace.detail(Stage.R01,"NATIVE_CONTACT_RECORD","credit={} index={} ids={}/{} scalar={} localA={}/{}/{} localB={}/{}/{} normalA={}/{}/{} normalB={}/{}/{} frameA={} frameB={} nativeTick={} captureTick={} pollId={} saturated={}",creditId,i,c.idA(),c.idB(),c.rawImpactScalar(),c.contactAX(),c.contactAY(),c.contactAZ(),c.contactBX(),c.contactBY(),c.contactBZ(),c.ax(),c.ay(),c.az(),c.bx(),c.by(),c.bz(),c.frameA(),c.frameB(),c.serverTick(),c.captureServerTick(),c.pollId(),c.capSaturated());
             }
             for(boolean onA:new boolean[]{true,false}){
                 var initial=new HashSet<GameImpactCredit.Target>();var confirmed=new HashSet<GameImpactCredit.Target>();
@@ -1370,7 +1396,7 @@ public final class RealFixRuntimeBridge {
                 for(int offset=0;offset<count;offset+=32){
                     if(!RogTrace.evidenceSlot(Stage.R04,"CONTACT_SEED_COORDS"))break;
                     var cells=new ArrayList<String>();int end=Math.min(count,offset+32);
-                    for(int i=offset;i<end;i++){var target=sorted.get(i);cells.add(target.localBlock()+"|"+(initial.contains(target)?"DIRECT_NATIVE":"BILATERAL_SURFACE"));}
+                    for(int i=offset;i<end;i++){var target=sorted.get(i);cells.add(target.localBlock()+"|"+(initial.contains(target)?"DIRECT_NATIVE":sealed.patchSeeds().contains(target)?"OWNER_LOCAL_PATCH":"BILATERAL_EXACT"));}
                     RogTrace.detail(Stage.R04,"CONTACT_SEED_COORDS","credit={} side={} offset={} end={} total={} cells={}",creditId,onA?"A":"B",offset,end,sorted.size(),cells);
                 }
             }
