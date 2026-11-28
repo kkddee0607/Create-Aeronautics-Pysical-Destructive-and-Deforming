@@ -253,6 +253,9 @@ public final class WorldCommitService {
                 default -> { }
             }
             if(result.result()==WorldCommitCore.Outcome.DEFERRED)continue;
+            var stressReceipt=result.receipt();
+            if(stressReceipt!=null&&stressReceipt.id().startsWith("STRESS:")&&RogTrace.evidenceSlot(RogTrace.Stage.R11,"STRESS_APPLY_RECEIPT"))
+                RogTrace.detail(RogTrace.Stage.R11,"STRESS_APPLY_RECEIPT","applyId={} owner=WORLD result={} receipt={} reason={} key={}",stressReceipt.id(),result.result(),stressReceipt.status(),result.reason(),stressReceipt.key());
             // Always retain physical breaks and quarantines; sample routine damage rows.
             if(result.result()==WorldCommitCore.Outcome.APPLIED_BREAK || result.result()==WorldCommitCore.Outcome.QUARANTINED || shown++<MAX_COMMIT_LOGS_PER_TICK){
                 var receipt=result.receipt();

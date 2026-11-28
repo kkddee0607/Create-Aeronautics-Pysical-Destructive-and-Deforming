@@ -153,6 +153,8 @@ public final class SableContactRegions {
         private Supplier<Result> expansion;
         private java.util.function.Function<Result,Result> model;
         private Result exact,expanded;
+        private java.util.function.BiPredicate<List<CollisionFrame.Snapshot>,NativeEffectDirection.Result> gapProof=(p,n)->false;
+        boolean positivePreGap(List<CollisionFrame.Snapshot> pre,NativeEffectDirection.Result normal){return gapProof.test(pre,normal);}
         Prepared(Result direct,Supplier<Result> expansion){this(direct,expansion,r->r);}
         Prepared(Result direct,Supplier<Result> expansion,java.util.function.Function<Result,Result> model){this.direct=direct;this.expansion=expansion;this.model=model;}
         Result exact(){
@@ -174,6 +176,11 @@ public final class SableContactRegions {
     }
     static Prepared prepare(MinecraftServer server,String dimension,GameImpactCredit.Pair pair,
                             List<NativeCollisionTelemetry.Contact> records,TargetDirections directions){
+        return prepare(server,dimension,pair,records,directions,RUNTIME_MAX_UNIQUE_CELLS_PER_SIDE);
+    }
+    static Prepared prepare(MinecraftServer server,String dimension,GameImpactCredit.Pair pair,
+                            List<NativeCollisionTelemetry.Contact> records,TargetDirections directions,int budget){
+        if(budget<1||budget>RUNTIME_MAX_UNIQUE_CELLS_PER_SIDE)throw new IllegalArgumentException("regional budget");
         var cache=new HashMap<AuditKey,Check>();
         var witnesses=new HashMap<AuditKey,DirectionWitness>();
         var nativeBatch=new OwnerResolver.NativeAuditBatch(server,dimension);
@@ -225,7 +232,7 @@ public final class SableContactRegions {
             cache.put(key,result);
             var witness=new DirectionWitness(cells,uncertain);witnesses.put(key,witness);
             return directCheck(result,checked,directions,nativeBatch,contact,owner,point,witness);
-        }, RUNTIME_MAX_UNIQUE_CELLS_PER_SIDE);
+        }, budget);
         var direct=withStats(collected,nativeBatch);
         // Direct targets are sealed independently of direction/geometry.
         for(var r:direct.regions()){
@@ -235,16 +242,18 @@ public final class SableContactRegions {
         if(RogTrace.sample(Stage.R04,"DIRECT_SEEDS"))RogTrace.detail(Stage.R04,"DIRECT_SEEDS",
                 "regions={} confirmedA={} confirmedB={} reservedA={} reservedB={} status={} authority=OWNER_LOCAL",
                 direct.regions().size(),direct.trace().verifiedTargetsA(),direct.trace().verifiedTargetsB(),direct.reservedA(),direct.reservedB(),direct.status());
-        return new Prepared(direct,()->expand(pair,records,directions,nativeBatch,direct),
-                exact->expandPatch(pair,records,directions,nativeBatch,direct,exact));
+        var prepared=new Prepared(direct,()->expand(pair,records,directions,nativeBatch,direct,budget),
+                exact->expandPatch(pair,records,directions,nativeBatch,direct,exact,budget));
+        prepared.gapProof=(pre,normal)->DcrtContactBatch.preGap(pair,records,pre,normal,nativeBatch,direct);
+        return prepared;
     }
     private static Result expand(GameImpactCredit.Pair pair,List<NativeCollisionTelemetry.Contact> records,
-                                 TargetDirections directions,OwnerResolver.NativeAuditBatch nativeBatch,Result collected){
+                                 TargetDirections directions,OwnerResolver.NativeAuditBatch nativeBatch,Result collected,int budget){
         // A failed/over-budget owner may not be resurrected by speculative reads.
         if(collected.trace().failure()!=AuditFailure.NONE&&collected.trace().failure()!=AuditFailure.NO_VERIFIED_REGION)
             return collected;
         String[] owners={pair.a().stableKey(),pair.b().stableKey()};
-        int[] remainingSurface={RUNTIME_MAX_UNIQUE_CELLS_PER_SIDE-collected.checksA(),RUNTIME_MAX_UNIQUE_CELLS_PER_SIDE-collected.checksB()};
+        int[] remainingSurface={budget-collected.checksA(),budget-collected.checksB()};
         var polls=new HashMap<Long,Integer>();
         boolean patchEligible=false;
         for(var c:new LinkedHashSet<>(records))if(c!=null&&c.pollId()>0&&polls.merge(c.pollId(),1,Integer::sum)>=3){patchEligible=true;break;}
@@ -255,7 +264,7 @@ public final class SableContactRegions {
         var visitedRecords=new LinkedHashSet<>(records);
         var surfaceReader=shapeReader(nativeBatch,owners,remainingSurface,surfaceReadLimited);
             var surfaceEvidence=new java.util.ArrayList<BilateralContactSurface.Match>();
-            int pairRemaining=RUNTIME_MAX_UNIQUE_CELLS_PER_SIDE;
+            int pairRemaining=budget;
             var validFrames=new java.util.ArrayList<BilateralContactSurface.Frame>();
             if(remainingSurface[0]>0&&remainingSurface[1]>0){
                 int ordinal=0;boolean calibrationLogged=false;
@@ -289,7 +298,7 @@ public final class SableContactRegions {
         var merged=mergeBilateralPairs(collected.regions(),surfaceEvidence);
         // Unused exact allowance and the protected patch share become the next path's allowance.
         remainingSurface[0]+=patchReserve[0];remainingSurface[1]+=patchReserve[1];
-        int ca=RUNTIME_MAX_UNIQUE_CELLS_PER_SIDE-remainingSurface[0],cb=RUNTIME_MAX_UNIQUE_CELLS_PER_SIDE-remainingSurface[1];
+        int ca=budget-remainingSurface[0],cb=budget-remainingSurface[1];
         var a=new HashSet<GameImpactCredit.Target>();var b=new HashSet<GameImpactCredit.Target>();
         for(var r:merged){if(r.a()!=null)a.add(r.a());if(r.b()!=null)b.add(r.b());}
         var t=collected.trace();
@@ -368,11 +377,11 @@ public final class SableContactRegions {
     /** Model-only expansion runs AFTER a real collision authorization. It cannot
      * supply the direct/approach predicate, a cross-owner edge or a move axis. */
     private static Result expandPatch(GameImpactCredit.Pair pair,List<NativeCollisionTelemetry.Contact> records,
-            TargetDirections directions,OwnerResolver.NativeAuditBatch batch,Result direct,Result exact){
+            TargetDirections directions,OwnerResolver.NativeAuditBatch batch,Result direct,Result exact,int budget){
         if(direct.trace().failure()!=AuditFailure.NONE&&direct.trace().failure()!=AuditFailure.NO_VERIFIED_REGION)return exact;
         if(!exact.verified())return exact; // no independent authorized cell
         String[] owners={pair.a().stableKey(),pair.b().stableKey()};
-        int[] remaining={RUNTIME_MAX_UNIQUE_CELLS_PER_SIDE-exact.checksA(),RUNTIME_MAX_UNIQUE_CELLS_PER_SIDE-exact.checksB()};
+        int[] remaining={budget-exact.checksA(),budget-exact.checksB()};
         boolean[] limited={false,false};
         var witness=new ArrayList<ContactFacePatch.Witness>();
         var unique=new LinkedHashSet<>(records);var pollCounts=new HashMap<Long,Integer>();
@@ -384,9 +393,9 @@ public final class SableContactRegions {
         }
         // Same event's shape cache and bounded work. Exact completed components
         // are immutable; model expansion never edits their opposing evidence.
-        var model=ContactFacePatch.reconstruct(witness,shapeReader(batch,owners,remaining,limited),RUNTIME_MAX_UNIQUE_CELLS_PER_SIDE);
+        var model=ContactFacePatch.reconstruct(witness,shapeReader(batch,owners,remaining,limited),budget);
         var candidate=mergePatch(exact,model);
-        int ca=RUNTIME_MAX_UNIQUE_CELLS_PER_SIDE-remaining[0],cb=RUNTIME_MAX_UNIQUE_CELLS_PER_SIDE-remaining[1];
+        int ca=budget-remaining[0],cb=budget-remaining[1];
         var r=candidate;
         var t=r.trace();
         r=new Result(r.regions(),r.status(),ca,cb,r.rejected(),r.methodA(),r.methodB(),

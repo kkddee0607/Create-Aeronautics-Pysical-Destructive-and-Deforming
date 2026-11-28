@@ -26,7 +26,7 @@ import java.util.function.Function;
 public final class ContactCreditLedger {
     public static final String LEGACY_ALGORITHM_REVISION = "PDD-IDS-1.0.7/0.4.1-spreadFix-MULTIFACE-70-30";
     public static final String PREVIOUS_ALGORITHM_REVISION = "PDD-IDS-1.0.9/0.6.1-CONTACT-ELASTIC-CHAIN";
-    public static final String ALGORITHM_REVISION = "PDD-IDS-1.0.9/0.6.1-astraFixFix-PAIRED-LOCAL-PATCH-ALPHA04";
+    public static final String ALGORITHM_REVISION = "PDD-IDS-1.0.10/0.6.1-duoFix-DCRT-PATCH-ALPHA04";
     // Bounded but large enough for a 100x100 fully verified planar contact patch.
     public static final int MAX_TARGETS_PER_SIDE = 16_384;
     public static final int MAX_REGIONS = 2 * MAX_TARGETS_PER_SIDE;
@@ -264,7 +264,7 @@ public final class ContactCreditLedger {
                                  Map<String,ForcePropagation.Orientation> directions,
                                  java.util.function.Consumer<ForcePropagation.Trace> trace) {
         return issuePropagatedInternal(pair,decision,source,evidence,neighbors,t->Objects.requireNonNull(materials.apply(t.fingerprint()),"missing material"),
-                forces,damage,directions,trace,materials,false,null,false,0,0);
+                forces,damage,directions,trace,materials,false,null,false,0,0,null);
     }
     public Grant issuePropagatedTargets(GameImpactCredit.Pair pair,GameImpactCredit.Decision decision,
                                  Source source,List<Region> evidence,ForcePropagation.NeighborReader neighbors,
@@ -285,7 +285,7 @@ public final class ContactCreditLedger {
                                  Function<String,MaterialProperties> legacyMaterials,
                                  ForcePropagation.CrossOwnerContext crossOwner) {
         return issuePropagatedInternal(pair,decision,source,evidence,neighbors,materials,forces,damage,
-                directions==null?Map.of():directions,trace,legacyMaterials,true,crossOwner,false,0,0);
+                directions==null?Map.of():directions,trace,legacyMaterials,true,crossOwner,false,0,0,null);
     }
     /** Current runtime: one authorized source envelope, independently verified
      * direct/closed-surface seeds, and non-spendable ambiguous contact slots. */
@@ -296,8 +296,17 @@ public final class ContactCreditLedger {
                                   Map<String,ForcePropagation.Orientation> directions,
                                   java.util.function.Consumer<ForcePropagation.Trace> trace,
                                   ForcePropagation.CrossOwnerContext crossOwner){
+        return issueContactSeeds(pair,decision,source,evidence,reservedA,reservedB,neighbors,materials,forces,damage,directions,trace,crossOwner,null);
+    }
+    Grant issueContactSeeds(GameImpactCredit.Pair pair,GameImpactCredit.Decision decision,
+                                  Source source,List<Region> evidence,int reservedA,int reservedB,
+                                  ForcePropagation.NeighborReader neighbors,Function<GameImpactCredit.Target,MaterialProperties> materials,
+                                  GameImpactCredit.Settings forces,DamageModel.Settings damage,
+                                  Map<String,ForcePropagation.Orientation> directions,
+                                  java.util.function.Consumer<ForcePropagation.Trace> trace,
+                                  ForcePropagation.CrossOwnerContext crossOwner,Map<GameImpactCredit.Target,ForcePropagation.Orientation> regionalDirections){
         return issuePropagatedInternal(pair,decision,source,evidence,neighbors,materials,forces,damage,
-                directions==null?Map.of():directions,trace,null,true,crossOwner,true,reservedA,reservedB);
+                directions==null?Map.of():directions,trace,null,true,crossOwner,true,reservedA,reservedB,regionalDirections);
     }
     private Grant issuePropagatedInternal(GameImpactCredit.Pair pair,GameImpactCredit.Decision decision,
                                  Source source,List<Region> evidence,ForcePropagation.NeighborReader neighbors,
@@ -306,7 +315,7 @@ public final class ContactCreditLedger {
                                  Map<String,ForcePropagation.Orientation> directions,
                                  java.util.function.Consumer<ForcePropagation.Trace> trace,
                                  Function<String,MaterialProperties> legacyMaterials,boolean bilateral,
-                                 ForcePropagation.CrossOwnerContext crossOwner,boolean materialOnly,int reservedA,int reservedB) {
+                                 ForcePropagation.CrossOwnerContext crossOwner,boolean materialOnly,int reservedA,int reservedB,Map<GameImpactCredit.Target,ForcePropagation.Orientation> regionalDirections) {
         // Validate the single source envelope without minting a legacy Q grant.
         lastPropagationFailure="NONE";
         var validated=validateSeeds(pair,decision,source,evidence,materialOnly,reservedA,reservedB);
@@ -331,7 +340,7 @@ public final class ContactCreditLedger {
             }
             var pa=bilateral?contactPlan(pair.a().stableKey(),seedsA,sideF,reservedA,evidence,true,neighbors,materials,forces,
                     damage,directions.getOrDefault(pair.a().stableKey(),ForcePropagation.Orientation.unknown()),
-                    traces==null?null:traces::add,crossOwner==null?null:crossOwner.forSide(pair.a().stableKey(),pair.b().stableKey()),seedAudits)
+                    traces==null?null:traces::add,crossOwner==null?null:crossOwner.forSide(pair.a().stableKey(),pair.b().stableKey()),seedAudits,regionalDirections)
                     :directions==null
                     ?ForcePropagation.plan(pair.a().stableKey(),seedsA,sideF,neighbors,legacyMaterials,forces,damage)
                     :ForcePropagation.planTargets(pair.a().stableKey(),seedsA,sideF,neighbors,materials,forces,damage,
@@ -339,7 +348,7 @@ public final class ContactCreditLedger {
                             traces==null?null:traces::add);
             var pb=bilateral?contactPlan(pair.b().stableKey(),seedsB,sideF,reservedB,evidence,false,neighbors,materials,forces,
                     damage,directions.getOrDefault(pair.b().stableKey(),ForcePropagation.Orientation.unknown()),
-                    traces==null?null:traces::add,crossOwner==null?null:crossOwner.forSide(pair.b().stableKey(),pair.a().stableKey()),seedAudits)
+                    traces==null?null:traces::add,crossOwner==null?null:crossOwner.forSide(pair.b().stableKey(),pair.a().stableKey()),seedAudits,regionalDirections)
                     :directions==null
                     ?ForcePropagation.plan(pair.b().stableKey(),seedsB,sideF,neighbors,legacyMaterials,forces,damage)
                     :ForcePropagation.planTargets(pair.b().stableKey(),seedsB,sideF,neighbors,materials,forces,damage,
@@ -353,10 +362,10 @@ public final class ContactCreditLedger {
                 if(seedAudits!=null)seedAudits.clear();
                 pa=contactPlan(pair.a().stableKey(),seedsA,sideF,reservedA,evidence,true,neighbors,materials,forces,damage,
                         directions.getOrDefault(pair.a().stableKey(),ForcePropagation.Orientation.unknown()),
-                        traces==null?null:traces::add,holdCross(crossOwner.forSide(pair.a().stableKey(),pair.b().stableKey())),seedAudits);
+                        traces==null?null:traces::add,holdCross(crossOwner.forSide(pair.a().stableKey(),pair.b().stableKey())),seedAudits,regionalDirections);
                 pb=contactPlan(pair.b().stableKey(),seedsB,sideF,reservedB,evidence,false,neighbors,materials,forces,damage,
                         directions.getOrDefault(pair.b().stableKey(),ForcePropagation.Orientation.unknown()),
-                        traces==null?null:traces::add,holdCross(crossOwner.forSide(pair.b().stableKey(),pair.a().stableKey())),seedAudits);
+                        traces==null?null:traces::add,holdCross(crossOwner.forSide(pair.b().stableKey(),pair.a().stableKey())),seedAudits,regionalDirections);
             }
             // An independently certified late expansion may recover a formerly
             // missing side. It can spend only its ORIGINAL half, never the other half.
@@ -458,7 +467,7 @@ public final class ContactCreditLedger {
              List<Region> evidence,boolean onA,ForcePropagation.NeighborReader neighbors,
              Function<GameImpactCredit.Target,MaterialProperties> materials,GameImpactCredit.Settings forces,
              DamageModel.Settings damage,ForcePropagation.Orientation direction,
-             java.util.function.Consumer<ForcePropagation.Trace> trace,ForcePropagation.CrossOwnerContext crossOwner,List<SeedAudit> seedAudits) {
+             java.util.function.Consumer<ForcePropagation.Trace> trace,ForcePropagation.CrossOwnerContext crossOwner,List<SeedAudit> seedAudits,Map<GameImpactCredit.Target,ForcePropagation.Orientation> regionalDirections) {
         if(!Double.isFinite(sideF)||sideF<0)throw new IllegalArgumentException("invalid contact F");
         var opponents=new HashMap<GameImpactCredit.Target,Set<List<GameImpactCredit.Target>>>();
         var patchSeeds=new HashSet<GameImpactCredit.Target>();
@@ -503,7 +512,7 @@ public final class ContactCreditLedger {
         if(!Double.isFinite(forwardF)||Math.abs(sideF-forwardF-contactDamped-unresolved)>tolerance)
             throw new IllegalStateException("direct contact F ledger mismatch");
         if(seedAudits!=null)seedAudits.add(new SeedAudit(owner,seeds,effective,split,sideF,reserved,unresolved,contactDamped,exact,consensus,patchConsensus,withheld,missingMaterial,mixedMaterial,unproved));
-        var plan=ForcePropagation.planTargets(owner,effective,neighbors,materials,forces,damage,direction,trace,crossOwner);
+        var plan=ForcePropagation.planTargets(owner,effective,neighbors,materials,forces,damage,direction,trace,crossOwner,regionalDirections);
         if(Math.abs(plan.inputF()-forwardF)>tolerance)throw new IllegalStateException("seed F budget mismatch");
         return new ForcePropagation.Result(plan.shares(),sideF,plan.assignedF(),plan.dampedF(),
                 plan.unresolvedF()+unresolved,plan.candidateQ(),plan.finalQ(),plan.dampedQ(),

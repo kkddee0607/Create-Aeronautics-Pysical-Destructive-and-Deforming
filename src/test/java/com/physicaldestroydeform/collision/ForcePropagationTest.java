@@ -272,4 +272,18 @@ class ForcePropagationTest {
                     t->material(40),FORCE,DAMAGE,ForcePropagation.Orientation.unknown(),null));
         }finally{com.physicaldestroydeform.diagnostics.RogTrace.stop();}
     }
+    @Test void regionalDirectionsMergeOnceBeforeG(){
+        var a=at(WORLD,0,0,0);var b=at(WORLD,1,-1,0);var c=at(WORLD,1,0,0);
+        var na=new ForcePropagation.Orientation(new FrameMath.Vec(1,0,0),"TEST");
+        var nb=new ForcePropagation.Orientation(new FrameMath.Vec(0,1,0),"TEST");
+        var trace=new java.util.ArrayList<ForcePropagation.Trace>();
+        var r=ForcePropagation.planTargets(WORLD,java.util.Map.of(a,100d,b,100d),
+                graph(Set.of(WORLD+":0,0,0",WORLD+":1,-1,0",WORLD+":1,0,0")),t->material(0),FORCE,DAMAGE,
+                ForcePropagation.Orientation.unknown(),trace::add,null,java.util.Map.of(a,na,b,nb));
+        var merged=r.shares().stream().filter(s->s.target().equals(c)).toList();
+        assertEquals(1,merged.size());assertEquals(50,merged.getFirst().allocatedF(),1e-9);
+        assertEquals(4.8,merged.getFirst().rawQ(),1e-9);
+        assertEquals(150,r.assignedF(),1e-9);assertEquals(50,r.unresolvedF(),1e-9);
+        assertTrue(trace.stream().anyMatch(e->e instanceof ForcePropagation.Node n&&n.target().equals(c)&&n.decision().equals("SAFETY_MIXED_REGION_DIRECTION")));
+    }
 }

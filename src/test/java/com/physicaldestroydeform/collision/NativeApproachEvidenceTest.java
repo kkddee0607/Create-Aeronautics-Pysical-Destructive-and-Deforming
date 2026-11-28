@@ -58,4 +58,13 @@ final class NativeApproachEvidenceTest {
         assertFalse(NativeApproachEvidence.independentlyApproaching(PAIR,
                 List.of(frame(1,7,3),frame(2,7,-3)),normal(),7));
     }
+    @Test void earliestRegionalClosingPreservesWallAndIgnoresLaterRebound(){
+        var floor=new NativeEffectDirection.Result(Map.of(PAIR.a().stableKey(),
+                new ForcePropagation.Orientation(new Vec(0,1,0),"NATIVE"),
+                PAIR.b().stableKey(),new ForcePropagation.Orientation(new Vec(0,-1,0),"NATIVE")),"TEST",99);
+        var samples=List.of(frame(2,7,-3),frame(1,7,10));
+        assertEquals(10,NativeApproachEvidence.earliestClosing(PAIR,samples,normal(),7),1e-12);
+        assertEquals(0,NativeApproachEvidence.earliestClosing(PAIR,samples,floor,7),1e-12);
+        assertTrue(Double.isNaN(NativeApproachEvidence.earliestClosing(PAIR,List.of(frame(1,7,10),frame(1,7,-3)),normal(),7)));
+    }
 }

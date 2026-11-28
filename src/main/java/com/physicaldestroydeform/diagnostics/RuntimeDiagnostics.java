@@ -13,9 +13,9 @@ public final class RuntimeDiagnostics {
     private final Window total=new Window(SAMPLES), bridge=new Window(SAMPLES);
     private final EnumMap<Phase,Window> phases=new EnumMap<>(Phase.class);
     public RuntimeDiagnostics(){for(var phase:Phase.values())phases.put(phase,new Window(SAMPLES));}
-    private long lastReport;
+    private long lastReport,previousGcCount=-1,previousGcMillis=-1;
 
-    public void reset(long now){total.reset();bridge.reset();for(var window:phases.values())window.reset();lastReport=now;}
+    public void reset(long now){total.reset();bridge.reset();for(var window:phases.values())window.reset();lastReport=now;previousGcCount=-1;previousGcMillis=-1;}
     public void recordTick(long nanos){total.record(nanos);}
     public void recordBridge(long nanos){bridge.record(nanos);}
     public void recordPhase(Phase phase,long nanos){phases.get(phase).record(nanos);}
@@ -45,6 +45,11 @@ public final class RuntimeDiagnostics {
         }}catch(RuntimeException|LinkageError unavailable){/* optional VM counter */}
         logger.info("[PDD-MEMORY] heapUsed={} heapCommitted={} heapMax={} gcCount={} gcMillis={} directBufferBytes={} mappedBufferBytes={} nativeMemory=UNMEASURED",
                 runtime.totalMemory()-runtime.freeMemory(),runtime.totalMemory(),runtime.maxMemory(),gcCount,gcMillis,direct,mapped);
+        long rss=procKb("/proc/self/status","VmRSS:"),pss=procKb("/proc/self/smaps_rollup","Pss:");
+        logger.info("[PDD-MEMORY_PROCESS_SUMMARY] rssKiB={} pssKiB={} gcCountDelta={} gcMillisDelta={} rustNative=UNMEASURED gpu=UNMEASURED",
+                rss<0?"UNAVAILABLE":rss,pss<0?"UNAVAILABLE":pss,
+                delta(gcCount,previousGcCount),delta(gcMillis,previousGcMillis));
+        previousGcCount=gcCount;previousGcMillis=gcMillis;
         var t=total.snapshot();var b=bridge.snapshot();
         logger.info("[PDD-PERFORMANCE] samples={} p50Nanos={} p95Nanos={} p99Nanos={} bridgeSamples={} bridgeP50Nanos={} bridgeP95Nanos={} bridgeP99Nanos={} maxNanos={} bridgeMaxNanos={} mode={}",
                 t.count(),t.p50(),t.p95(),t.p99(),b.count(),b.p50(),b.p95(),b.p99(),t.max(),b.max(),DiagnosticMode.current());
@@ -53,6 +58,18 @@ public final class RuntimeDiagnostics {
             if(p.count()!=0)logger.info("[PDD-PHASE-PERF] phase={} samples={} p50Nanos={} p95Nanos={} p99Nanos={} maxNanos={}",
                     entry.getKey(),p.count(),p.p50(),p.p95(),p.p99(),p.max());
         }
+    }
+    private static Object delta(long current,long previous){return current>=previous&&previous>=0?current-previous:"UNAVAILABLE";}
+    static long procKb(String file,String key){
+        try(var in=java.nio.file.Files.newBufferedReader(java.nio.file.Path.of(file))){
+            String line;int count=0;
+            while(count++<256&&(line=in.readLine())!=null)if(line.startsWith(key)){
+                String[] fields=line.substring(key.length()).trim().split("\\s+");
+                if(fields.length!=2||!fields[1].equals("kB"))return -1;
+                long n=Long.parseLong(fields[0]);return n>=0?n:-1;
+            }
+        }catch(java.io.IOException|RuntimeException unavailable){return -1;}
+        return -1;
     }
     record Percentiles(int count,long p50,long p95,long p99,long max){}
     static final class Window {

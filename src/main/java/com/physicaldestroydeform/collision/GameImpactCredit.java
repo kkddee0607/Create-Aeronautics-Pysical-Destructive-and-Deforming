@@ -15,7 +15,7 @@ import java.util.Objects;
  * No Minecraft/Sable mutable object crosses this boundary.</p>
  */
 public final class GameImpactCredit {
-    public static final String POLICY_REVISION = "PDD-IDS-1.0.7/0.5.0moreFix-VERIFIED-REGION-REIMPACT";
+    public static final String POLICY_REVISION = "PDD-IDS-1.0.10/0.6.1-duoFix-REGION-AUTHORIZATION";
     // User's 100^3 blocks * 4 mass-units/block * 10 m/s. This is a
     // GAME F index (mass * speed); without stopping time it is NOT Newtons.
     public static final double MAX_GAME_F = 100d * 100d * 100d * 4d * 10d;
@@ -324,6 +324,27 @@ public final class GameImpactCredit {
         if (q < 1.0) return decision(s,Reason.BELOW_THRESHOLD,frame,0);
         s.pendingApproach=false; // one-credit, including the burst's following frames
         s.episode++;
+        return decision(s,Reason.APPROVED,frame,q);
+    }
+
+    /** Production DCRT entry. Caller has already verified independently armed
+     * regional witnesses and supplies ONLY eligible native records. The same
+     * Pair state/sequence enforces one credit per tick even across regions. */
+    Decision stepRegional(Frame frame) {
+        Objects.requireNonNull(frame);
+        if(frame.positivelySeparated()||!frame.verifiedApproach()||frame.records().isEmpty())
+            throw new IllegalArgumentException("regional proof required");
+        State s=states.get(frame.pair());
+        if(s==null){
+            if(states.size()>=config.maxEntries())return decision(new State(),Reason.STATE_CAPACITY_EXCEEDED,frame,0);
+            s=new State();states.put(frame.pair(),s);
+        }
+        if(frame.tick()<=s.tick)return decision(s,Reason.STALE_FRAME,frame,0);
+        s.tick=frame.tick();s.phase=Phase.ACTIVE;s.separatedSamples=0;s.pendingApproach=false;s.burstFrames=2;
+        if(frame.targetA()==null&&frame.targetB()==null)return decision(s,Reason.TARGET_UNVERIFIED,frame,0);
+        double q=config.candidate(frame.forcePeak());
+        if(q<1)return decision(s,Reason.BELOW_THRESHOLD,frame,0);
+        s.episodeGeneration=newEpisodeGeneration();s.authorizationTick=frame.tick();s.episode++;
         return decision(s,Reason.APPROVED,frame,q);
     }
 

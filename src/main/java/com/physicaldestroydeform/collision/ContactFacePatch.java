@@ -37,6 +37,7 @@ final class ContactFacePatch {
         final Map<FaceKey,List<Face>> faces=new HashMap<>();
         final Map<String,Integer> outcomes=new TreeMap<>();
         Work(int cap,ShapeReader reader){this.cap=cap;this.reader=reader;}
+        void failure(String reason){outcomes.merge(reason,1,Integer::sum);}
         void charge(){if(used>=cap||reader.budgetExhausted())throw new Limit();used++;}
         List<Face> faces(Frame f,int side,BlockPos pos){
             int ax=axis(f.inward(side)),sgn=sign(f,side);var key=new FaceKey(side,pos,ax,sgn);
@@ -73,10 +74,10 @@ final class ContactFacePatch {
             try{
                 work.charge();var f=w.frame();int a=axis(f.inwardA()),b=axis(f.inwardB());
                 var fa=anchors(work,f,0);var fb=anchors(work,f,1);
-                if(fa.isEmpty()||fb.isEmpty())continue;
+                if(fa.isEmpty()||fb.isEmpty()){work.failure("PATCH_ANCHOR_FACE_MISSING");continue;}
                 // Ambiguous plane (not merely ambiguous cell along a seam) is not a patch witness.
                 double pa=fa.getFirst().plane(),pb=fb.getFirst().plane();
-                if(fa.stream().anyMatch(x->x.plane()!=pa)||fb.stream().anyMatch(x->x.plane()!=pb))continue;
+                if(fa.stream().anyMatch(x->x.plane()!=pa)||fb.stream().anyMatch(x->x.plane()!=pb)){work.failure("PATCH_AMBIGUOUS_PLANE");continue;}
                 var key=new Group(w.source().pollId(),w.source().runtimeStamp(),w.source().rawImpactScalar(),f.a(),f.b(),a,sign(f,0),b,sign(f,1),pa,pb);
                 groups.computeIfAbsent(key,k->new ArrayList<>()).add(new Anchor(w.source(),point(f.contactA(),a),point(f.contactB(),b),fa,fb));
             }catch(Limit unknown){incomplete=true;if(reader.budgetExhausted()||work.used>=work.cap)break;}
@@ -195,18 +196,20 @@ final class ContactFacePatch {
         var o=points.getFirst();Anchor x=o,y=o;double far=0,area=0;
         for(var p:points){work.charge();double d=dist2(o.a(),p.a());if(d>far){far=d;x=p;}}
         for(var p:points){work.charge();double d=Math.abs(cross(o.a(),x.a(),p.a()));if(d>area){area=d;y=p;}}
-        if(area<=MIN_TRIANGLE||area/Math.sqrt(far)<=FIT)return null;
+        if(area<=MIN_TRIANGLE||area/Math.sqrt(far)<=FIT){work.failure("PATCH_FIT_NONCOLLINEAR_MISSING");return null;}
         double ax=x.a().x()-o.a().x(),ay=x.a().y()-o.a().y(),cx=y.a().x()-o.a().x(),cy=y.a().y()-o.a().y();
         double bx=x.b().x()-o.b().x(),by=x.b().y()-o.b().y(),dx=y.b().x()-o.b().x(),dy=y.b().y()-o.b().y();
         double d=ax*cy-ay*cx;
         double xx=(bx*cy-dx*ay)/d,xy=(dx*ax-bx*cx)/d,yx=(by*cy-dy*ay)/d,yy=(dy*ax-by*cx)/d,det=xx*yy-xy*yx;
-        if(!Double.isFinite(det)||Math.signum(det)!=-g.as()*g.bs())return null;
+        if(!Double.isFinite(det)||Math.signum(det)!=-g.as()*g.bs()){work.failure("PATCH_FIT_ORIENTATION");return null;}
         // A projected near-parallel rigid face cannot scale or shear freely.
         // The existing .98 face-opposition cosine bounds both singular values.
         double sum=xx*xx+xy*xy+yx*yx+yy*yy,disc=Math.sqrt(Math.max(0,sum*sum-4*det*det));
-        if((sum-disc)/2<FACE_OPPOSITION*FACE_OPPOSITION-EPS||(sum+disc)/2>1/(FACE_OPPOSITION*FACE_OPPOSITION)+EPS)return null;
+        if((sum-disc)/2<FACE_OPPOSITION*FACE_OPPOSITION-EPS||(sum+disc)/2>1/(FACE_OPPOSITION*FACE_OPPOSITION)+EPS){work.failure("PATCH_FIT_SCALE_SHEAR");return null;}
         var map=new Chart(o.a(),o.b(),xx,xy,yx,yy,det);
-        for(var p:points){work.charge();if(dist2(map.forward(p.a()),p.b())>FIT*FIT||dist2(map.inverse(p.b()),p.a())>FIT*FIT)return null;}
+        for(var p:points){work.charge();double b2=dist2(map.forward(p.a()),p.b()),a2=dist2(map.inverse(p.b()),p.a());
+            if(!Double.isFinite(a2)||!Double.isFinite(b2)||a2>FIT*FIT||b2>FIT*FIT){work.failure("PATCH_FIT_RESIDUAL");return null;}
+        }
         return map;
     }
     private record Consensus(Chart chart,List<Anchor> anchors) {}
@@ -216,8 +219,9 @@ final class ContactFacePatch {
         // multiple incompatible outliers remain unresolved rather than inventing a patch.
         if(anchors.size()<5)return null;
         var unique=new LinkedHashMap<Point,Anchor>();
-        for(var a:anchors){work.charge();var old=unique.putIfAbsent(a.a(),a);if(old!=null&&!old.b().equals(a.b()))return null;}
-        var points=new ArrayList<>(unique.values());if(points.size()<5)return null;
+        for(var a:anchors){work.charge();var old=unique.putIfAbsent(a.a(),a);if(old!=null&&!old.b().equals(a.b())){work.failure("PATCH_DUPLICATE_A_CONFLICT");return null;}}
+        var points=new ArrayList<>(unique.values());if(points.size()<5){work.failure("PATCH_PARTIAL_INDEPENDENT_ANCHORS");return null;}
+        if(points.size()>64)work.failure("PATCH_PARTIAL_HYPOTHESIS_CAP");
         Consensus best=null;boolean conflict=false;
         for(int omitted=0;omitted<Math.min(points.size(),64);omitted++){
             work.charge();var trial=new ArrayList<>(points);trial.remove(omitted);
@@ -227,6 +231,7 @@ final class ContactFacePatch {
             if(best==null||inliers.size()>best.anchors().size()){best=new Consensus(map,List.copyOf(inliers));conflict=false;}
             else if(inliers.size()==best.anchors().size()&&!inliers.equals(best.anchors()))conflict=true;
         }
+        if(conflict)work.failure("PATCH_PARTIAL_CONFLICTING_MODELS");
         return conflict?null:best;
     }
     private static List<BlockPos> positions(int ax,int sign,double plane,List<Point> polygon,Work work){

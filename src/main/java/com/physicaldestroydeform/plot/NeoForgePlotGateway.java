@@ -375,10 +375,10 @@ public final class NeoForgePlotGateway implements WorldCommitCore.WorldGateway,M
                 return "SABLE_HEATMAP_UNVERIFIED";
             }
             long tick=server.getTickCount();
-            var pending=(Object)heat instanceof PlotHeatMapReadCache.Witness witness
-                    ?witness.pdd$heatMapReadCache().pending(tick,forceLive,()->readPendingHeatMap(s))
-                    :readPendingHeatMap(s);
+            var waitCache=(Object)heat instanceof PlotHeatMapReadCache.Witness witness?witness.pdd$heatMapReadCache():null;
+            var pending=waitCache==null?readPendingHeatMap(s):waitCache.pending(tick,forceLive,()->readPendingHeatMap(s));
             if(pending!=null) {
+                if(RogTrace.sample(Stage.R09,"HEATMAP_OWNER_WAIT"))RogTrace.detail(Stage.R09,"HEATMAP_OWNER_WAIT","owner={} generation={} forceLive={} sharedCachedDenials={} liveReads={} authority=DENIAL_ONLY",cell.real().ownerId(),cell.real().ownerGeneration(),forceLive,waitCache==null?-1:waitCache.cachedDenials(),waitCache==null?-1:waitCache.liveReads());
                 RogTrace.plotGate(cell.real().dimension(),cell.real().ownerId(),cell.real().ownerGeneration(),"HEATMAP_PENDING",tick,pending,forceLive);
                 if(RogTrace.sample(Stage.R09,"HEATMAP_PENDING"))RogTrace.detail(Stage.R09,"HEATMAP_PENDING","key={} serverTick={} forceLive={} pending={}",cell.real(),tick,forceLive,pending);
                 if(++heatMapHolds==1 || heatMapHolds%256==0)

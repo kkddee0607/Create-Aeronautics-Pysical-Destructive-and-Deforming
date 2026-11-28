@@ -489,6 +489,9 @@ public final class PlotCommitService {
             if(result.result()==WorldCommitCore.Outcome.ABORTED)rejected++;
             if(result.result()==WorldCommitCore.Outcome.QUARANTINED)blocked++;
             if(result.result()==WorldCommitCore.Outcome.DEFERRED)continue;
+            var stressReceipt=result.receipt();
+            if(stressReceipt!=null&&stressReceipt.id().startsWith("STRESS:")&&RogTrace.evidenceSlot(RogTrace.Stage.R11,"STRESS_APPLY_RECEIPT"))
+                RogTrace.detail(RogTrace.Stage.R11,"STRESS_APPLY_RECEIPT","applyId={} owner=PLOT result={} receipt={} reason={} key={}",stressReceipt.id(),result.result(),stressReceipt.status(),result.reason(),stressReceipt.key());
             if(result.result()==WorldCommitCore.Outcome.APPLIED_BREAK || result.result()==WorldCommitCore.Outcome.QUARANTINED || count++<MAX_LOGS_PER_TICK){
                 var r=result.receipt();
                 if(result.result()==WorldCommitCore.Outcome.QUARANTINED)log.warn("[PDD-COMMIT] owner=PLOT status=QUARANTINED id={} reason={}",r==null?"NONE":r.id(),result.reason());

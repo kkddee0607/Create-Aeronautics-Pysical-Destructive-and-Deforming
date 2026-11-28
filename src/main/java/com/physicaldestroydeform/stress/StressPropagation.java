@@ -3,6 +3,7 @@ package com.physicaldestroydeform.stress;
 import com.physicaldestroydeform.BlockDamageState;
 import com.physicaldestroydeform.DamageModel;
 import com.physicaldestroydeform.MaterialProperties;
+import com.physicaldestroydeform.diagnostics.LogSelection;
 import java.util.*;
 
 /** IDS 1.0.8 §§8,24.5. Pure, bounded Q transfer; never mints Credit or calls G(F).
@@ -72,6 +73,9 @@ public final class StressPropagation {
     public record PlannedNode(Node node,int depth,double incomingQ,DamageModel.Plan plan) {}
     public enum Unused { LOOP_OR_LATE_UNUSED, BELOW_MIN_Q, NO_NEIGHBOR, DENIED,
         STALE_NODE, DEPTH_TTL, NODE_CAP_TTL, UNAVAILABLE_TTL, STOPPED }
+    /** Diagnostic-only: never serialized as an ordinal or used to allocate Q. */
+    public enum UnusedDetail { ROOT_REENTRY, EARLIER_DEPTH_REENTRY, SAME_LEVEL_BACKEDGE, LATE_ARRIVAL,
+        BELOW_MIN_Q, NO_NEIGHBOR, DENIED_SINK, STALE_NODE, DEPTH_CAP, NODE_CAP, UNAVAILABLE_TTL, STOPPED }
     public record Ledger(double reservedQ,double absorbedQ,double directQ,double plasticUnusedQ,
                          double unusedQ,double pendingQ,int uniqueNodes,boolean finished,
                          Map<Unused,Double> reasons) {
@@ -101,6 +105,12 @@ public final class StressPropagation {
         private final long started;
         private final List<Seed> seeds;
         private final Set<Cell> visited=new HashSet<>();
+        // Only derived nodes need depth metadata (at most policy.maxNodes).
+        private final boolean detailEnabled=LogSelection.enabled(LogSelection.Channel.STRESS);
+        private final Map<Cell,Integer> derivedDepth=detailEnabled?new HashMap<>():null;
+        private final EnumMap<UnusedDetail,Double> unusedDetail=detailEnabled?new EnumMap<>(UnusedDetail.class):null;
+        private int directionFallbacks;
+        private double depthDeferred,nodeDeferred;
         private final NavigableMap<Cell,Arrival> frontier=new TreeMap<>(),next=new TreeMap<>();
         private final List<PlannedNode> plans=new ArrayList<>();
         private final EnumMap<Unused,Double> unused=new EnumMap<>(Unused.class);
@@ -196,7 +206,7 @@ public final class StressPropagation {
                 if(depth>policy.maxDepth||nodes>=policy.maxNodes){
                     if(!expired){
                         if(!sealBounded)break;
-                        deferred+=a.q;frontier.pollFirstEntry();continue;
+                        deferred+=a.q;if(depth>policy.maxDepth)depthDeferred+=a.q;else nodeDeferred+=a.q;frontier.pollFirstEntry();continue;
                     }
                     close(depth>policy.maxDepth?Unused.DEPTH_TTL:Unused.NODE_CAP_TTL,a.q);
                     frontier.pollFirstEntry();continue;
@@ -211,7 +221,7 @@ public final class StressPropagation {
                 List<Edge> edges=edges(graph,a.expected,a.direction);
                 if(edges==null&&!expired){waiting=true;break;}
                 if(edges==null){close(Unused.UNAVAILABLE_TTL,a.q);frontier.pollFirstEntry();continue;}
-                frontier.pollFirstEntry();visited.add(entry.getKey());nodes++;
+                frontier.pollFirstEntry();visited.add(entry.getKey());if(detailEnabled)derivedDepth.put(entry.getKey(),depth);nodes++;
                 DamageModel.Plan p=DamageModel.plan(a.q,a.expected.material,new BlockDamageState(),damage);
                 plans.add(new PlannedNode(a.expected,depth,a.q,p));
                 absorbed+=p.absorbedQ();direct+=p.directQ();plastic+=p.plasticQ();
@@ -227,7 +237,7 @@ public final class StressPropagation {
         }
         private void barrier(){
             for(var e:next.entrySet()){
-                if(visited.contains(e.getKey()))close(Unused.LOOP_OR_LATE_UNUSED,e.getValue().q);
+                if(visited.contains(e.getKey()))closeLoop(UnusedDetail.LATE_ARRIVAL,e.getValue().q);
                 else frontier.put(e.getKey(),e.getValue());
             }
             next.clear();depth++;
@@ -250,6 +260,7 @@ public final class StressPropagation {
                 out.add(new Edge(p.node,p.state,w));sum+=w;
             }
             if(sum==0&&direction!=null){
+                if(detailEnabled&&!out.isEmpty())directionFallbacks++;
                 List<Edge> equal=new ArrayList<>(out.size());
                 for(Edge e:out)equal.add(new Edge(e.node,e.state,1));
                 return equal;
@@ -268,7 +279,11 @@ public final class StressPropagation {
                 double amount=remainingWeight==edge.weight?remaining:Math.min(remaining,q*(edge.weight/weights));
                 remaining-=amount;remainingWeight-=edge.weight;
                 if(edge.state==State.DENIED){close(Unused.DENIED,amount);continue;}
-                if(visited.contains(edge.node.cell)){close(Unused.LOOP_OR_LATE_UNUSED,amount);continue;}
+                if(visited.contains(edge.node.cell)){
+                    int visitedAt=detailEnabled?derivedDepth.getOrDefault(edge.node.cell,0):0;
+                    closeLoop(visitedAt==0?UnusedDetail.ROOT_REENTRY:visitedAt==depth?UnusedDetail.SAME_LEVEL_BACKEDGE:UnusedDetail.EARLIER_DEPTH_REENTRY,amount);
+                    continue;
+                }
                 // minQ is tested only AFTER same-depth merging, not independently per incoming edge.
                 Arrival arrival=new Arrival(edge.node,amount,direction,false);
                 Arrival old=output.get(edge.node.cell);
@@ -278,7 +293,16 @@ public final class StressPropagation {
             }
             if(remaining>0)close(Unused.BELOW_MIN_Q,remaining);
         }
-        private void close(Unused why,double q){if(q>0)unused.merge(why,q,Double::sum);}
+        private void closeLoop(UnusedDetail why,double q){if(q>0){unused.merge(Unused.LOOP_OR_LATE_UNUSED,q,Double::sum);if(detailEnabled)unusedDetail.merge(why,q,Double::sum);}}
+        private void close(Unused why,double q){if(q>0){
+            unused.merge(why,q,Double::sum);
+            var detail=switch(why){case DENIED->UnusedDetail.DENIED_SINK;case DEPTH_TTL->UnusedDetail.DEPTH_CAP;case NODE_CAP_TTL->UnusedDetail.NODE_CAP;case LOOP_OR_LATE_UNUSED->UnusedDetail.LATE_ARRIVAL;default->UnusedDetail.valueOf(why.name());};
+            if(detailEnabled)unusedDetail.merge(detail,q,Double::sum);
+        }}
+        public Map<UnusedDetail,Double> unusedBreakdown(){return detailEnabled?Map.copyOf(unusedDetail):Map.of();}
+        public int directionFallbacks(){return directionFallbacks;}
+        public double depthDeferred(){return depthDeferred;}
+        public double nodeDeferred(){return nodeDeferred;}
         public Ledger ledger(){
             double pending=deferred;
             for(int i=seedIndex;i<seeds.size();i++)pending+=seeds.get(i).q;
@@ -301,7 +325,7 @@ public final class StressPropagation {
         public boolean boundedSealing(){return sealBounded;}
         public void stop(){
             if(finished)return;
-            close(Unused.STOPPED,ledger().pendingQ);deferred=0;seedIndex=seeds.size();pendingRoots.clear();readyRoots.clear();triedRoots.clear();frontier.clear();next.clear();finished=true;verify();
+            close(Unused.STOPPED,ledger().pendingQ);deferred=0;depthDeferred=0;nodeDeferred=0;seedIndex=seeds.size();pendingRoots.clear();readyRoots.clear();triedRoots.clear();frontier.clear();next.clear();finished=true;verify();
         }
         void verify(){
             Ledger l=ledger();

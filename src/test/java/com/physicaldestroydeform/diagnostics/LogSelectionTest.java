@@ -5,4 +5,11 @@ class LogSelectionTest {
     @Test void silentDefaultAndUnknownTokens(){assertTrue(LogSelection.parse(null).isEmpty());assertTrue(LogSelection.parse("unknown").isEmpty());}
     @Test void selectiveChannelsDoNotEnableUnrelatedStages(){var s=LogSelection.parse(" contact,stress ");assertTrue(s.contains(LogSelection.Channel.CONTACT));assertTrue(s.contains(LogSelection.Channel.STRESS));assertFalse(s.contains(LogSelection.Channel.COMMIT));}
     @Test void allAndOffAreExplicit(){assertEquals(LogSelection.Channel.values().length,LogSelection.parse("all").size());assertTrue(LogSelection.parse("all,off").isEmpty());}
+    @Test void reasonSeparatesCopycatStorageAndLineageFromDamageAndCommit(){
+        assertEquals(LogSelection.Channel.COPYCAT,LogSelection.channelFor(RogTrace.Stage.R07,"COPYCAT_MATERIAL"));
+        assertEquals(LogSelection.Channel.DAMAGE,LogSelection.channelFor(RogTrace.Stage.R07,"MATERIAL"));
+        assertEquals(LogSelection.Channel.STORAGE,LogSelection.channelFor(RogTrace.Stage.R10,"RECOVERY_RECONCILIATION"));
+        assertEquals(LogSelection.Channel.LINEAGE,LogSelection.channelFor(RogTrace.Stage.R09,"LINEAGE_MOVE"));
+        assertEquals(LogSelection.Channel.COMMIT,LogSelection.channelFor(RogTrace.Stage.R10,"BREAK_READBACK"));
+    }
 }

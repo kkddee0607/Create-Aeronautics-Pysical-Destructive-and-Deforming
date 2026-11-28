@@ -142,19 +142,17 @@ public final class RealFixRuntimeBridge {
     }
     private static final class Tracked {
         final RejectionTrace rejectionTrace=new RejectionTrace();
+        final DirectionalContactRegions regionHistory=new DirectionalContactRegions();
         Target a,b;
         Box previousA,previousB;
         long lastSeen=-1;
         long lastProcessed=-1;
-        long lastUncreditedAudit=-1;
         boolean lastPositiveSeparation;
         long lastSeparatedTick=-1;
         double lastPeak=Double.NaN;
         double lastCreditedPeak=Double.NaN;
         int quietForceFrames;
-        RegionalContactProof.Snapshot lastCreditedRegions;
         long lastCreditedTick=-1;
-        long lastRegionalAuditTick=-1;
         String lastVerfRegion="";
         long lastPlotRogWitnessTick=-1;
         long lastPlotRogEpochTick=-1;
@@ -433,6 +431,7 @@ public final class RealFixRuntimeBridge {
         // Clearance is safety-critical. R4 is diagnostic-only: separate
         // bounded budgets prevent R4 from starving positive separation proof.
         int[] remainingClearanceChecks={RealFixBoundaryCandidates.MAX_PER_TICK};
+        int[] remainingLocalGapChecks={256};
         int[] remainingAtomicConfirmChecks={WorldClearanceVerifier.MAX_CONFIRM_PER_TICK};
         int[] remainingR4Checks={Math.min(128,RealFixBoundaryCandidates.MAX_PER_TICK)};
         final Set<Pair> contacted=new HashSet<>();
@@ -508,6 +507,7 @@ public final class RealFixRuntimeBridge {
                 if(ownerPairCounts.getOrDefault(scene,0)!=1) {
                     contacted.add(pair);
                     contactHistory.invalidatePair(pair);
+                    var oldTrack=tracked.get(pair);if(oldTrack!=null)oldTrack.regionHistory.incomplete(now);
                     zero++;
                     if(RogTrace.sample(Stage.R02,"AMBIGUOUS_STABLE_PAIR"))RogTrace.detail(Stage.R02,"AMBIGUOUS_STABLE_PAIR","pairCount={} records={}",ownerPairCounts.getOrDefault(scene,0),records.size());
                     if(logCounts[0]++<MAX_LOG_PER_TICK){ if(RogTrace.legacySlot(LogSelection.Channel.CONTACT)) log.warn("[PDD-EPISODE] dimension={} tick={} reason=AMBIGUOUS_STABLE_OWNER_PAIR Q=0",stamp.dimension,stamp.tick); }
@@ -518,80 +518,34 @@ public final class RealFixRuntimeBridge {
                 // Sable consumer pose; aggregate only source-proven block keys.
                 // The owner/pair/tick has a separate bounded R2 shape-check budget (32768 unique cells/side); verified damage targets are capped at 16384/side.
                 var beforeAudit=credit.evidence(pair);
-                // Before a pair's FIRST successful credit, allow a renewed R2
-                // audit only when a stable, previously inspected World block
-                // and the Plot's actual world AABB prove new geometric closure.
-                // Large force alone is not proof, and stationary contacts stay cheap.
                 Tracked priorTracking=tracked.get(pair);
-                boolean knownResting=priorTracking!=null&&priorTracking.lastSeen>=0
-                        &&!priorTracking.lastPositiveSeparation
-                        &&beforeAudit.phase()==Phase.ACTIVE&&!beforeAudit.hasUnspentAuthorization();
-                Tracked earlyTrack=tracked.get(pair);
-                double currentPeak=group.forcePeak();
-                boolean risingAfterQuiet=earlyTrack!=null && earlyTrack.quietForceFrames>=2
-                        && Double.isFinite(earlyTrack.lastPeak) && earlyTrack.lastPeak>0
-                        && Double.isFinite(earlyTrack.lastCreditedPeak)
-                        && currentPeak>=credit.settings().forceEnter()
-                        && currentPeak>=earlyTrack.lastPeak*credit.settings().risingRatio()
-                        && currentPeak>=earlyTrack.lastCreditedPeak*0.5;
-                boolean recoverFirstApproach=beforeAudit.phase()==Phase.ACTIVE
-                        && beforeAudit.episode()==0 && !beforeAudit.pendingApproach()
-                        && priorTracking!=null && priorTracking.previousA!=null
-                        && priorTracking.previousB!=null
-                        && RealFixBoundsEvidence.approaching(priorTracking.previousA,
-                            priorTracking.previousB,
-                            box(server,pair.a().stableKey(),priorTracking.a,stamp.dimension,worldBounds,knownWorldBlocks),
-                            box(server,pair.b().stableKey(),priorTracking.b,stamp.dimension,worldBounds,knownWorldBlocks));
-                // An exhausted ACTIVE episode cannot mint Q. Audit only a
-                // positive first-approach recovery or an authorized new episode.
-                // An initially unproved first collision must not remain
-                // permanently invisible. Retry a bounded R2 audit at most
-                // once per ten server ticks; a fresh pre-solver velocity proof
-                // is still mandatory before a Credit can be issued.
-                boolean firstUncreditedRetry=beforeAudit.phase()==Phase.ACTIVE
-                        && beforeAudit.episode()==0 && priorTracking!=null
-                        && currentPeak>=credit.settings().forceEnter()
-                        && (priorTracking.lastUncreditedAudit<0
-                            || now-priorTracking.lastUncreditedAudit>=10);
-                boolean originalAudit=beforeAudit.phase()!=Phase.ACTIVE
-                        || beforeAudit.hasUnspentAuthorization() || recoverFirstApproach
-                        || risingAfterQuiet || firstUncreditedRetry;
-                // An ACTIVE pair may first contact genuinely new cells while its
-                // previous face remains in contact. A source-verified inward
-                // velocity reopens the R2 audit, without inventing a fresh Q.
-                // This is rate limited per server tick, not per solver substep.
-                boolean probeReimpact=beforeAudit.phase()==Phase.ACTIVE
-                        && beforeAudit.episode()>0 && priorTracking!=null
-                        && priorTracking.lastCreditedTick>=0
-                        && now-priorTracking.lastCreditedTick>=credit.settings().quietFrames()
-                        && (priorTracking.lastRegionalAuditTick<0
-                            || now-priorTracking.lastRegionalAuditTick>=2)
-                        && currentPeak>=credit.settings().forceEnter();
-                boolean needsSource=originalAudit || probeReimpact;
-                var massSafe=needsSource?massEpochs.validate(stamp.dimension,stamp.tick,records):null;
-                long normalStart=System.nanoTime();
-                var preAuthNormal=needsSource && massSafe.maskedFrames()==0
-                        ?NativeEffectDirection.verify(pair,massSafe.contacts(),pre)
-                        :NativeEffectDirection.unknown("NO_AUTHORIZED_NATIVE_SOURCE");
-                boolean preSolverClosing=needsSource && (knownResting
-                        ?NativeApproachEvidence.independentlyApproaching(pair,pre,preAuthNormal,stamp.tick)
-                        :NativeApproachEvidence.approaching(pair,pre,preAuthNormal,stamp.tick));
-                long normalNanos=System.nanoTime()-normalStart;
-                boolean auditEligible=originalAudit || (probeReimpact && preSolverClosing);
-                if(RogTrace.sample(Stage.R05,auditEligible?"AUDIT_ELIGIBLE":"AUDIT_SKIPPED"))RogTrace.detail(Stage.R05,auditEligible?"AUDIT_ELIGIBLE":"AUDIT_SKIPPED","before={} originalAudit={} recoverFirst={} risingAfterQuiet={} firstRetry={} probeReimpact={} preClosing={} massMasked={} peak={} knownResting={}",beforeAudit,originalAudit,recoverFirstApproach,risingAfterQuiet,firstUncreditedRetry,probeReimpact,preSolverClosing,massSafe==null?-1:massSafe.maskedFrames(),currentPeak,knownResting);
-                if(probeReimpact && auditEligible)priorTracking.lastRegionalAuditTick=now;
-                if(firstUncreditedRetry)priorTracking.lastUncreditedAudit=now;
-                long r2Start=auditEligible?System.nanoTime():0;
-                var targetDirections=auditEligible?TargetDirections.forEvent(pair,massSafe.contacts(),pre,stamp.tick,complete&&massSafe.maskedFrames()==0):new TargetDirections();
-                var prepared=auditEligible?SableContactRegions.prepare(server,stamp.dimension,pair,massSafe.contacts(),targetDirections):null;
-                var directRegions=prepared==null?SableContactRegions.skippedDuplicate():prepared.direct;
-                // If all native cells are ambiguous, a closed bilateral component
-                // can supply the initial target for an otherwise eligible approach.
-                // Never use a newly expanded cell as regional reimpact evidence.
-                var regions=prepared!=null&&!directRegions.verified()&&
-                        (preSolverClosing||beforeAudit.phase()==Phase.ARMED||beforeAudit.hasUnspentAuthorization())
-                        ?prepared.exact():directRegions;
-                long r2Nanos=auditEligible?System.nanoTime()-r2Start:0;
+                Tracked trackedPair=priorTracking;
+                if(trackedPair==null && tracked.size()<MAX_TRACKED){trackedPair=new Tracked();tracked.put(pair,trackedPair);}
+                final Tracked t=trackedPair;
+                if(t==null){contacted.add(pair);zero++;continue;}
+                boolean fullPairArmed=beforeAudit.phase()==Phase.ARMED&&t.lastSeparatedTick>t.lastSeen;
+                var massSafe=massEpochs.validate(stamp.dimension,stamp.tick,records);
+                boolean sourceComplete=complete&&batch.invalidRecords()==0&&batch.discardedRecords()==0&&!batch.malformedArray()
+                        &&nativeBatchStatus==ContactBatchStamp.Status.CURRENT&&ContactBatchStamp.preStatus(capture,pre)==ContactBatchStamp.Status.CURRENT
+                        &&massSafe.maskedFrames()==0;
+                long r2Start=System.nanoTime();
+                final DcrtContactBatch selection;
+                try {
+                    selection=DcrtContactBatch.select(server,pair,massSafe.contacts(),pre,stamp.tick,now,sourceComplete,fullPairArmed,credit.settings(),t.regionHistory,
+                            track->localRegionGap(server,pair,track,worldBounds,remainingLocalGapChecks));
+                }catch(RuntimeException invalid){
+                    t.regionHistory.incomplete(now);t.lastSeen=now;t.lastProcessed=now;
+                    contacted.add(pair);contactHistory.invalidatePair(pair);zero++;
+                    if(logCounts[0]++<MAX_LOG_PER_TICK)log.warn("[PDD-DCRT] region audit failed pair={} reason={} Q=0",pair,invalid.getClass().getSimpleName());
+                    continue;
+                }
+                var directRegions=selection.direct();
+                var regions=directRegions;
+                var preAuthNormal=selection.normal();
+                var targetDirections=selection.directions();
+                boolean auditEligible=selection.authorized();
+                double currentPeak=auditEligible?selection.peak():group.forcePeak();
+                long r2Nanos=System.nanoTime()-r2Start;
                 if(auditEligible){
                     r2Audits++;r2ShapeChecks+=regions.checksA()+regions.checksB();
                     { if(RogTrace.legacySlot(LogSelection.Channel.PERF)) log.info("[PDD-R2-PERF] pair={}/{} phase=AUTHORIZED_AUDIT nanos={} records={} " +
@@ -623,16 +577,6 @@ public final class RealFixRuntimeBridge {
                 }
                 if(a==null && r1a!=null)r1Fallback++;
                 if(b==null && r1b!=null)r1Fallback++;
-                Tracked trackedPair=tracked.get(pair);
-                if(trackedPair==null && tracked.size()<MAX_TRACKED) {
-                    trackedPair=new Tracked();tracked.put(pair,trackedPair);
-                }
-                final Tracked t=trackedPair;
-                if(t==null){
-                    zero++;
-                    if(!fullTrace && logCounts[0]++<MAX_LOG_PER_TICK)logObservation(log,group,batch);
-                    continue;
-                }
                 if(a!=null)t.a=a;
                 if(b!=null)t.b=b;
                 Box boxA=box(server,pair.a().stableKey(),a==null?t.a:a,stamp.dimension,worldBounds,knownWorldBlocks);
@@ -648,29 +592,10 @@ public final class RealFixRuntimeBridge {
                 boolean armedFromGap=phaseBefore==Phase.ARMED
                         && t.lastSeparatedTick>t.lastSeen;
                 boolean aabbClosing=RealFixBoundsEvidence.approaching(t.previousA,t.previousB,boxA,boxB);
-                // For an ACTIVE, never-credited pair, only the stable cached
-                // target/Plot approach may reauthorize the first impact. A
-                // changed world-block target could fake an AABB gap reduction.
-                // At least one pre-solver sample must prove motion INTO the
-                // contact, none may contradict it, and R2 must verify the target.
-                boolean nativeApproach=auditEligible && (a!=null || b!=null)
-                        && preSolverClosing;
-                boolean regionMoved=RegionalContactProof.hasNewCells(
-                        t.lastCreditedRegions,directRegions.regions());
-                // A new shape-proved cell plus independent pre-solver closing
-                // is stronger than an arbitrary raw-F rising ratio. A persistent
-                // stationary press or tangential slide still cannot mint Q.
-                boolean regionalReimpact=beforeAudit.episode()>0
-                        && now-t.lastCreditedTick>=credit.settings().quietFrames()
-                        && nativeApproach && regionMoved;
-                boolean approach=(beforeAudit.phase()==Phase.ACTIVE && beforeAudit.episode()==0
-                        && !beforeAudit.pendingApproach())
-                        ?recoverFirstApproach || nativeApproach
-                        :(aabbClosing || previousSeparated || armedFromGap || nativeApproach);
-                // A cached prior resting contact may move after an earlier
-                // substep's impact. Post-effect AABB motion alone is not a new
-                // independent approach for that already-contacting pair.
-                if(knownResting)approach=nativeApproach;
+                boolean nativeApproach=selection.authorized();
+                boolean regionMoved=nativeApproach&&!fullPairArmed;
+                boolean regionalReimpact=regionMoved&&beforeAudit.episode()>0;
+                boolean approach=nativeApproach;
                 long separationEvidenceTick=t.lastSeparatedTick;
                 double rise=Double.isFinite(t.lastPeak)?group.forcePeak()-t.lastPeak:Double.NaN;
                 t.lastPeak=currentPeak;
@@ -774,15 +699,15 @@ public final class RealFixRuntimeBridge {
                     // AABB overlap is UNKNOWN, never 'contact proved'. New Q
                     // requires independently observed prior clearance and a source-
                     // mapped, verified owner-local block. Force is a GAME proxy.
-                    var frame=new Frame(pair,now,group.samples(),false,approach,a,b,group.forcePeak(),regionalReimpact);
-                    var result=credit.step(frame);
+                    var frame=selection.authorized()?new Frame(pair,now,selection.forces(),false,true,a,b,selection.peak()):new Frame(pair,now,group.samples(),false,false,null,null,group.forcePeak());
+                    var result=selection.authorized()?credit.stepRegional(frame):credit.step(frame);
                     authorization=result;
                     RogTrace.episode(result.episodeGeneration());
                     if(RogTrace.sample(Stage.R05,result.reason().name()))RogTrace.detail(Stage.R05,result.reason().name(),"decision={} previous={} gapTick={} armedFromGap={} previousSeparated={} approach={} aabbClosing={} regionalReimpact={} rawF={} targetA={} targetB={}",result,phaseBefore,separationEvidenceTick,armedFromGap,previousSeparated,approach,aabbClosing,regionalReimpact,group.forcePeak(),a,b);
                     if(result.credited()) {
                         directAuthorized.add(pair);
                         contactHistory.invalidatePair(pair);
-                    } else if(eligibleSecondary(result,gapBefore,priorTracking!=null,
+                    } else if(selection.secondarySafe()&&sourceComplete&&eligibleSecondary(result,gapBefore,priorTracking!=null,
                             previousSeparated||armedFromGap,approach)) {
                         secondary.put(pair,records);
                     }
@@ -804,13 +729,13 @@ public final class RealFixRuntimeBridge {
                             && (result.credited() || t.lastHighFLogTick<0
                                 || now-t.lastHighFLogTick>=VERF_SAMPLE_TICKS)) {
                         { if(RogTrace.legacySlot(LogSelection.Channel.CONTACT)) log.info("[PDD-HIGH-F] pair={}/{} nativeTick={} rawF={} cappedF={} " +
-                                        "gameMaxF={} phaseBefore={} verifiedApproach={} recoveryAttempt={} " +
+                                        "gameMaxF={} phaseBefore={} verifiedApproach={} fullPairArmed={} " +
                                         "hasTarget={} regionStatus={} approval={} issuedQ={} " +
                                         "nativeApproach={} regionalReimpact={} quietForceFrames={} " +
                                         "source=POST_EFFECT_GAME_POLICY mutation=OFF",
                                 pair.a().stableKey(),pair.b().stableKey(),stamp.tick,
                                 group.forcePeak(),result.peakForce(),GameImpactCredit.MAX_GAME_F,
-                                gapBefore.phase(),approach,recoverFirstApproach,
+                                gapBefore.phase(),approach,fullPairArmed,
                                 a!=null||b!=null,regions.status(),result.reason(),result.issuedQ(),
                                 nativeApproach,regionalReimpact,t.quietForceFrames); }
                         t.lastHighFLogTick=now;
@@ -863,7 +788,9 @@ public final class RealFixRuntimeBridge {
                     var reservedMaterialSnapshot=MaterialRegistry.snapshot();
                     long reservedMaterialGeneration=reservedMaterialSnapshot.generation();
                     if(result.credited()){ if(RogTrace.eventSlot(Stage.R06,"CONTACT_CREDIT_RESERVED"))RogTrace.detail(Stage.R06,"CONTACT_CREDIT_RESERVED","episode={} eventF={} sideF={} state=COLLECTING mutation=OFF",result.episodeGeneration(),result.peakForce(),result.peakForce()/2); }
-                    var damageRegions=result.credited()&&prepared!=null?prepared.expand():regions;
+                    var damageRegions=result.credited()?selection.expand(pair):regions;
+                    if(result.credited()&&!damageRegions.verified())throw new IllegalStateException("DCRT expansion incomplete or over budget");
+                    if(result.credited())selection.inputLog(result.episodeGeneration(),result.peakForce());
                     var positionalMaterials=result.credited()?freezePositionalMaterials(server,stamp.dimension,reservedMaterialSnapshot,damageRegions.regions()):Map.<Target,Optional<CopycatMaterial.Resolved>>of();
                     if(result.credited()){ if(RogTrace.eventSlot(Stage.R06,"CONTACT_CREDIT_SEALED_INPUT"))RogTrace.detail(Stage.R06,"CONTACT_CREDIT_SEALED_INPUT","episode={} regions={} patchSeeds={} state=SEALED mutation=OFF",result.episodeGeneration(),damageRegions.regions().size(),damageRegions.patchSeeds().size()); }
                     if(result.credited()&&damageRegions!=regions)
@@ -948,10 +875,11 @@ public final class RealFixRuntimeBridge {
                             target->OwnerResolver.matchesSnapshot(propagationReader,target)?targetMaterials.material(target):null,credit.settings(),damageSettings,
                             nativeNormal.owners(),targetDirections.hasProvenSeed()||fTrace!=null
                                     ?event->{targetDirections.trace(event);if(fTrace!=null)fTrace.accept(event);}:null,
-                            contactGraph.planContext()):null;
+                            contactGraph.planContext(),selection.seedDirections()):null;
                     long propagationNanos=System.nanoTime()-propagationStart;
                     if(grant!=null){if(RogTrace.sample(Stage.R06,grant.status().name()))RogTrace.detail(Stage.R06,grant.status().name(),"credit={} issuedQ={} inputF={} dampedF={} unresolvedF={} unusedQ={} targetsA={} targetsB={} failure={} elapsedNs={}",grant.id(),grant.issuedQ(),grant.inputF(),grant.dampedF(),grant.unresolvedF(),grant.unused(),grant.a().size(),grant.b().size(),regionLedger.lastPropagationFailure(),propagationNanos);}
                     boolean granted=grant!=null && grant.credited();
+                    if(granted&&RogTrace.eventSlot(Stage.R06,"DCRT_CREDIT_SEAL"))RogTrace.detail(Stage.R06,"DCRT_CREDIT_SEAL","credit={} state=GRANTED eligiblePeak={} inputF={} issuedQ={} sideA={} sideB={} seedsA={} seedsB={} unusedQ={}",grant.id(),result.peakForce(),grant.inputF(),grant.issuedQ(),grant.allocatedA(),grant.allocatedB(),grant.a().size(),grant.b().size(),grant.unused());
                     if(result.credited() && !granted) {
                         var pendingId=new ContactCreditLedger.CreditId(pair,result.episodeGeneration());
                         boolean aborted=regionLedger.lookup(pendingId)==null
@@ -971,7 +899,6 @@ public final class RealFixRuntimeBridge {
                         t.lastCreditedPeak=currentPeak;
                         t.quietForceFrames=0;
                         t.lastCreditedTick=now;
-                        t.lastCreditedRegions=RegionalContactProof.capture(damageRegions.regions());
                         { if(RogTrace.legacySlot(LogSelection.Channel.CONTACT)) log.info("[PDD-IMPACT-DECISION] pair={}/{} tick={} credit={} " +
                                         "source={} rawF={} issuedQ={} gate={} nativeApproach={} " +
                                         "regionalReimpact={} movedSurface={} verifiedCells={} " +
@@ -987,9 +914,9 @@ public final class RealFixRuntimeBridge {
                                 result.peakForce(),result.issuedQ(),group.forcePeak(),
                                 group.forcePeak()>GameImpactCredit.MAX_GAME_F,nativeNormal.reason(),
                                 F_TRACE_ENABLED,F_TRACE_ENABLED); }
-                        { if(RogTrace.legacySlot(LogSelection.Channel.PERF)) log.info("[PDD-NORMAL-PERF] credit={} verifyNanos={} availableRecords={} " +
+                        { if(RogTrace.legacySlot(LogSelection.Channel.PERF)) log.info("[PDD-NORMAL-PERF] credit={} regionalAuditNanos={} availableRecords={} " +
                                         "capSampled={} verified={} mutation=OFF",
-                                grant.id(),normalNanos,massSafe==null?0:massSafe.contacts().size(),
+                                grant.id(),r2Nanos,massSafe==null?0:massSafe.contacts().size(),
                                 saturatedPoll,nativeNormal.owners().size()==2); }
                         if(F_TRACE_ENABLED){ if(RogTrace.legacySlot(LogSelection.Channel.FORCE)) log.info("[PDD-F-TRACE] credit={} edges={} receipts={} " +
                                         "nodes={} cutoffs={} " +
@@ -1054,7 +981,7 @@ public final class RealFixRuntimeBridge {
                                     grant.propagationA().audit().thresholdDiscardF()+grant.propagationB().audit().thresholdDiscardF(),
                                     grant.propagationA().candidateQ(),grant.propagationB().candidateQ(),grant.propagationA().finalQ(),grant.propagationB().finalQ(),
                                     grant.issuedQ(),grant.allocatedA(),grant.allocatedB(),grant.unused(),fError,qError,grant.propagationA().endReason(),grant.propagationB().endReason()); }
-                            traceSealedContact(grant.id(),records,directRegions,damageRegions);
+                            traceSealedContact(grant.id(),selection.records(),directRegions,damageRegions);
                             if(!Double.isFinite(fError)||!Double.isFinite(qError)||Math.abs(fError)>Math.max(1e-7,fInput*1e-7)||Math.abs(qError)>Math.max(1e-7,grant.issuedQ()*1e-7))
                                 log.error("[PDD-F-INVARIANT] credit={} FError={} QError={} status=FAIL",grant.id(),fError,qError);
                             { if(RogTrace.legacySlot(LogSelection.Channel.FORCE)) log.info("[PDD-F-INVARIANT] credit={} FInput={} FAccounted={} FError={} " +
@@ -1115,9 +1042,9 @@ public final class RealFixRuntimeBridge {
                                 (c.idA()>=0&&c.frameA()==null) || (c.idB()>=0&&c.frameB()==null))) {
                             witness=new NativePlotDirection.Prepared.DirectionResult(
                                     Map.of(),"OWNER_MASS_EPOCH_FRAME_UNVERIFIED",0);
-                        } else if(pair.a().stableKey().startsWith("PLOT:")
+                        } else if(!nativeNormal.owners().isEmpty()&&pair.a().stableKey().startsWith("PLOT:")
                                 &&pair.b().stableKey().startsWith("PLOT:")) {
-                            witness=NativePlotDirection.prepare(massSafe.contacts(),pre).ownerLocalDirection(
+                            witness=NativePlotDirection.prepare(selection.records(),pre).ownerLocalDirection(
                                     stamp.dimension,stamp.tick,group.runtimePair().lowId(),group.runtimePair().highId());
                         } else if(!nativeNormal.owners().isEmpty()) {
                             long earliest=pre.stream()
@@ -1279,6 +1206,7 @@ public final class RealFixRuntimeBridge {
                     worldSide,a,b,clearance!=null && clearance.proved());
             t.previousA=a;t.previousB=b;t.lastProcessed=now;
             if(definitelySeparate) {
+                t.regionHistory.fullSeparation(now);
                 t.lastPositiveSeparation=true;
                 contactHistory.invalidatePair(p);
                 t.lastSeparatedTick=now;
@@ -1296,6 +1224,9 @@ public final class RealFixRuntimeBridge {
                                 worldSide?"VERIFIED_EMPTY_REGION":verifiedGap(a,b)); }
                 }
                 catch(RuntimeException ignored) { /* invalid snapshot: Q=0 */ }
+            } else {
+                credit.invalidateSeparationStreak(p);
+                for(var track:t.regionHistory.tracks())if(localRegionGap(server,p,track,worldBounds,remainingLocalGapChecks))t.regionHistory.separated(track,now);else t.regionHistory.unknown(track,now);
             }
         }
         // Pre-contact state construction (§22). Silence alone never proves
@@ -1740,6 +1671,7 @@ public final class RealFixRuntimeBridge {
             var prior=credit.evidence(pair);
             var d=credit.step(new Frame(pair,now,List.of(),true,false,null,null));
             if(d.reason()==GameImpactCredit.Reason.STALE_FRAME)return;
+            t.regionHistory.fullSeparation(now);
             if(d.phase()==Phase.ARMED)worldClearance.contact(pair);
             if(VERF_ENABLED && prior.phase()!=d.phase())
                 { if(RogTrace.legacySlot(LogSelection.Channel.CONTACT)) log.info("[PDD-VERF-SEPARATION] serverTick={} pair={}/{} source=PRECONTACT_CLEARANCE " +
@@ -1883,6 +1815,23 @@ public final class RealFixRuntimeBridge {
         return new R4Probe("DIMENSION_MISSING",points.size(),candidates.uniqueCells(),-1,"NONE");
     }
 
+    private static boolean localRegionGap(MinecraftServer server,Pair pair,DirectionalContactRegions.Track track,
+                                          Map<String,Map<String,LivePlot>> bounds,int[] budget){
+        var f=track.footprint;if(f==null)return false;
+        String other=f.owner().equals(pair.a().stableKey())?pair.b().stableKey():pair.a().stableKey();
+        var plot=bounds.getOrDefault(pair.dimension(),Map.of()).get(other);
+        if(plot==null||!DcrtContactBatch.positiveWorldGap(f,plot.bounds())||budget[0]<f.targets().size())return false;
+        for(var target:f.targets()){
+            budget[0]--;
+            try{
+                var xyz=target.localBlock().split(",",-1);if(xyz.length!=3)return false;
+                var pos=new BlockPos(Integer.parseInt(xyz[0]),Integer.parseInt(xyz[1]),Integer.parseInt(xyz[2]));
+                var checked=OwnerResolver.auditNative(server,pair.dimension(),f.owner(),pos,null);
+                if(!checked.verified()||!checked.fullWorldCollisionCube()||!target.fingerprint().equals(checked.key().fingerprint()))return false;
+            }catch(RuntimeException invalid){return false;}
+        }
+        return true;
+    }
     private static Box box(MinecraftServer server,String owner,Target target,String dimension,
                            Map<String,Map<String,LivePlot>> plotBounds,Map<String,Box> worldBlocks) {
         if(owner.startsWith("PLOT:")) {

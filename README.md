@@ -1,10 +1,10 @@
-# PDD 0.6.1-astraFixFix — Physical Destructive and Deforming
+# PDD 0.6.1-duoFix — Physical Destructive and Deforming
 
 Minecraft 1.21.1 · Java 21 · NeoForge 21.1.228 · Sable 2.0.6 · Create 6.0.10 · Aeronautics 1.3.2. 선택 호환: Copycats+ 3.0.11.
 
 [통합설계서 1.0.9](.github/workflows/PDD-1.0.9-Integrated-Design-Specification.md) · [originFix-buildFix 검증 보고](docs/verification/PDD-0.6.1-originFix-buildFix.md) · [originFix 구현 이력](docs/verification/PDD-0.6.1-originFix.md).
 
-**현재 검증 후보: 0.6.1-astraFixFix.** 기존 정확/근사 패치를 보존하고 단일 불일치 Anchor의 제한적 부분 합의를 지원한다. Stress 변경 셀 검증을 일괄 처리하며 선택 진단은 기본 OFF다. JVM: `-Dpdd.logs=contact,force,stress` (쉼표 구분). 설치 대상: `build/libs/physical-destroy-deform-0.6.1-astraFixFix.jar`. 실제 Gradle/JUnit/Actions/인게임 미검증. [검증 보고](docs/verification/PDD-0.6.1-astraFixFix.md).
+**현재 개발 후보: 0.6.1-duoFix.** 방향별 접촉 승인 및 공동 F 예산, 방향 충돌 시 보수적 전파 차단, Stress 정산 진단, 선택 로그 및 프로세스 메모리 계측을 추가했다. DCRT의 완전한 공간 연속성/모든 회전 타격 증명 등은 미완료다. JVM 기본 진단 OFF; `-Dpdd.logs=contact,force,stress,perf`, 상세 작업 `-Dpdd.rog.traceJob=<jobId>`. 설치 대상: `build/libs/physical-destroy-deform-0.6.1-duoFix.jar`. 실제 Gradle/JUnit/Actions/인게임 미검증. [검증 보고](docs/verification/PDD-0.6.1-duoFix.md).
 
 **직전 배포판: 0.6.1-rogFix.** [검증 보고](docs/verification/PDD-0.6.1-rogFix.md).
 

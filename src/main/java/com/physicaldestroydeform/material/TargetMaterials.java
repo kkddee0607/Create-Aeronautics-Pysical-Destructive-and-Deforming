@@ -112,9 +112,9 @@ public final class TargetMaterials {
         trace(server,dimension,owner,local,fp,snapshot,new CopycatMaterial.Capture(null,reason,"",0));return null;
     }
     private static synchronized void trace(MinecraftServer server,String dimension,String owner,String local,String fp,MaterialRegistry.Snapshot snapshot,CopycatMaterial.Capture capture){
-        if(!TRACE&&!RogTrace.stageEnabled(Stage.R07))return;
+        if(!TRACE&&!LogSelection.enabled(LogSelection.Channel.COPYCAT))return;
         traceReads++;
-        if(RogTrace.sample(Stage.R07,capture.reason()))RogTrace.detail(Stage.R07,capture.reason(),"dimension={} owner={} local={} fingerprint={} generation={} material={} slots={} k={}",dimension,owner,local,fp,snapshot.generation(),capture.resolved(),capture.slots(),capture.k());
+        if(RogTrace.sample(Stage.R07,"COPYCAT_"+capture.reason()))RogTrace.detail(Stage.R07,"COPYCAT_"+capture.reason(),"dimension={} owner={} local={} fingerprint={} generation={} material={} slots={} k={}",dimension,owner,local,fp,snapshot.generation(),capture.resolved(),capture.slots(),capture.k());
         if(!TRACE||TRACE_CAP==0||!LOG.isInfoEnabled())return;
         long tick=server.getTickCount();
         if(traceServer.get()!=server){TRACE_HISTORY.clear();traceServer=new WeakReference<>(server);traceTick=-1;}

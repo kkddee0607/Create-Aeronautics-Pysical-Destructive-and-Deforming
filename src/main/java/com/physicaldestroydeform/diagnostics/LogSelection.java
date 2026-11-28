@@ -37,9 +37,20 @@ public final class LogSelection {
     public static boolean enabled(Channel channel){return ACTIVE.contains(channel);}
     public static boolean any(){return !ACTIVE.isEmpty();}
     public static String summary(){return ACTIVE.toString();}
-    public static boolean stage(RogTrace.Stage stage){return enabled(switch(stage){
+    static boolean reason(RogTrace.Stage stage,String reason){return enabled(channelFor(stage,reason));}
+    static Channel channelFor(RogTrace.Stage stage,String reason){
+        if(stage==RogTrace.Stage.R07)return reason!=null&&reason.startsWith("COPYCAT_")?Channel.COPYCAT:Channel.DAMAGE;
+        if(stage==RogTrace.Stage.R09||stage==RogTrace.Stage.R10){
+            if(reason!=null&&reason.startsWith("LINEAGE_"))return Channel.LINEAGE;
+            if(reason!=null&&(reason.startsWith("RECOVERY_")||reason.startsWith("WAL_")))return Channel.STORAGE;
+        }
+        return defaultChannel(stage);
+    }
+    public static boolean stage(RogTrace.Stage stage){return enabled(defaultChannel(stage))||stage==RogTrace.Stage.R07&&enabled(Channel.COPYCAT)
+            ||(stage==RogTrace.Stage.R09||stage==RogTrace.Stage.R10)&&(enabled(Channel.LINEAGE)||enabled(Channel.STORAGE));}
+    private static Channel defaultChannel(RogTrace.Stage stage){return switch(stage){
         case R01,R03 -> Channel.NATIVE;case R02,R04,R05 -> Channel.CONTACT;
         case R06 -> Channel.FORCE;case R07 -> Channel.DAMAGE;case R08 -> Channel.DEFORM;
         case R09,R10 -> Channel.COMMIT;case R11 -> Channel.STRESS;case R12 -> Channel.NETWORK;case R13 -> Channel.PERF;
-    });}
+    };}
 }

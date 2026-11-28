@@ -79,6 +79,17 @@ public final class TargetDirections {
             for(var target:faces)constrain(target,axes);
         }else for(var target:touched)merge(target,null);
     }
+    /** Combine independently audited regional move proofs, not normals averaged across regions. */
+    void mergeFrom(TargetDirections other){
+        if(other.active()&&!active()){pair=other.pair;pre=other.pre;tick=other.tick;epoch=other.epoch;gate="AUDIT";}
+        original.addAll(other.original);
+        other.ambiguous.forEach(this::veto);
+        other.unresolvedFaces.forEach(this::constrain);
+        other.directions.forEach(this::merge);
+        acceptedDirect+=other.acceptedDirect;unknownWitnesses+=other.unknownWitnesses;
+        faceMiss+=other.faceMiss;faceAmbiguous+=other.faceAmbiguous;incompleteWitnesses+=other.incompleteWitnesses;
+    }
+    void denyMixedSeed(GameImpactCredit.Target target){veto(target);}
     void seed(GameImpactCredit.Target target){original.add(target);}
     boolean active(){return epoch>=0 && "AUDIT".equals(gate);}
     boolean hasProvenSeed(){return !directions.isEmpty();}
@@ -127,6 +138,7 @@ public final class TargetDirections {
         if(prior!=null&&!prior.equals(value))veto(target);
     }
     public void trace(ForcePropagation.Trace event){
+        if(event instanceof ForcePropagation.Node node&&node.decision().equals("SAFETY_MIXED_REGION_DIRECTION"))veto(node.target());
         if(event instanceof ForcePropagation.Edge edge&&!original.contains(edge.child())) {
             // The receiving owner's lattice may be rotated. A propagated F
             // direction is not precise voxel-movement authorization there.

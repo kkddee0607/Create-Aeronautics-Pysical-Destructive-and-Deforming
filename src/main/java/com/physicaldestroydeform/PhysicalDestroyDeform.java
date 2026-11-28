@@ -40,7 +40,7 @@ import org.slf4j.LoggerFactory;
 @Mod(PhysicalDestroyDeform.MOD_ID)
 public final class PhysicalDestroyDeform {
     public static final String MOD_ID = "physical_destroy_deform";
-    public static final String BUILD_VERSION = "0.6.1-astraFixFix";
+    public static final String BUILD_VERSION = "0.6.1-duoFix";
     private static final Logger LOGGER = LoggerFactory.getLogger(PhysicalDestroyDeform.class);
     private final AcceptanceReport acceptanceReport = new AcceptanceReport();
     private final RealFixRuntimeBridge bridge = new RealFixRuntimeBridge();
@@ -58,8 +58,8 @@ public final class PhysicalDestroyDeform {
         NeoForge.EVENT_BUS.addListener(this::onDatapackSync);
         NeoForge.EVENT_BUS.addListener(this::onServerStopped);
         NeoForge.EVENT_BUS.addListener(this::onServerTick);
-        LOGGER.info("[PDD-DIAG] INIT modId={} version={} releaseSpec=IDS-1.0.9 policyMath=IDS-1.0.7 source=SABLE_ORIGINAL_POST_EFFECT " +
-                "target=NATIVE_OWNER_LOCAL_DIRECT_CERTIFIED_BILATERAL_OPTIONAL state=FOUR_PHASE_REGIONAL_LEDGER " +
+        LOGGER.info("[PDD-DIAG] INIT modId={} version={} releaseSpec=IDS-1.0.10 policyMath=IDS-1.0.7 source=SABLE_ORIGINAL_POST_EFFECT " +
+                "target=NATIVE_OWNER_LOCAL_DIRECT_CERTIFIED_BILATERAL_OPTIONAL state=DCRT_CONSERVATIVE_REGION_LEDGER " +
                 "worldMutation=WORLD_STATIC_ONLY plotMutation=SABLE_PLOT",MOD_ID,BUILD_VERSION);
         PddDiagnostics.runModelSelfTest(LOGGER);
     }
@@ -119,7 +119,7 @@ public final class PhysicalDestroyDeform {
             WorldBlockMutationTracker.attachPlot(null);
             LOGGER.error("[PDD-STRESS-LEDGER] phase=START status=HALTED reason=JOURNAL_INIT_FAILED mutations=OFF",unsafeStressJournal);
         }
-        LOGGER.info("[PDD-0.6.1] phase=START revision=0.6.1-astraFixFix CONTACT_ELASTIC_ALPHA04_PERSISTENT_CONTACT bridge=READ_ONLY nativeScalar=GAME_FORCE_PROXY " +
+        LOGGER.info("[PDD-0.6.1] phase=START revision=0.6.1-duoFix CONTACT_ELASTIC_ALPHA04_PERSISTENT_CONTACT bridge=READ_ONLY nativeScalar=GAME_FORCE_PROXY " +
                 "newNativeABI=NOT_REQUIRED customNullCallback=DISABLED faceRecovery=EXACT_PLUS_PAIRED_LOCAL_GAME_PATCH worldMutation={} plotMutation={} ",
                 worldCommit==null?"DISABLED":"WORLD_STATIC_ONLY",plotCommit==null?"DISABLED":"SABLE_PLOT");
     }

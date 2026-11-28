@@ -19,6 +19,7 @@ public final class RogTrace {
     private static final int CHAR_CAP=Math.max(0,Math.min(1_048_576,Integer.getInteger("pdd.rog.maxCharsPerTick",32768)));
     private static final int LINE_CAP=8192;
     private static final int SEED_LIMIT=Math.max(0,Math.min(4096,Integer.getInteger("pdd.rog.seedLimit",128)));
+    private static final String TRACE_JOB=System.getProperty("pdd.rog.traceJob","");
     private static final long TRACE_EPISODE=Long.getLong("pdd.rog.traceEpisode",-1L);
     private RogTrace(){}
 
@@ -47,6 +48,7 @@ public final class RogTrace {
         long loggingFailures,emittedLines,truncatedLines,characterSuppressed,legacySuppressed;
         Object dimension,runtimePair,pair;
         long nativeTick=-1,episode=-1;
+        String stressJob;
         State(String session,int cap,int perStage,int repeat,long interval){this(session,cap,perStage,repeat,interval,0);}
         State(String session,int cap,int perStage,int repeat,long interval,int aggregateReserve){
             this.session=session;this.cap=cap;this.perStage=perStage;this.repeat=repeat;this.interval=interval;
@@ -54,7 +56,7 @@ public final class RogTrace {
             for(var s:Stage.values())counts.put(s,new LinkedHashMap<>());
         }
         void begin(long next){if(tick!=next){tick=next;lines=0;characters=0;legacyLines=0;Arrays.fill(legacyByChannel,0);Arrays.fill(stageLines,0);clearContext();}}
-        void clearContext(){dimension=null;runtimePair=null;pair=null;nativeTick=-1;episode=-1;}
+        void clearContext(){dimension=null;runtimePair=null;pair=null;nativeTick=-1;episode=-1;stressJob=null;}
         private Count count(Stage s,String reason){
             var map=counts.get(s);
             var c=map.get(reason);
@@ -114,7 +116,7 @@ public final class RogTrace {
     public static void episode(long episode){if(ENABLED){var s=SERVER.get();if(s!=null)s.episode=episode;}}
     public static void clearContext(){if(ENABLED){var s=SERVER.get();if(s!=null)s.clearContext();}}
     public static void plotGate(String dimension,String owner,long generation,String reason,long tick,Object pending,boolean forceLive){
-        if(!ENABLED||!LogSelection.stage(Stage.R09))return;
+        if(!ENABLED||!LogSelection.enabled(LogSelection.Channel.COMMIT))return;
         try{
             var s=SERVER.get();if(s==null)return;
             var key=new HoldKey(dimension,owner,generation);
@@ -137,13 +139,14 @@ public final class RogTrace {
         if(!LogSelection.enabled(channel))return false;
         var s=SERVER.get();return s==null||s.legacy(channel);
     }
+    public static void stressJob(String id){if(ENABLED){var s=SERVER.get();if(s!=null)s.stressJob=id;}}
     public static boolean eventSlot(Stage stage,String reason){
-        if(!ENABLED||!LogSelection.stage(stage))return false;
+        if(!ENABLED||!LogSelection.reason(stage,reason))return false;
         try{var s=SERVER.get();return s!=null&&s.event(stage,reason)&&LOG.isInfoEnabled();}
         catch(RuntimeException|LinkageError ignored){return false;}
     }
     public static boolean evidenceSlot(Stage stage,String reason){
-        if(!ENABLED||!LogSelection.stage(stage))return false;
+        if(!ENABLED||!LogSelection.reason(stage,reason))return false;
         try{var s=SERVER.get();return s!=null&&s.evidence(stage,reason)&&LOG.isInfoEnabled();}
         catch(RuntimeException|LinkageError ignored){return false;}
     }
@@ -159,14 +162,15 @@ public final class RogTrace {
     public static boolean rawSelected(){return traceSelected()&&(DiagnosticMode.trace()||TRACE_EPISODE>=0)&&stageEnabled(Stage.R01);}
     public static int seedLimit(){return SEED_LIMIT;}
     public static boolean sample(Stage stage,String reason){
-        if(!ENABLED||!LogSelection.stage(stage))return false;
+        if(!ENABLED||!LogSelection.reason(stage,reason))return false;
         try{var s=SERVER.get();if(s==null)return false;
-            if((!DiagnosticMode.trace()&&(TRACE_EPISODE<0||s.episode!=TRACE_EPISODE))||s.lines>=Math.max(0,(s.cap-s.aggregateReserve)/2)||s.characters>=CHAR_CAP/2){s.count(stage,reason);return false;}
+            boolean selectedJob=stage==Stage.R11&&!TRACE_JOB.isBlank()&&TRACE_JOB.equals(s.stressJob);
+            if((!selectedJob&&!DiagnosticMode.trace()&&(TRACE_EPISODE<0||s.episode!=TRACE_EPISODE))||stage==Stage.R11&&!TRACE_JOB.isBlank()&&!selectedJob||s.lines>=Math.max(0,(s.cap-s.aggregateReserve)/2)||s.characters>=CHAR_CAP/2){s.count(stage,reason);return false;}
             return s.sample(stage,reason)&&LOG.isInfoEnabled();}
         catch(RuntimeException|LinkageError ignored){return false;}
     }
     public static void detail(Stage stage,String reason,String format,Object... args){
-        try{var s=SERVER.get();if(s==null||!LogSelection.stage(stage))return;emit(s,stage,reason,format,args);}
+        try{var s=SERVER.get();if(s==null||!LogSelection.reason(stage,reason))return;emit(s,stage,reason,format,args);}
         catch(RuntimeException|LinkageError ignored){/* diagnostic failure never changes physics */}
     }
     private static void emit(State s,Stage stage,String reason,String format,Object... args){

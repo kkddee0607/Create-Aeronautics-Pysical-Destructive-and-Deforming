@@ -483,6 +483,11 @@ public final class WorldCommitCore {
         var resolved=new WorldReceiptJournal.Receipt(prior.id(),prior.key(),next,reason,tick);
         try {
             journal.transition(resolved,null);
+            if(RogTrace.eventSlot(Stage.R10,"RECOVERY_RECONCILIATION")){
+                String observed=observation==null||!observation.loaded()?"UNAVAILABLE":observation.isAir()?"AIR":
+                        observation.dimension().equals(prior.key().dimension())&&observation.ownerGeneration()==prior.key().ownerGeneration()&&observation.fingerprint().equals(prior.key().fingerprint())?"MATCHING_FINGERPRINT_NOT_INCARNATION_PROOF":"DIFFERENT_STATE_OR_OWNER";
+                RogTrace.detail(Stage.R10,"RECOVERY_RECONCILIATION","applyId={} before={} after={} observed={} key={} reason={} reissue=false",prior.id(),prior.status(),resolved.status(),observed,prior.key(),reason);
+            }
             return new Decision(outcome,reason,resolved);
         }catch(IOException|IllegalArgumentException failure){
             ioFault=true;

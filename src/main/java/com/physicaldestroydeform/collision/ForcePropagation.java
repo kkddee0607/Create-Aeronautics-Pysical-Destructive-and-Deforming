@@ -264,13 +264,15 @@ public final class ForcePropagation {
         final GameImpactCredit.Target target;
         final int x,y,z,depth,elasticity;
         int crossDepth;
-        final Orientation direction;
+        Orientation direction;
+        boolean conflictingDirection;
         final java.util.Map<Flow,Double> parents=new java.util.HashMap<>();
         double incoming,localF,rawQ,finalQ,forwarded,damped,terminalBonus,discarded;
         int eligibleChildren,paidChildren;
         String decision="UNPROCESSED";
         Flow(GameImpactCredit.Target t,int depth,int e,Orientation direction,int crossDepth) {
             this.target=t;this.depth=depth;this.elasticity=e;this.direction=direction;this.crossDepth=crossDepth;
+            this.conflictingDirection=direction.evidence().equals("DCRT_CONFLICT");
             String[] p=t.localBlock().split(",",-1);
             if(p.length!=3)throw new IllegalArgumentException("bad target coordinates");
             x=Integer.parseInt(p[0]);y=Integer.parseInt(p[1]);z=Integer.parseInt(p[2]);
@@ -335,6 +337,13 @@ public final class ForcePropagation {
                               NeighborReader neighbors,Function<GameImpactCredit.Target,MaterialProperties> materials,
                               GameImpactCredit.Settings forces,DamageModel.Settings damage,
                               Orientation direction,java.util.function.Consumer<Trace> trace,CrossOwnerContext cross) {
+        return planTargets(ownerKey,seeds,neighbors,materials,forces,damage,direction,trace,cross,null);
+    }
+    static Result planTargets(String ownerKey,Map<GameImpactCredit.Target,Double> seeds,
+                              NeighborReader neighbors,Function<GameImpactCredit.Target,MaterialProperties> materials,
+                              GameImpactCredit.Settings forces,DamageModel.Settings damage,
+                              Orientation direction,java.util.function.Consumer<Trace> trace,CrossOwnerContext cross,
+                              Map<GameImpactCredit.Target,Orientation> regionalDirections) {
         Objects.requireNonNull(ownerKey);Objects.requireNonNull(seeds);Objects.requireNonNull(neighbors);
         Objects.requireNonNull(materials);Objects.requireNonNull(forces);Objects.requireNonNull(damage);Objects.requireNonNull(direction);
         var seen=new HashMap<Cell,Flow>();
@@ -346,7 +355,7 @@ public final class ForcePropagation {
             inputF+=f;
             if(f==0)continue;
             var material=Objects.requireNonNull(materials.apply(t),"missing seed material");
-            var flow=new Flow(t,0,material.elasticityPercent(),direction,0);flow.incoming=f;
+            var flow=new Flow(t,0,material.elasticityPercent(),regionalDirections==null?direction:regionalDirections.getOrDefault(t,Orientation.unknown()),0);flow.incoming=f;
             if(seen.putIfAbsent(Cell.of(t),flow)!=null)throw new IllegalArgumentException("conflicting seed fingerprint");
         }
         if(!Double.isFinite(inputF))throw new IllegalArgumentException("invalid total seed F");
@@ -366,12 +375,14 @@ public final class ForcePropagation {
             var nextMap=new HashMap<Cell,Flow>();
             var links=new HashMap<Flow,List<Flow>>();
             var projections=new HashMap<Flow,Map<Flow,Double>>();
+            var crossDirections=new HashMap<Flow,Map<Flow,Orientation>>();
             var blocked=new HashMap<Flow,String>();
             // Freeze the entire level's reachable graph before calculating Q.
             for(var node:layer) {
                 var children=new ArrayList<Flow>();
                 links.put(node,children);
                 if(node.incoming<MIN_PROPAGATED_F)continue;
+                if(node.conflictingDirection){blocked.put(node,"MIXED_REGION_DIRECTION");continue;}
                 for(var step:DIRECTIONS) {
                     int x,y,z;
                     try {
@@ -402,7 +413,7 @@ public final class ForcePropagation {
                         nextMap.put(Cell.of(t),child);
                     } else if(!child.target.fingerprint().equals(t.fingerprint()))
                         throw new IllegalArgumentException("conflicting branch fingerprint");
-                    else if(!sameOrientation(child.direction,node.direction)) {
+                    else if(regionalDirections==null&&!sameOrientation(child.direction,node.direction)) {
                         blocked.put(node,"AMBIGUOUS_INTERNAL_DIRECTION");continue;
                     }
                     child.crossDepth=Math.max(child.crossDepth,node.crossDepth);
@@ -427,12 +438,13 @@ public final class ForcePropagation {
                             if(m==null){blocked.put(node,"UNKNOWN_CONTACT_MATERIAL");continue;}
                             child=new Flow(t,depth+1,m.elasticityPercent(),edge.receiving(),node.crossDepth+1);
                             nextMap.put(key,child);
-                        } else if(!child.target.equals(t)||!sameOrientation(child.direction,edge.receiving())) {
+                        } else if(!child.target.equals(t)||(regionalDirections==null&&!sameOrientation(child.direction,edge.receiving()))) {
                             blocked.put(node,"AMBIGUOUS_CONTACT_DIRECTION");continue;
                         }
                         child.crossDepth=Math.max(child.crossDepth,node.crossDepth+1);
                         if(!children.contains(child)){
                             children.add(child);projections.computeIfAbsent(node,k->new HashMap<>()).put(child,edge.projection());
+                            if(regionalDirections!=null)crossDirections.computeIfAbsent(node,k->new HashMap<>()).put(child,edge.receiving());
                             crossEdges++;owners.add(t.ownerKey());
                         }
                     }
@@ -494,6 +506,13 @@ public final class ForcePropagation {
                         if(trace!=null)trace.accept(new Cutoff(node.target,child.target,
                                 depth,part,"EDGE_F_BELOW_ONE"));
                         continue;
+                    }
+                    if(regionalDirections!=null){
+                        Orientation arrived=crossDirections.getOrDefault(node,Map.of()).getOrDefault(child,node.direction);
+                        if(child.incoming==0){child.direction=arrived;child.conflictingDirection=arrived.evidence().equals("DCRT_CONFLICT");}
+                        else if(child.conflictingDirection||!sameOrientation(child.direction,arrived)){
+                            child.direction=new Orientation(null,"DCRT_CONFLICT");child.conflictingDirection=true;
+                        }
                     }
                     child.incoming+=part;
                     child.parents.merge(node,part,Double::sum);

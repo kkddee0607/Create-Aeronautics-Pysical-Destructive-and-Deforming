@@ -16,6 +16,7 @@ class PlotHeatMapReadCacheTest {
         // A clear observation is never a cached grant of permission.
         assertEquals(BUSY,cache.pending(51,false,()->{reads.incrementAndGet();return BUSY;}));
         assertEquals(3,reads.get());
+        assertEquals(20,cache.cachedDenials());assertEquals(3,cache.liveReads());
     }
 
     @Test void nativeMutationInvalidatesEvenWhenTickIsUnchanged() {

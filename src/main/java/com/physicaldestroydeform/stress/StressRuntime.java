@@ -253,6 +253,7 @@ public final class StressRuntime {
             return false; // never resubmit a completed direct intent
         }
         journal.reserve(reservation);
+        if(RogTrace.eventSlot(Stage.R11,"STRESS_ROOT_SUMMARY"))RogTrace.detail(Stage.R11,"STRESS_ROOT_SUMMARY","job={} roots={} reservedQ={} source=ORIGINAL_DAMAGE_PLANS seedProvenance=UNAVAILABLE",id,seeds.size(),reservation.reservedQ());
         if(RogTrace.sample(Stage.R11,"RESERVED"))RogTrace.detail(Stage.R11,"RESERVED","job={} roots={} Q={} created={} deadline={} materialGeneration={}",id,ordered.size(),reservation.reservedQ(),reservation.createdGameTick(),deadline(reservation),materials.generation());
         for(var origin:ordered)originJobs.put(origin.applyId(),id);
         add(journal.get(id),false);
@@ -306,7 +307,7 @@ public final class StressRuntime {
     public void replaced(SparseStateKey key){
         Cell cell=StressCommitHandoff.cellFor(key);
         for(String id:watches.getOrDefault(cell,Set.of())){
-            Job job=jobs.get(id);if(job==null||job.finished)continue;
+            Job job=jobs.get(id);if(job==null||job.finished||job.invalidatedCells.contains(cell))continue;
             Entry entry=journal.get(id);
             if(!job.published.contains(entry,cell)&&!StressSnapshotRepair.frozenSink(job.snapshot.get(cell))){
                 invalidate(job,cell);
@@ -403,6 +404,7 @@ public final class StressRuntime {
                 }
                 long before=progress(job);job.waitedThisTurn=false;job.validationRetry=false;
                 job.observedTurns++;
+                RogTrace.stressJob(job.id);
                 try{step(job,tick);}catch(BudgetEnd exhausted){job.budgetEnds++;if(RogTrace.sample(Stage.R11,"WORK_BUDGET"))RogTrace.detail(Stage.R11,"WORK_BUDGET","job={} tick={} used={} cap={}",job.id,tick,used,workCap);/* exact shared allowance; preserve cursors */}
                 catch(CapacityException pressure){
                     job.pressureDeferrals++;
@@ -416,6 +418,7 @@ public final class StressRuntime {
                         log.warn("[PDD-STRESS-LEDGER] phase=PRESSURE id={} reason={} roots={} snapshot={} activeBytes={} decodedBytes={} activeRecords={} retries={} QReissue=false",
                                 id,pressure.getMessage(),job.reservation.seeds().size(),job.snapshot.size(),journal.activeBytes(),journal.activeLogicalBytes(),journal.activeCount(),capacityRetries);
                 }
+                finally{RogTrace.stressJob(null);}
                 if(jobs.containsKey(id)){
                     boolean progressed=progress(job)!=before&&!job.validationRetry;
                     if(progressed){job.lastProgressTick=tick;job.waitStreak=0;job.retryAt=0;}
@@ -492,6 +495,7 @@ public final class StressRuntime {
             job.validation=new ArrayList<>(job.snapshot.entrySet());job.validationIndex=0;job.validationUnavailable=false;
         }else if(job.invalidated&&!job.finished&&(job.validation==null||job.validationIndex>=job.validation.size())){
             charge();
+            if(RogTrace.eventSlot(Stage.R11,"STRESS_DIRTY_BATCH"))RogTrace.detail(Stage.R11,"STRESS_DIRTY_BATCH","job={} changedCells={} snapshotCells={} publishedPlans={} deadline={}",job.id,job.invalidatedCells.size(),job.snapshot.size(),entry.plans().size(),deadline(r));
             var repaired=StressSnapshotRepair.retire(entry,job.snapshot,job.invalidatedCells);
             if(repaired==null){
                 journal.deferResidual(job.id,"SNAPSHOT_REPLACED_DEFERRED_BOUNDED");job.finished=true;job.repairing=false;
@@ -614,6 +618,7 @@ public final class StressRuntime {
                 finally{workTime(WorkPhase.SEAL,sealStarted);}
                 var sealed=journal.get(job.id);job.finished=job.session.finished();
                 if(job.repairing){job.repairing=false;{ if(RogTrace.eventSlot(Stage.R11,"STRESS_REPLAY_SEALED"))RogTrace.detail(Stage.R11,"STRESS_REPLAY_SEALED","job={} publishedPrefix={} totalPlans={} pendingQ={} unusedQ={} originalDeadline={} QReissue=false",job.id,entry.plans().size(),sealed.plans().size(),sealed.ledger().pendingQ(),sealed.ledger().unusedQ(),deadline(r)); }}
+                if(sealed!=beforeSeal&&RogTrace.eventSlot(Stage.R11,"STRESS_UNUSED_BREAKDOWN"))RogTrace.detail(Stage.R11,"STRESS_UNUSED_BREAKDOWN","job={} scope=SESSION_SEALED unusedQ={} breakdown={} pendingQ={} depthDeferred={} nodeDeferred={} directionalFallbacks={} nodes={} restored={} actualCommit=NOT_IMPLIED",job.id,sealed.ledger().unusedQ(),job.session.unusedBreakdown(),sealed.ledger().pendingQ(),job.session.depthDeferred(),job.session.nodeDeferred(),job.session.directionFallbacks(),job.session.plannedNodes(),job.restoredFromDisk);
                 if(sealed==beforeSeal)sealWritesAvoided++;
                 else{
                     seals++;

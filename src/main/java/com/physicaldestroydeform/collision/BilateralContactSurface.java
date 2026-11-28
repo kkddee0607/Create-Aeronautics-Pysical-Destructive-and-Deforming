@@ -120,7 +120,7 @@ final class BilateralContactSurface {
     private static FrameMath.Vec outward(MovePlan.SignedAxes axis){
         return new FrameMath.Vec(-axis.x(),-axis.y(),-axis.z());
     }
-    private static FrameMath.Pose prePose(Contact c,boolean first,CollisionFrame.Snapshot snapshot){
+    static FrameMath.Pose prePose(Contact c,boolean first,CollisionFrame.Snapshot snapshot){
         int id=first?c.idA():c.idB();if(id==-1)return WORLD;
         var expected=first?c.frameA():c.frameB();
         if(expected==null)return null;
