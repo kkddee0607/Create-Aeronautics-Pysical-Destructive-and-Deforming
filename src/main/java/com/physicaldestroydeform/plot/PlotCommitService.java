@@ -72,7 +72,7 @@ public final class PlotCommitService {
         this.damageSettings=Objects.requireNonNull(settings);
         Path parent=server.getWorldPath(LevelResource.ROOT).resolve("data");
         journal=new WorldPersistentJournal(parent.resolve("pdd-plot-0.5.1"),
-                parent.resolve("pdd-plot-0.5.1-legacy-absent.wal"));
+                parent.resolve("pdd-plot-0.5.1-legacy-absent.wal"),LogSelection.enabled(LogSelection.Channel.STORAGE));
         int configured=Integer.getInteger("pdd.plotMutationCapPerTick",32);
         int cap=Math.max(1,Math.min(4096,configured));
         mutationCap=cap;

@@ -26,7 +26,7 @@ import java.util.function.Function;
 public final class ContactCreditLedger {
     public static final String LEGACY_ALGORITHM_REVISION = "PDD-IDS-1.0.7/0.4.1-spreadFix-MULTIFACE-70-30";
     public static final String PREVIOUS_ALGORITHM_REVISION = "PDD-IDS-1.0.9/0.6.1-CONTACT-ELASTIC-CHAIN";
-    public static final String ALGORITHM_REVISION = "PDD-IDS-1.0.10/0.6.1-duoFix-DCRT-PATCH-ALPHA04";
+    public static final String ALGORITHM_REVISION = "PDD-IDS-1.0.10/0.6.1-duoMoreFix-DCRT-PATCH-ALPHA04";
     // Bounded but large enough for a 100x100 fully verified planar contact patch.
     public static final int MAX_TARGETS_PER_SIDE = 16_384;
     public static final int MAX_REGIONS = 2 * MAX_TARGETS_PER_SIDE;
@@ -155,7 +155,10 @@ public final class ContactCreditLedger {
         recorded.put(id,new Stored(source,decision.tick(),issued));
         return issued;
     }
-    private record SeedValidation(CreditId id,Status status,Set<GameImpactCredit.Target> a,Set<GameImpactCredit.Target> b){}
+    private record SeedValidation(CreditId id,Status status,Set<GameImpactCredit.Target> a,Set<GameImpactCredit.Target> b,String failure){
+        SeedValidation(CreditId id,Status status,Set<GameImpactCredit.Target> a,Set<GameImpactCredit.Target> b){this(id,status,a,b,status.name());}
+    }
+    private static SeedValidation invalidSeeds(CreditId id,String reason){return new SeedValidation(id,Status.INVALID_TARGET_SET,Set.of(),Set.of(),reason);}
     private SeedValidation validateSeeds(GameImpactCredit.Pair pair,GameImpactCredit.Decision decision,
                                          Source source,List<Region> evidence,boolean materialOnly,int reservedA,int reservedB){
         Objects.requireNonNull(pair); Objects.requireNonNull(decision);
@@ -175,43 +178,43 @@ public final class ContactCreditLedger {
         if (!Double.isFinite(decision.issuedQ())||!Double.isFinite(decision.peakForce())||decision.peakForce()<0
                 ||decision.allocation()==null||Math.abs(decision.allocation().total()-decision.issuedQ())>Math.max(1e-7,decision.issuedQ()*1e-9)
                 ||evidence.isEmpty() || evidence.size()>MAX_REGIONS)
-            return new SeedValidation(id,Status.INVALID_TARGET_SET,Set.of(),Set.of());
+            return invalidSeeds(id,"INVALID_DECISION_OR_REGION_COUNT");
         Set<GameImpactCredit.Target> a=new HashSet<>(), b=new HashSet<>();
         Map<String,String> aCells=new HashMap<>(), bCells=new HashMap<>();
         var model=new HashMap<GameImpactCredit.Target,List<GameImpactCredit.Target>>();var independent=new HashSet<GameImpactCredit.Target>();
         for(Region region:evidence) {
-            if (region==null) return new SeedValidation(id,Status.INVALID_TARGET_SET,Set.of(),Set.of());
+            if (region==null) return invalidSeeds(id,"NULL_REGION");
             if(region.ownerLocalPatch()){
-                if(!materialOnly||source!=Source.SABLE_POST_EFFECT)return new SeedValidation(id,Status.INVALID_TARGET_SET,Set.of(),Set.of());
+                if(!materialOnly||source!=Source.SABLE_POST_EFFECT)return invalidSeeds(id,"PATCH_SOURCE_NOT_AUTHORIZED");
                 var target=region.a()!=null?region.a():region.b();var prior=model.putIfAbsent(target,region.opposingCandidates());
-                if(prior!=null&&!prior.equals(region.opposingCandidates()))return new SeedValidation(id,Status.INVALID_TARGET_SET,Set.of(),Set.of());
+                if(prior!=null&&!prior.equals(region.opposingCandidates()))return invalidSeeds(id,"PATCH_MODEL_CONFLICT");
             }else{
                 if(region.a()!=null)independent.add(region.a());if(region.b()!=null)independent.add(region.b());
             }
             if(region.a()!=null) {
                 if(!region.a().ownerKey().equals(pair.a().stableKey()))
-                    return new SeedValidation(id,Status.INVALID_TARGET_SET,Set.of(),Set.of());
+                    return invalidSeeds(id,"OWNER_A_MISMATCH");
                 String earlier=aCells.putIfAbsent(region.a().localBlock(),region.a().fingerprint());
                 if(earlier!=null && !earlier.equals(region.a().fingerprint()))
-                    return new SeedValidation(id,Status.INVALID_TARGET_SET,Set.of(),Set.of());
+                    return invalidSeeds(id,"FINGERPRINT_A_CONFLICT");
                 a.add(region.a());
             }
             if(region.b()!=null) {
                 if(!region.b().ownerKey().equals(pair.b().stableKey()))
-                    return new SeedValidation(id,Status.INVALID_TARGET_SET,Set.of(),Set.of());
+                    return invalidSeeds(id,"OWNER_B_MISMATCH");
                 String earlier=bCells.putIfAbsent(region.b().localBlock(),region.b().fingerprint());
                 if(earlier!=null && !earlier.equals(region.b().fingerprint()))
-                    return new SeedValidation(id,Status.INVALID_TARGET_SET,Set.of(),Set.of());
+                    return invalidSeeds(id,"FINGERPRINT_B_CONFLICT");
                 b.add(region.b());
             }
         }
         if(!model.isEmpty()&&(independent.isEmpty()||model.keySet().stream().anyMatch(independent::contains)))
-            return new SeedValidation(id,Status.INVALID_TARGET_SET,Set.of(),Set.of());
+            return invalidSeeds(id,"PATCH_WITHOUT_DIRECT_OR_OVERLAP");
         if(a.size()>MAX_TARGETS_PER_SIDE || b.size()>MAX_TARGETS_PER_SIDE || a.isEmpty()&&b.isEmpty())
-            return new SeedValidation(id,Status.INVALID_TARGET_SET,Set.of(),Set.of());
+            return invalidSeeds(id,"SEED_TARGET_LIMIT_OR_EMPTY");
         if(reservedA<0||reservedB<0||(long)a.size()+reservedA>MAX_TARGETS_PER_SIDE
                 ||(long)b.size()+reservedB>MAX_TARGETS_PER_SIDE)
-            return new SeedValidation(id,Status.INVALID_TARGET_SET,Set.of(),Set.of());
+            return invalidSeeds(id,"RESERVATION_LIMIT");
         // A material-only candidate has no Layer-0 debit. The live material
         // resolver must independently revalidate its state/fingerprint. Legacy
         // Q fixtures retain their historical all-candidates-are-seeds contract.
@@ -219,11 +222,11 @@ public final class ContactCreditLedger {
             boolean onA=region.a()==null;
             if(!candidate.ownerKey().equals((onA?pair.a():pair.b()).stableKey())||
                     !materialOnly&&!(onA?a:b).contains(candidate))
-                return new SeedValidation(id,Status.INVALID_TARGET_SET,Set.of(),Set.of());
+                return invalidSeeds(id,"OPPOSITE_OWNER_OR_SEED_MISMATCH");
             var cells=onA?aCells:bCells;
             var prior=cells.putIfAbsent(candidate.localBlock(),candidate.fingerprint());
             if(prior!=null&&!prior.equals(candidate.fingerprint())||cells.size()>MAX_TARGETS_PER_SIDE)
-                return new SeedValidation(id,Status.INVALID_TARGET_SET,Set.of(),Set.of());
+                return invalidSeeds(id,"OPPOSITE_FINGERPRINT_OR_CELL_LIMIT");
         }
         return new SeedValidation(id,Status.ISSUED,a,b);
 
@@ -320,7 +323,7 @@ public final class ContactCreditLedger {
         lastPropagationFailure="NONE";
         var validated=validateSeeds(pair,decision,source,evidence,materialOnly,reservedA,reservedB);
         if(validated.status()!=Status.ISSUED) {
-            lastPropagationFailure="SOURCE_OR_EVIDENCE_GATE_"+validated.status();
+            lastPropagationFailure="SOURCE_OR_EVIDENCE_GATE_"+validated.status()+":"+validated.failure();
             return empty(validated.id(),source,validated.status(),decision.tick(),evidence.size());
         }
         List<ForcePropagation.Trace> traces=trace==null?null:new ArrayList<>();

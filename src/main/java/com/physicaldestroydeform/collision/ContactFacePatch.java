@@ -86,8 +86,10 @@ final class ContactFacePatch {
         for(var item:groups.entrySet().stream().sorted(Map.Entry.comparingByKey(Comparator.comparingLong(Group::poll)
                 .thenComparingDouble(Group::scalar).thenComparingInt(Group::ax).thenComparingInt(Group::as).thenComparingDouble(Group::pa)
                 .thenComparingInt(Group::bx).thenComparingInt(Group::bs).thenComparingDouble(Group::pb))).toList()){
+            var pending=new ArrayDeque<List<Anchor>>();pending.add(item.getValue());boolean partitionAttempted=false;
+            while(!pending.isEmpty()){
             try{
-                var g=item.getKey();var anchors=item.getValue();
+                var g=item.getKey();var anchors=pending.removeFirst();
                 if(anchors.size()<3){trace("PATCH_INSUFFICIENT_ANCHORS",g,anchors.size(),0,0,work);continue;}
                 var unique=new LinkedHashSet<Anchor>(anchors);anchors=new ArrayList<>(unique);
                 anchors.sort(Comparator.comparingDouble((Anchor x)->x.a().x()).thenComparingDouble(x->x.a().y())
@@ -96,6 +98,14 @@ final class ContactFacePatch {
                 if(polygonArea(ha)<=MIN_TRIANGLE||polygonArea(hb)<=MIN_TRIANGLE){trace("PATCH_DEGENERATE",g,anchors.size(),0,0,work);continue;}
                 var map=fit(anchors,g,work);
                 if(map==null){
+                    // The successful single-chart path is unchanged. If the
+                    // shared model fails, separate actual connected surfaces
+                    // BEFORE fitting any local model or outlier consensus.
+                    if(!partitionAttempted&&anchors.size()>=6){
+                        partitionAttempted=true;
+                        var partitions=splitAnchors(anchors,g,ha,hb,work);
+                        if(partitions.size()>1){pending.addAll(partitions);trace("PATCH_COMPONENT_PARTITION",g,anchors.size(),polygonArea(ha),0,work);continue;}
+                    }
                     var consensus=partialFit(anchors,g,work);
                     if(consensus==null){trace("PATCH_INCONSISTENT_CORRESPONDENCE",g,anchors.size(),0,0,work);continue;}
                     trace("PATCH_PARTIAL_CONSENSUS",g,consensus.anchors().size(),0,0,work);
@@ -154,8 +164,36 @@ final class ContactFacePatch {
                 trace(localPairs.isEmpty()?"PATCH_NO_CONNECTED_SUPPORT":"PATCH_MODEL_ACCEPTED",g,anchors.size(),polygonArea(ha),localPairs.size(),work);
             }catch(Limit unknown){incomplete=true;trace("PATCH_UNKNOWN_OR_CAP",item.getKey(),item.getValue().size(),0,0,work);if(work.used>=work.cap||reader.budgetExhausted())break;}
             catch(RuntimeException invalid){incomplete=true;trace("PATCH_INVALID_GEOMETRY",item.getKey(),item.getValue().size(),0,0,work);}
+            }
+            if(work.used>=work.cap||reader.budgetExhausted())break;
         }
         return new Result(new ArrayList<>(pairs),coveredA,coveredB,work.used,incomplete,work.outcomes);
+    }
+    private record ComponentPair(int a,int b) {}
+    private static List<List<Anchor>> splitAnchors(List<Anchor> anchors,Group g,List<Point> ha,List<Point> hb,Work work){
+        var frame=new Frame(g.a(),g.b(),axes(g.ax(),g.as()),axes(g.bx(),g.bs()),vec(g.ax(),g.pa(),ha.getFirst()),vec(g.bx(),g.pb(),hb.getFirst()));
+        var a=faceComponents(frame,0,g.ax(),g.as(),g.pa(),ha,work);
+        var b=faceComponents(frame,1,g.bx(),g.bs(),g.pb(),hb,work);
+        var groups=new LinkedHashMap<ComponentPair,List<Anchor>>();
+        for(var anchor:anchors){
+            work.charge();int ca=uniqueComponent(anchor.fa(),a),cb=uniqueComponent(anchor.fb(),b);
+            if(ca>=0&&cb>=0)groups.computeIfAbsent(new ComponentPair(ca,cb),k->new ArrayList<>()).add(anchor);
+        }
+        if(groups.size()<2)return List.of();
+        return groups.values().stream().map(List::copyOf).toList();
+    }
+    private static Map<Face,Integer> faceComponents(Frame frame,int side,int axis,int sign,double plane,List<Point> hull,Work work){
+        var pieces=new ArrayList<Piece>();
+        for(var pos:positions(axis,sign,plane,hull,work))for(var f:work.faces(frame,side,pos)){
+            work.charge();if(f.plane()!=plane)continue;var polygon=clip(f.polygon(),hull);
+            if(polygonArea(polygon)>MIN_AREA){pieces.add(new Piece(f,f,polygon));if(pieces.size()>ContactCreditLedger.MAX_REGIONS)throw new Limit();}
+        }
+        var ids=new HashMap<Face,Integer>();int id=0;
+        for(var component:components(pieces,work,axis)){for(int i:component)ids.put(pieces.get(i).a(),id);id++;}
+        return ids;
+    }
+    private static int uniqueComponent(List<Face> faces,Map<Face,Integer> ids){
+        int id=-1;for(var face:faces){var next=ids.get(face);if(next==null)continue;if(id>=0&&id!=next)return -1;id=next;}return id;
     }
     private static void trace(String reason,Group g,int anchors,double area,int pairs,Work work){
         work.outcomes.merge(reason,1,Integer::sum);

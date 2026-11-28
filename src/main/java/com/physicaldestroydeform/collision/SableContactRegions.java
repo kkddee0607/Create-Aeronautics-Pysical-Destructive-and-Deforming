@@ -153,8 +153,51 @@ public final class SableContactRegions {
         private Supplier<Result> expansion;
         private java.util.function.Function<Result,Result> model;
         private Result exact,expanded;
-        private java.util.function.BiPredicate<List<CollisionFrame.Snapshot>,NativeEffectDirection.Result> gapProof=(p,n)->false;
-        boolean positivePreGap(List<CollisionFrame.Snapshot> pre,NativeEffectDirection.Result normal){return gapProof.test(pre,normal);}
+        private OwnerResolver.NativeAuditBatch auditBatch;
+        private int extraA,extraB;
+        boolean extraReads(){return extraA!=0||extraB!=0;}
+        boolean revalidateSpatial(DcrtSpatialFootprint.Surface surface,int budget){
+            if(surface==null||!surface.valid()||auditBatch==null)return false;
+            for(boolean a:new boolean[]{true,false})for(var face:a?surface.a():surface.b()){
+                if(!auditBatch.cached(face.target().ownerKey(),face.cell())){
+                    if((a?direct.checksA()+extraA:direct.checksB()+extraB)>=budget)return false;
+                    if(a)extraA++;else extraB++;
+                }
+                if(!face.stillPresent(auditBatch))return false;
+            }
+            return true;
+        }
+        private record SpatialCell(String owner,BlockPos pos,int axis,int sign) {}
+        private final Map<SpatialCell,List<DcrtSpatialFootprint.Face>> spatialCache=new HashMap<>();
+        private List<DcrtSpatialFootprint.Face> spatialFaces(DcrtSpatialFootprint.Face from,BlockPos pos,boolean a,int budget){
+            var key=new SpatialCell(from.target().ownerKey(),pos,from.axis(),from.sign());
+            if(spatialCache.containsKey(key))return spatialCache.get(key);
+            if(!auditBatch.cached(key.owner(),pos)){
+                if((a?direct.checksA()+extraA:direct.checksB()+extraB)>=budget)return null;
+                if(a)extraA++;else extraB++;
+            }
+            var checked=auditBatch.inspectCell(key.owner(),pos).result();
+            if(!checked.verified()){
+                if(!OwnerResolver.knownNoShape(checked))return null;
+                spatialCache.put(key,List.of());return List.of();
+            }
+            var boxes=auditBatch.boxes(key.owner(),pos);
+            if(boxes.isEmpty()||boxes.size()>DcrtSpatialFootprint.LIMIT)return null;
+            var k=checked.key();var target=new GameImpactCredit.Target(key.owner(),k.x()+","+k.y()+","+k.z(),k.fingerprint());
+            var out=new ArrayList<DcrtSpatialFootprint.Face>(boxes.size());
+            for(var box:boxes){var face=DcrtSpatialFootprint.Face.of(target,pos,box,key.axis(),key.sign());if(!face.bounded())return null;out.add(face);}
+            var result=List.copyOf(out);spatialCache.put(key,result);return result;
+        }
+        boolean disconnected(DcrtSpatialFootprint.Surface a,DcrtSpatialFootprint.Surface b,int budget,DcrtSpatialFootprint.Work work){
+            return a!=null&&b!=null&&a.valid()&&b.valid()
+                    &&DcrtSpatialFootprint.disconnected(a.a(),b.a(),(from,pos)->spatialFaces(from,pos,true,budget),work)
+                    &&DcrtSpatialFootprint.disconnected(a.b(),b.b(),(from,pos)->spatialFaces(from,pos,false,budget),work);
+        }
+        OwnerResolver.NativeAuditBatch auditBatch(){return auditBatch;}
+        Prepared restrict(MinecraftServer server,GameImpactCredit.Pair pair,List<NativeCollisionTelemetry.Contact> records,TargetDirections directions,int budget){
+            if(auditBatch==null)throw new IllegalStateException("no same-capture shape cache");
+            return prepare(server,pair.dimension(),pair,records,directions,budget,auditBatch,direct.checksA()+extraA,direct.checksB()+extraB);
+        }
         Prepared(Result direct,Supplier<Result> expansion){this(direct,expansion,r->r);}
         Prepared(Result direct,Supplier<Result> expansion,java.util.function.Function<Result,Result> model){this.direct=direct;this.expansion=expansion;this.model=model;}
         Result exact(){
@@ -180,10 +223,14 @@ public final class SableContactRegions {
     }
     static Prepared prepare(MinecraftServer server,String dimension,GameImpactCredit.Pair pair,
                             List<NativeCollisionTelemetry.Contact> records,TargetDirections directions,int budget){
-        if(budget<1||budget>RUNTIME_MAX_UNIQUE_CELLS_PER_SIDE)throw new IllegalArgumentException("regional budget");
+        return prepare(server,dimension,pair,records,directions,budget,new OwnerResolver.NativeAuditBatch(server,dimension),0,0);
+    }
+    private static Prepared prepare(MinecraftServer server,String dimension,GameImpactCredit.Pair pair,
+                            List<NativeCollisionTelemetry.Contact> records,TargetDirections directions,int budget,
+                            OwnerResolver.NativeAuditBatch nativeBatch,int priorA,int priorB){
+        if(budget<1||budget>RUNTIME_MAX_UNIQUE_CELLS_PER_SIDE||priorA>budget||priorB>budget)throw new IllegalArgumentException("regional budget");
         var cache=new HashMap<AuditKey,Check>();
         var witnesses=new HashMap<AuditKey,DirectionWitness>();
-        var nativeBatch=new OwnerResolver.NativeAuditBatch(server,dimension);
         Result collected=collectWithBudget(pair,records,(contact,owner,remainingChecks)-> {
             int sourceSide=SableConsumerTargets.sourceSide(owner,contact,dimension);
             if(sourceSide==0)return new Check(List.of(),0,false,"UNVERIFIED","OWNER_FRAME_MISMATCH");
@@ -203,7 +250,7 @@ public final class SableContactRegions {
             for(var pos:positions){
                 // Only a *new owner/cell* consumes a block lookup budget.
                 // Every source point still passes the actual cached shape check.
-                if(!nativeBatch.cached(owner,pos) && checked>=remainingChecks)
+                if(!nativeBatch.cached(owner,pos) && (priorA!=0||priorB!=0||checked>=remainingChecks))
                     return new Check(List.of(),checked,true,"UNVERIFIED",
                             "R2_UNIQUE_CELL_BUDGET requested="+positions.size()
                             +" examinedNew="+checked+" remaining="+remainingChecks);
@@ -233,6 +280,12 @@ public final class SableContactRegions {
             var witness=new DirectionWitness(cells,uncertain);witnesses.put(key,witness);
             return directCheck(result,checked,directions,nativeBatch,contact,owner,point,witness);
         }, budget);
+        // Restriction is a second logical view over already charged cells. No
+        // new cell read is allowed; retain the first audit's entire cost.
+        if(priorA!=0||priorB!=0){
+            var t=collected.trace();
+            collected=new Result(collected.regions(),collected.status(),Math.addExact(priorA,collected.checksA()),Math.addExact(priorB,collected.checksB()),collected.rejected(),collected.methodA(),collected.methodB(),new Trace(t.failure(),t.sourceIndex(),t.processedRecords(),Math.max(0,budget-priorA-collected.checksA()),Math.max(0,budget-priorB-collected.checksB()),t.requestedA(),t.requestedB(),t.verifiedTargetsA(),t.verifiedTargetsB(),t.regionCount(),t.rejectedContacts(),t.detail()),collected.ambiguousA(),collected.ambiguousB(),collected.unknownA(),collected.unknownB(),collected.groupsA(),collected.groupsB(),collected.patchSeeds(),collected.sourceGroupsA(),collected.sourceGroupsB(),collected.reservedA(),collected.reservedB());
+        }
         var direct=withStats(collected,nativeBatch);
         // Direct targets are sealed independently of direction/geometry.
         for(var r:direct.regions()){
@@ -244,7 +297,7 @@ public final class SableContactRegions {
                 direct.regions().size(),direct.trace().verifiedTargetsA(),direct.trace().verifiedTargetsB(),direct.reservedA(),direct.reservedB(),direct.status());
         var prepared=new Prepared(direct,()->expand(pair,records,directions,nativeBatch,direct,budget),
                 exact->expandPatch(pair,records,directions,nativeBatch,direct,exact,budget));
-        prepared.gapProof=(pre,normal)->DcrtContactBatch.preGap(pair,records,pre,normal,nativeBatch,direct);
+        prepared.auditBatch=nativeBatch;
         return prepared;
     }
     private static Result expand(GameImpactCredit.Pair pair,List<NativeCollisionTelemetry.Contact> records,
@@ -461,6 +514,7 @@ public final class SableContactRegions {
         return out;
     }
     private static Result withStats(Result r,OwnerResolver.NativeAuditBatch batch){
+        if(!RogTrace.stageEnabled(Stage.R04))return r;
         var t=r.trace();var stats=batch.stats();
         return new Result(r.regions(),r.status(),r.checksA(),r.checksB(),r.rejected(),r.methodA(),r.methodB(),
                 new Trace(t.failure(),t.sourceIndex(),t.processedRecords(),t.remainingA(),t.remainingB(),t.requestedA(),t.requestedB(),

@@ -13,8 +13,12 @@ final class JournalIoMetrics {
     private final int[] size=new int[Phase.values().length], next=new int[Phase.values().length];
     private final long[] counts=new long[Phase.values().length], max=new long[Phase.values().length];
 
+    private final boolean enabled;
+    JournalIoMetrics(){this(true);}
+    JournalIoMetrics(boolean enabled){this.enabled=enabled;}
+    long now(){return enabled?System.nanoTime():0;}
     synchronized void record(Phase phase,long nanos) {
-        if(nanos<0)return;
+        if(!enabled||nanos<0)return;
         int i=phase.ordinal();
         durations[i][next[i]]=nanos;next[i]=(next[i]+1)%WINDOW;
         if(size[i]<WINDOW)size[i]++;
@@ -23,6 +27,7 @@ final class JournalIoMetrics {
     }
     void recordBackgroundCleanup(long nanos){record(Phase.CLEANUP_SCAN,nanos);}
     synchronized String summary() {
+        if(!enabled)return "";
         var result=new StringBuilder();
         for(var phase:Phase.values()) {
             int i=phase.ordinal();

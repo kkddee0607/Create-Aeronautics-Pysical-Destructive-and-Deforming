@@ -40,7 +40,7 @@ import org.slf4j.LoggerFactory;
 @Mod(PhysicalDestroyDeform.MOD_ID)
 public final class PhysicalDestroyDeform {
     public static final String MOD_ID = "physical_destroy_deform";
-    public static final String BUILD_VERSION = "0.6.1-duoFix";
+    public static final String BUILD_VERSION = "0.6.1-duoMoreFix";
     private static final Logger LOGGER = LoggerFactory.getLogger(PhysicalDestroyDeform.class);
     private final AcceptanceReport acceptanceReport = new AcceptanceReport();
     private final RealFixRuntimeBridge bridge = new RealFixRuntimeBridge();
@@ -71,7 +71,7 @@ public final class PhysicalDestroyDeform {
         acceptanceReport.start();
         ticks=0;
         RogTrace.start();
-        runtimeDiagnostics.reset(System.nanoTime());
+        runtimeDiagnostics.reset(reportNow());
         lastNative=NativeCollisionTelemetry.total();lastCallbacks=SableContactQueue.total();
         lastNativeDropped=NativeCollisionTelemetry.dropped();lastCallbackDropped=SableContactQueue.dropped();
         TargetMaterials.clearSession();
@@ -119,7 +119,7 @@ public final class PhysicalDestroyDeform {
             WorldBlockMutationTracker.attachPlot(null);
             LOGGER.error("[PDD-STRESS-LEDGER] phase=START status=HALTED reason=JOURNAL_INIT_FAILED mutations=OFF",unsafeStressJournal);
         }
-        LOGGER.info("[PDD-0.6.1] phase=START revision=0.6.1-duoFix CONTACT_ELASTIC_ALPHA04_PERSISTENT_CONTACT bridge=READ_ONLY nativeScalar=GAME_FORCE_PROXY " +
+        LOGGER.info("[PDD-0.6.1] phase=START revision=0.6.1-duoMoreFix CONTACT_ELASTIC_ALPHA04_PERSISTENT_CONTACT bridge=READ_ONLY nativeScalar=GAME_FORCE_PROXY " +
                 "newNativeABI=NOT_REQUIRED customNullCallback=DISABLED faceRecovery=EXACT_PLUS_PAIRED_LOCAL_GAME_PATCH worldMutation={} plotMutation={} ",
                 worldCommit==null?"DISABLED":"WORLD_STATIC_ONLY",plotCommit==null?"DISABLED":"SABLE_PLOT");
     }
@@ -147,7 +147,7 @@ public final class PhysicalDestroyDeform {
         clean&=cleanup("acceptance",acceptanceReport::close);
         RogTrace.stop();
         activeServer=null;
-        runtimeDiagnostics.reset(System.nanoTime());
+        runtimeDiagnostics.reset(reportNow());
         LOGGER.info("[PDD-SESSION] phase=STOP cleanup={} worldMutation=STOPPED",clean?"CLOSED":"CLEANUP_FAILED");
         LOGGER.info("[PDD-0.6.0] phase=STOP state={} worldMutation=STOPPED",clean?"CLEARED":"CLEANUP_FAILED");
     }
@@ -172,15 +172,20 @@ public final class PhysicalDestroyDeform {
                 ||(plotCommit!=null&&plotCommit.lineageJournal().receiptLookupFaulted())))
             haltMutations(new IllegalStateException("RECEIPT_DISK_LOOKUP_FAILED"));
     }
+    private static final boolean PERF_LOGS=LogSelection.enabled(LogSelection.Channel.PERF);
+    private static final boolean TIMED_REPORTS=PERF_LOGS||LogSelection.enabled(LogSelection.Channel.STORAGE)||LogSelection.enabled(LogSelection.Channel.STRESS);
+    private static long perfNow(){return PERF_LOGS?System.nanoTime():0;}
+    private static long reportNow(){return TIMED_REPORTS?System.nanoTime():0;}
+    private void recordPhase(Phase phase,long start){if(PERF_LOGS)runtimeDiagnostics.recordPhase(phase,perfNow()-start);}
     private void onServerTick(ServerTickEvent.Post event) {
         if(activeServer!=event.getServer())return;
-        long started=System.nanoTime();
+        long started=perfNow();
         RogTrace.begin(event.getServer().getTickCount());
         try{processServerTick(event);}
         finally{
-            long ended=System.nanoTime();runtimeDiagnostics.recordTick(ended-started);
+            long ended=reportNow();if(PERF_LOGS)runtimeDiagnostics.recordTick(ended-started);
             RogTrace.endTick();
-            if(runtimeDiagnostics.reportDue(ended)){
+            if(TIMED_REPORTS&&runtimeDiagnostics.reportDue(ended)){
                 try{if(RogTrace.sample(Stage.R13,"REPORT"))RogTrace.detail(Stage.R13,"REPORT","serverTick={} mutationHalted={} worldAvailable={} plotAvailable={} stressAvailable={}",event.getServer().getTickCount(),mutationHalted,worldCommit!=null,plotCommit!=null,stress!=null);runtimeDiagnostics.log(LOGGER);TargetMaterials.logPerformance(LOGGER);
                     if(worldCommit!=null){{ if(RogTrace.legacySlot(LogSelection.Channel.STORAGE)) LOGGER.info("[PDD-STORAGE-PERF] owner=WORLD {}",worldCommit.storagePerformance()); }
                         { if(RogTrace.legacySlot(LogSelection.Channel.STORAGE)) LOGGER.info("[PDD-JOURNAL-IO] owner=WORLD {}",worldCommit.ioPerformance()); }}
@@ -189,16 +194,16 @@ public final class PhysicalDestroyDeform {
                     if(stress!=null){ if(RogTrace.legacySlot(LogSelection.Channel.STRESS)) LOGGER.info("[PDD-STRESS-IO] {}",stress.ioPerformance()); }}
                 catch(RuntimeException|LinkageError unavailable){LOGGER.warn("[PDD-PERFORMANCE] status=DIAGNOSTICS_UNAVAILABLE",unavailable);}
             }
-            runtimeDiagnostics.recordPhase(Phase.DIAGNOSTICS,System.nanoTime()-ended);
+            recordPhase(Phase.DIAGNOSTICS,ended);
         }
     }
     private void processServerTick(ServerTickEvent.Post event) {
-        long phaseStart=System.nanoTime();
+        long phaseStart=perfNow();
         checkReceiptHealth();
         NativeLineageTransfer.expire();
         LineageRecovery.tick(event.getServer());
-        runtimeDiagnostics.recordPhase(Phase.LINEAGE,System.nanoTime()-phaseStart);
-        phaseStart=System.nanoTime();
+        recordPhase(Phase.LINEAGE,phaseStart);
+        phaseStart=perfNow();
         // Snapshot and native inputs are consumed exactly once on the server tick.
         // The Sable return array has already been handed back unchanged by Mixin.
         var callbacks=SableContactQueue.drain();
@@ -206,8 +211,8 @@ public final class PhysicalDestroyDeform {
         var preHistory=SableFrameCapture.drainPreHistory();
         SableFrameCapture.releaseEndedFrames(event.getServer(),event.getServer().getTickCount());
         if(RogTrace.sample(Stage.R01,"DRAIN"))RogTrace.detail(Stage.R01,"DRAIN","nativeRecords={} callbacks={} preFrames={} nativeDropped={} callbackDropped={} nativeMalformed={} preHistoryDropped={} capSaturatedPolls={}",nativeEffects.size(),callbacks.size(),preHistory.size(),NativeCollisionTelemetry.dropped(),SableContactQueue.dropped(),NativeCollisionTelemetry.malformed(),SableFrameCapture.preHistoryDropped(),NativeCollisionTelemetry.nativeCapSaturatedPolls());
-        runtimeDiagnostics.recordPhase(Phase.CAPTURE,System.nanoTime()-phaseStart);
-        long bridgeStart=System.nanoTime();
+        recordPhase(Phase.CAPTURE,phaseStart);
+        long bridgeStart=perfNow();
         try {
             bridge.tick(event.getServer(),callbacks,nativeEffects,preHistory,LOGGER);
         } catch (RuntimeException invalid) {
@@ -217,19 +222,18 @@ public final class PhysicalDestroyDeform {
                     nativeEffects.size(),callbacks.size(),invalid);
         } finally {
             RogTrace.clearContext();
-            long bridgeEnd=System.nanoTime();
-            runtimeDiagnostics.recordBridge(bridgeEnd-bridgeStart);
-            runtimeDiagnostics.recordPhase(Phase.BRIDGE,bridgeEnd-bridgeStart);
-            long dispatchStart=System.nanoTime();
+            long bridgeEnd=perfNow();
+            if(PERF_LOGS){runtimeDiagnostics.recordBridge(bridgeEnd-bridgeStart);runtimeDiagnostics.recordPhase(Phase.BRIDGE,bridgeEnd-bridgeStart);}
+            long dispatchStart=perfNow();
             try{RawObservationDispatcher.dispatch(callbacks);}
-            finally{runtimeDiagnostics.recordPhase(Phase.DISPATCH,System.nanoTime()-dispatchStart);}
+            finally{recordPhase(Phase.DISPATCH,dispatchStart);}
         }
         checkReceiptHealth();
-        phaseStart=System.nanoTime();
+        phaseStart=perfNow();
         try{if(!mutationHalted&&stress!=null)stress.tick();}
-        finally{runtimeDiagnostics.recordPhase(Phase.STRESS,System.nanoTime()-phaseStart);}
+        finally{recordPhase(Phase.STRESS,phaseStart);}
         checkReceiptHealth();
-        phaseStart=System.nanoTime();
+        phaseStart=perfNow();
         try{
         if(!mutationHalted&&worldCommit!=null) {
             try {worldCommit.tick(event.getServer().getTickCount());}
@@ -238,9 +242,9 @@ public final class PhysicalDestroyDeform {
                 haltMutations(commitError);
             }
         }
-        }finally{runtimeDiagnostics.recordPhase(Phase.WORLD_COMMIT,System.nanoTime()-phaseStart);}
+        }finally{recordPhase(Phase.WORLD_COMMIT,phaseStart);}
         checkReceiptHealth();
-        phaseStart=System.nanoTime();
+        phaseStart=perfNow();
         try{
         if(!mutationHalted&&plotCommit!=null){
             try {plotCommit.tick(event.getServer().getTickCount());}
@@ -249,7 +253,7 @@ public final class PhysicalDestroyDeform {
                 haltMutations(commitError);
             }
         }
-        }finally{runtimeDiagnostics.recordPhase(Phase.PLOT_COMMIT,System.nanoTime()-phaseStart);}
+        }finally{recordPhase(Phase.PLOT_COMMIT,phaseStart);}
         checkReceiptHealth();
         if(++ticks%100!=0)return;
         acceptanceReport.log(LOGGER);

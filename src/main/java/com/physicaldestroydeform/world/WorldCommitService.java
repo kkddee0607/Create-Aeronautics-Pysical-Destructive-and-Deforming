@@ -57,7 +57,7 @@ public final class WorldCommitService {
     public WorldCommitService(MinecraftServer server,DamageModel.Settings damage,Logger log) throws IOException {
         this.server=Objects.requireNonNull(server);this.log=Objects.requireNonNull(log);this.damageSettings=damage;
         Path path=server.getWorldPath(LevelResource.ROOT).resolve("data").resolve("pdd-world-0.4.1.wal");
-        journal=new WorldPersistentJournal(path.getParent().resolve("pdd-world-0.5.0"),path);
+        journal=new WorldPersistentJournal(path.getParent().resolve("pdd-world-0.5.0"),path,LogSelection.enabled(LogSelection.Channel.STORAGE));
         int limit=Integer.getInteger("pdd.worldBreakCapPerTick",WorldCommitCore.DEFAULT_WORLD_BREAK_CAP_PER_TICK);
         core=new WorldCommitCore(journal,damage,Math.max(1,Math.min(4096,limit)));
         gateway=new NeoForgeWorldGateway(server,this);

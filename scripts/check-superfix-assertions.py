@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only duoFix contact routing guard; not compilation or JUnit."""
+"""Read-only duoMoreFix contact routing guard; not compilation or JUnit."""
 from pathlib import Path
 import re
 root=Path(__file__).resolve().parents[1]
@@ -12,7 +12,7 @@ for term in ('DcrtContactBatch.select(', 'credit.stepRegional(frame)', 'selectio
     if term not in bridge:errors.append(f'missing live direct-seed wiring: {term}')
 if bridge.find('var damageRegions=')>bridge.find('regionLedger.issueContactSeeds('):errors.append('expansion must precede sealing')
 dcrt=(main/'DcrtContactBatch.java').read_text()
-for term in ('SableContactRegions.prepare(', 'prepared.exact()', 'part.prepared.expand()', 'positivePreGap(', 'history.eligible(', 'mapToDouble(Contact::rawImpactScalar).max()'):
+for term in ('SableContactRegions.prepare(', 'selected.exact()', 'part.prepared.expand()', 'provedRecords(', 'preGapStatus(', 'history.reserve(', 'pendingHistory.finish(', 'prepared.disconnected(', 'history.eligible(', 'mapToDouble(Contact::rawImpactScalar).max()'):
     if term not in dcrt:errors.append(f'missing DCRT authority or shared budget: {term}')
 for term in ('probeReimpact', 'lastCreditedRegions'):
     if term in bridge:errors.append(f'retired pair-wide authorization: {term}')
@@ -41,4 +41,4 @@ for term in ('partialFit(', 'inliers.size()<4', 'patchReserve'):
 if 'job.validationIndex>=job.validation.size()' not in stress or 'invalidate(job,probe.getKey());return;' in stress:errors.append('stress must gather a full validation batch before replay')
 if 'System.getProperty("pdd.logs")' not in logs:errors.append('missing startup log selection')
 if errors:raise SystemExit('\n'.join(errors))
-print('DuoFix static contact routing guard PASS: exact/patch/ledger and stress repair wiring present')
+print('DuoMoreFix static contact routing guard PASS: exact/patch/ledger and stress repair wiring present')

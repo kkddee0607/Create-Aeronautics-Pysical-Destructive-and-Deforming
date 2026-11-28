@@ -20,18 +20,20 @@ public final class LogSelection {
         return set;
     }
     private static EnumSet<Channel> configured(){
-        String raw=System.getProperty("pdd.logs");
+        return configured(System.getProperty("pdd.logs"),Boolean::getBoolean);
+    }
+    static EnumSet<Channel> configured(String raw,java.util.function.Predicate<String> flag){
         if(raw!=null)return parse(raw);
-        if(Boolean.getBoolean("pdd.rog.enabled"))return EnumSet.allOf(Channel.class);
+        if(flag.test("pdd.rog.enabled"))return EnumSet.allOf(Channel.class);
         var result=EnumSet.noneOf(Channel.class);
-        if(Boolean.getBoolean("pdd.f.trace.enabled"))result.add(Channel.FORCE);
-        if(Boolean.getBoolean("pdd.verf.enabled")){result.add(Channel.CONTACT);result.add(Channel.NATIVE);}
-        if(Boolean.getBoolean("pdd.deform.trace")||Boolean.getBoolean("pdd.deform.verbose"))result.add(Channel.DEFORM);
-        if(Boolean.getBoolean("pdd.stress.trace"))result.add(Channel.STRESS);
-        if(Boolean.getBoolean("pdd.copycat.trace"))result.add(Channel.COPYCAT);
-        if(Boolean.getBoolean("pdd.persistence.traceRecovery"))result.add(Channel.STORAGE);
-        if(Boolean.getBoolean("pdd.world.verbose"))result.add(Channel.COMMIT);
-        if(Boolean.getBoolean("pdd.traceSublevelPackets"))result.add(Channel.NETWORK);
+        if(flag.test("pdd.f.trace.enabled"))result.add(Channel.FORCE);
+        if(flag.test("pdd.verf.enabled")){result.add(Channel.CONTACT);result.add(Channel.NATIVE);}
+        if(flag.test("pdd.deform.trace")||flag.test("pdd.deform.verbose"))result.add(Channel.DEFORM);
+        if(flag.test("pdd.stress.trace"))result.add(Channel.STRESS);
+        if(flag.test("pdd.copycat.trace"))result.add(Channel.COPYCAT);
+        if(flag.test("pdd.persistence.traceRecovery"))result.add(Channel.STORAGE);
+        if(flag.test("pdd.world.verbose"))result.add(Channel.COMMIT);
+        if(flag.test("pdd.traceSublevelPackets"))result.add(Channel.NETWORK);
         return result;
     }
     public static boolean enabled(Channel channel){return ACTIVE.contains(channel);}

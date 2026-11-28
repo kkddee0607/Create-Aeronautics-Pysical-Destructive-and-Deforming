@@ -12,4 +12,14 @@ class LogSelectionTest {
         assertEquals(LogSelection.Channel.LINEAGE,LogSelection.channelFor(RogTrace.Stage.R09,"LINEAGE_MOVE"));
         assertEquals(LogSelection.Channel.COMMIT,LogSelection.channelFor(RogTrace.Stage.R10,"BREAK_READBACK"));
     }
+    @Test void explicitSelectionOverridesLegacyFlags(){
+        assertTrue(LogSelection.configured("off",key->true).isEmpty());
+        assertEquals(java.util.EnumSet.of(LogSelection.Channel.STRESS),LogSelection.configured("stress",key->true));
+        assertEquals(java.util.EnumSet.of(LogSelection.Channel.NATIVE,LogSelection.Channel.CONTACT,LogSelection.Channel.FORCE),LogSelection.configured("native,contact,force",key->true));
+    }
+    @Test void noExplicitChannelAndDebugAloneRemainSilent(){
+        assertTrue(LogSelection.configured(null,key->false).isEmpty());
+        assertTrue(LogSelection.configured(null,key->key.equals("pdd.diagnostics.mode")).isEmpty());
+        assertEquals(java.util.EnumSet.of(LogSelection.Channel.STRESS),LogSelection.configured(null,key->key.equals("pdd.stress.trace")));
+    }
 }

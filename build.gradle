@@ -4,7 +4,7 @@ plugins {
 }
 
 group = 'com.physicaldestroydeform'
-version = '0.6.1-duoFix'
+version = '0.6.1-duoMoreFix'
 base { archivesName = 'physical-destroy-deform' }
 java.toolchain.languageVersion = JavaLanguageVersion.of(21)
 neoForge {
@@ -72,7 +72,7 @@ jar {
             'Specification-Version': '0.6.1',
             'Implementation-Title': project.name,
             'Implementation-Version': project.version,
-            'PDD-Revision': '0.6.1-duoFix'
+            'PDD-Revision': '0.6.1-duoMoreFix'
         ])
     }
 }

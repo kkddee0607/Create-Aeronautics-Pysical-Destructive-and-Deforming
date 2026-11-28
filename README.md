@@ -1,10 +1,10 @@
-# PDD 0.6.1-duoFix — Physical Destructive and Deforming
+# PDD 0.6.1-duoMoreFix — Physical Destructive and Deforming
 
 Minecraft 1.21.1 · Java 21 · NeoForge 21.1.228 · Sable 2.0.6 · Create 6.0.10 · Aeronautics 1.3.2. 선택 호환: Copycats+ 3.0.11.
 
 [통합설계서 1.0.9](.github/workflows/PDD-1.0.9-Integrated-Design-Specification.md) · [originFix-buildFix 검증 보고](docs/verification/PDD-0.6.1-originFix-buildFix.md) · [originFix 구현 이력](docs/verification/PDD-0.6.1-originFix.md).
 
-**현재 개발 후보: 0.6.1-duoFix.** 방향별 접촉 승인 및 공동 F 예산, 방향 충돌 시 보수적 전파 차단, Stress 정산 진단, 선택 로그 및 프로세스 메모리 계측을 추가했다. DCRT의 완전한 공간 연속성/모든 회전 타격 증명 등은 미완료다. JVM 기본 진단 OFF; `-Dpdd.logs=contact,force,stress,perf`, 상세 작업 `-Dpdd.rog.traceJob=<jobId>`. 설치 대상: `build/libs/physical-destroy-deform-0.6.1-duoFix.jar`. 실제 Gradle/JUnit/Actions/인게임 미검증. [검증 보고](docs/verification/PDD-0.6.1-duoFix.md).
+**현재 GitHub Apply 검증용 테스트 후보: 0.6.1-duoMoreFix (TEST-APPLY, 기능 완성·실제 빌드 미확정).** Grant 소비 분리, 지역별 접근 증거 및 제한된 실제 형상 연결성, 접촉 Seed 정규화, 채널 선택 로그 개선. 일반 회전 및 불완전 Native 관측의 증명 제한은 남아 있다. 기본 상세 로그 OFF. `-Dpdd.logs=native,contact,force,perf` 또는 `-Dpdd.logs=stress,commit,damage,deform,copycat,lineage,storage,perf`. 설치 대상: `build/libs/physical-destroy-deform-0.6.1-duoMoreFix.jar`. 실제 Gradle/JUnit/Actions/인게임 미검증. [검증 보고](docs/verification/PDD-0.6.1-duoMoreFix.md).
 
 **직전 배포판: 0.6.1-rogFix.** [검증 보고](docs/verification/PDD-0.6.1-rogFix.md).
 

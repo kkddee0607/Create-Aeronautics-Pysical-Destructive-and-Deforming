@@ -45,7 +45,7 @@ public final class WorldPersistentJournal implements WorldJournal, AutoCloseable
             v=Integer.compare(y,b.y);return v!=0?v:Integer.compare(z,b.z);}
     }
     private final Path root,manifestPath,legacyPath;
-    private final JournalIoMetrics io=new JournalIoMetrics();
+    private final JournalIoMetrics io;
     private final Map<SparseStateKey,WorldReceiptJournal.State> states=new HashMap<>();
     /** Compact index: no cold ApplyId Strings, only offsets, record CRCs and sorted
      * SHA-256 candidate keys. A matching candidate always reads the complete ID. */
@@ -95,7 +95,14 @@ public final class WorldPersistentJournal implements WorldJournal, AutoCloseable
     public WorldPersistentJournal(Path directory,Path oldWal) throws IOException {
         this(directory,oldWal,RECEIPT_CACHE_BYTES);
     }
+    public WorldPersistentJournal(Path directory,Path oldWal,boolean metrics) throws IOException {
+        this(directory,oldWal,RECEIPT_CACHE_BYTES,metrics);
+    }
     WorldPersistentJournal(Path directory,Path oldWal,long receiptCacheLimit) throws IOException {
+        this(directory,oldWal,receiptCacheLimit,true);
+    }
+    private WorldPersistentJournal(Path directory,Path oldWal,long receiptCacheLimit,boolean metrics) throws IOException {
+        io=new JournalIoMetrics(metrics);
         if(receiptCacheLimit<0||receiptCacheLimit>RECEIPT_CACHE_BYTES)throw new IllegalArgumentException("receipt cache budget");
         this.receiptCacheLimit=receiptCacheLimit;
         root=Objects.requireNonNull(directory).toAbsolutePath().normalize();
@@ -189,7 +196,7 @@ public final class WorldPersistentJournal implements WorldJournal, AutoCloseable
         long candidate=candidateKey(hash,0),prefix=candidate>>32;
         int i=Arrays.binarySearch(shard.candidates(),candidate);if(i<0)i=-i-1;
         if(i==shard.count()||shard.candidates()[i]>>32!=prefix)return null;
-        long readStarted=System.nanoTime();
+        long readStarted=io.now();
         try(var f=new RandomAccessFile(checkedFile(shard.relative()).toFile(),"r")){
             int bodyLength=shard.offsets()[shard.count()];
             if(f.length()!=20L+bodyLength||f.readInt()!=DISK_MAGIC||f.readInt()!=shard.schema()
@@ -210,7 +217,7 @@ public final class WorldPersistentJournal implements WorldJournal, AutoCloseable
         }catch(IOException|IllegalArgumentException failure){
             receiptReadFault=failure instanceof IOException io?io:new IOException("invalid cold receipt record",failure);
             throw receiptReadFault;
-        }finally{io.record(JournalIoMetrics.Phase.COLD_RECEIPT_READ,System.nanoTime()-readStarted);}
+        }finally{io.record(JournalIoMetrics.Phase.COLD_RECEIPT_READ,io.now()-readStarted);}
     }
     // Conservative weighted budget includes key, receipt, map entry and worst-case
     // UTF-16 backing arrays; precise JVM object layout is implementation-dependent.
@@ -527,7 +534,7 @@ public final class WorldPersistentJournal implements WorldJournal, AutoCloseable
     }
     /** Complete a bounded amount of snapshot work on the server thread. */
     @Override public synchronized int checkpointBatch(int maxObjects) throws IOException {
-        long checkpointStarted=System.nanoTime();
+        long checkpointStarted=io.now();
         try{
         if(closed)throw new IOException("JOURNAL_CLOSED");
         if(appendUncertain)throw new IOException("RECOVERY_WAL_APPEND_UNCERTAIN");
@@ -554,10 +561,10 @@ public final class WorldPersistentJournal implements WorldJournal, AutoCloseable
                         && revisionChunks.getOrDefault(key,Set.of()).isEmpty()){
                     stagedChunks.remove(key);
                 }else{
-                    long snapshotStarted=System.nanoTime();
+                    long snapshotStarted=io.now();
                     byte[] snapshot;
                     try{snapshot=chunkBytes(key);}
-                    finally{io.record(JournalIoMetrics.Phase.SNAPSHOT_BUILD,System.nanoTime()-snapshotStarted);}
+                    finally{io.record(JournalIoMetrics.Phase.SNAPSHOT_BUILD,io.now()-snapshotStarted);}
                     writeDurable(root.resolve(relative),blob(CHUNK,snapshot));
                     stagedChunks.put(key,relative);
                 }
@@ -575,7 +582,7 @@ public final class WorldPersistentJournal implements WorldJournal, AutoCloseable
         }
         if(dirtyChunks.isEmpty()&&dirtyBuckets.isEmpty())publish();
         return done;
-        }finally{io.record(JournalIoMetrics.Phase.CHECKPOINT,System.nanoTime()-checkpointStarted);}
+        }finally{io.record(JournalIoMetrics.Phase.CHECKPOINT,io.now()-checkpointStarted);}
     }
     @Override public synchronized boolean checkpointPending(){return staging;}
     public synchronized boolean checkpointNeeded(){
@@ -809,7 +816,7 @@ public final class WorldPersistentJournal implements WorldJournal, AutoCloseable
         receiptCount+=shard.count();receiptBucketCounts[expected]=shard.count();
     }
     private ReceiptShard indexReceiptBody(int expected,String relative,int schema,byte[] body,boolean restoreActive)throws IOException {
-        long indexStarted=System.nanoTime();
+        long indexStarted=io.now();
         try{
         try(var in=new DataInputStream(new ByteArrayInputStream(body))){
             int actual=in.readUnsignedByte();if(actual!=expected)throw new IOException("receipt bucket mismatch");
@@ -839,7 +846,7 @@ public final class WorldPersistentJournal implements WorldJournal, AutoCloseable
             offsets[count]=body.length;Arrays.sort(candidates);
             return new ReceiptShard(relative,schema,crc(body),offsets,crcs,candidates);
         }catch(IllegalArgumentException failure){throw new IOException("invalid receipt snapshot",failure);}
-        }finally{io.record(JournalIoMetrics.Phase.RECEIPT_INDEX,System.nanoTime()-indexStarted);}
+        }finally{io.record(JournalIoMetrics.Phase.RECEIPT_INDEX,io.now()-indexStarted);}
     }
     private byte[] chunkBytes(ChunkKey key)throws IOException {
         ByteArrayOutputStream bytes=new ByteArrayOutputStream();
@@ -854,7 +861,7 @@ public final class WorldPersistentJournal implements WorldJournal, AutoCloseable
         return bytes.toByteArray();
     }
     private byte[] receiptBytes(int id)throws IOException {
-        long encodeStarted=System.nanoTime();
+        long encodeStarted=io.now();
         try{
         ByteArrayOutputStream bytes=new ByteArrayOutputStream();
         try(var out=new DataOutputStream(bytes)){
@@ -891,10 +898,10 @@ public final class WorldPersistentJournal implements WorldJournal, AutoCloseable
         }
         if(bytes.size()>MAX_BLOB_BYTES)throw new IOException("receipt shard size cap exceeded");
         return bytes.toByteArray();
-        }finally{io.record(JournalIoMetrics.Phase.RECEIPT_ENCODE,System.nanoTime()-encodeStarted);}
+        }finally{io.record(JournalIoMetrics.Phase.RECEIPT_ENCODE,io.now()-encodeStarted);}
     }
     private void publish()throws IOException {
-        long publishStarted=System.nanoTime();
+        long publishStarted=io.now();
         try{
         long next=generation+1;
         createWal(next); // durable empty WAL BEFORE referencing it in manifest
@@ -927,7 +934,7 @@ public final class WorldPersistentJournal implements WorldJournal, AutoCloseable
             // A manifest move may have succeeded before directory fsync reported failure.
             // Never append to a potentially stale generation in that case.
             appendUncertain=true;throw failure;
-        }finally{io.record(JournalIoMetrics.Phase.PUBLISH,System.nanoTime()-publishStarted);}
+        }finally{io.record(JournalIoMetrics.Phase.PUBLISH,io.now()-publishStarted);}
     }
     /** Only older, unreferenced generations are eligible; future manifests start from current refs. */
     private void scheduleCleanup() {
@@ -946,7 +953,7 @@ public final class WorldPersistentJournal implements WorldJournal, AutoCloseable
         try{
             CleanupScope scope;
             while((scope=cleanupRequest.getAndSet(null))!=null && !Thread.currentThread().isInterrupted()){
-                long started=System.nanoTime();
+                long started=io.now();
                 try(var files=Files.walk(root)){
                     for(var iterator=files.iterator();iterator.hasNext();){
                         if(Thread.currentThread().isInterrupted())break;
@@ -963,7 +970,7 @@ public final class WorldPersistentJournal implements WorldJournal, AutoCloseable
                         }catch(IOException ignored){cleanupFaults++;/* retry from next durable generation */}
                     }
                 }catch(IOException | UncheckedIOException failure){cleanupFaults++;}
-                finally{io.recordBackgroundCleanup(System.nanoTime()-started);}
+                finally{io.recordBackgroundCleanup(io.now()-started);}
             }
         } finally {
             cleanupRunning.set(false);
@@ -1001,7 +1008,7 @@ public final class WorldPersistentJournal implements WorldJournal, AutoCloseable
         }catch(IOException unreadable){cleanupFaults++;return true;}
     }
     private void writeManifest(long gen,Map<ChunkKey,String> chunks,Map<Integer,String> buckets)throws IOException {
-        long encodeStarted=System.nanoTime();
+        long encodeStarted=io.now();
         ByteArrayOutputStream b=new ByteArrayOutputStream();
         try(var out=new DataOutputStream(b)){
             out.writeLong(gen);writeString(out,legacyHash);
@@ -1013,20 +1020,20 @@ public final class WorldPersistentJournal implements WorldJournal, AutoCloseable
                 out.writeInt(e.getKey());writeString(out,e.getValue());
             }
         }
-        io.record(JournalIoMetrics.Phase.MANIFEST_ENCODE,System.nanoTime()-encodeStarted);
+        io.record(JournalIoMetrics.Phase.MANIFEST_ENCODE,io.now()-encodeStarted);
         Path tmp=root.resolve("checkpoint.manifest.tmp");
         writeDurable(tmp,blob(MANIFEST,b.toByteArray()));
-        long moveStarted=System.nanoTime();
+        long moveStarted=io.now();
         try{Files.move(tmp,manifestPath,StandardCopyOption.ATOMIC_MOVE,StandardCopyOption.REPLACE_EXISTING);}
         catch(AtomicMoveNotSupportedException e){throw new IOException("atomic manifest replace unavailable",e);}
-        finally{io.record(JournalIoMetrics.Phase.MANIFEST_MOVE,System.nanoTime()-moveStarted);}
-        long directoryStarted=System.nanoTime();
+        finally{io.record(JournalIoMetrics.Phase.MANIFEST_MOVE,io.now()-moveStarted);}
+        long directoryStarted=io.now();
         try{forceDirectory(root);}
-        finally{io.record(JournalIoMetrics.Phase.MANIFEST_DIRECTORY_FORCE,System.nanoTime()-directoryStarted);}
+        finally{io.record(JournalIoMetrics.Phase.MANIFEST_DIRECTORY_FORCE,io.now()-directoryStarted);}
     }
     private Path walPath(long gen){return root.resolve("recovery-"+gen+".wal");}
     private void createWal(long gen)throws IOException {
-        long createStarted=System.nanoTime();
+        long createStarted=io.now();
         try{
         ByteBuffer b=ByteBuffer.allocate(16).putInt(WAL_MAGIC).putInt(SCHEMA).putLong(gen);b.flip();
         Path path=walPath(gen);Files.createDirectories(path.getParent());
@@ -1034,7 +1041,7 @@ public final class WorldPersistentJournal implements WorldJournal, AutoCloseable
             while(b.hasRemaining())channel.write(b);channel.force(true);
         }
         forceDirectory(root);walBytes=16;
-        }finally{io.record(JournalIoMetrics.Phase.WAL_CREATE,System.nanoTime()-createStarted);}
+        }finally{io.record(JournalIoMetrics.Phase.WAL_CREATE,io.now()-createStarted);}
     }
     private void append(byte[] frame)throws IOException {
         if(closed)throw new IOException("JOURNAL_CLOSED");
@@ -1042,19 +1049,19 @@ public final class WorldPersistentJournal implements WorldJournal, AutoCloseable
         checkReceiptReadHealth();
         if(walBytes+frame.length>MAX_WAL_BYTES)throw new IOException("RECOVERY_WAL_CAP_EXCEEDED");
         Path path=walPath(generation);
-        long appendStarted=System.nanoTime();
+        long appendStarted=io.now();
         try{
             FileChannel channel=activeWal==null?FileChannel.open(path,WRITE):activeWal;
             try {
                 if(channel.size()!=walBytes)throw new IOException("recovery WAL changed externally");
                 channel.position(walBytes);
                 ByteBuffer b=ByteBuffer.wrap(frame);while(b.hasRemaining())channel.write(b);
-                long forceStarted=System.nanoTime();
-                try{channel.force(true);}finally{io.record(JournalIoMetrics.Phase.WAL_FORCE,System.nanoTime()-forceStarted);}
+                long forceStarted=io.now();
+                try{channel.force(true);}finally{io.record(JournalIoMetrics.Phase.WAL_FORCE,io.now()-forceStarted);}
                 walBytes+=frame.length;
             }finally{if(channel!=activeWal)channel.close();}
         }catch(IOException uncertain){appendUncertain=true;throw uncertain;}
-        finally{io.record(JournalIoMetrics.Phase.WAL_APPEND,System.nanoTime()-appendStarted);}
+        finally{io.record(JournalIoMetrics.Phase.WAL_APPEND,io.now()-appendStarted);}
     }
     private void replayWal()throws IOException {
         Path wal=walPath(generation);
@@ -1118,35 +1125,35 @@ public final class WorldPersistentJournal implements WorldJournal, AutoCloseable
         return file;
     }
     private void writeDurable(Path path,byte[] bytes)throws IOException {
-        long started=System.nanoTime();
+        long started=io.now();
         try{
             Files.createDirectories(path.getParent());
             try(var ch=FileChannel.open(path,CREATE,TRUNCATE_EXISTING,WRITE)){
                 boolean manifest=path.getFileName().toString().equals("checkpoint.manifest.tmp");
-                long writeStarted=System.nanoTime();
+                long writeStarted=io.now();
                 try{ByteBuffer b=ByteBuffer.wrap(bytes);while(b.hasRemaining())ch.write(b);}
                 finally{
-                    io.record(JournalIoMetrics.Phase.FILE_WRITE,System.nanoTime()-writeStarted);
-                    if(manifest)io.record(JournalIoMetrics.Phase.MANIFEST_FILE_WRITE,System.nanoTime()-writeStarted);
+                    io.record(JournalIoMetrics.Phase.FILE_WRITE,io.now()-writeStarted);
+                    if(manifest)io.record(JournalIoMetrics.Phase.MANIFEST_FILE_WRITE,io.now()-writeStarted);
                 }
-                long forceStarted=System.nanoTime();
+                long forceStarted=io.now();
                 try{ch.force(true);}
                 finally{
-                    io.record(JournalIoMetrics.Phase.FILE_FORCE,System.nanoTime()-forceStarted);
-                    if(manifest)io.record(JournalIoMetrics.Phase.MANIFEST_FILE_FORCE,System.nanoTime()-forceStarted);
+                    io.record(JournalIoMetrics.Phase.FILE_FORCE,io.now()-forceStarted);
+                    if(manifest)io.record(JournalIoMetrics.Phase.MANIFEST_FILE_FORCE,io.now()-forceStarted);
                 }
             }
             forceDirectory(path.getParent());
-        }finally{io.record(JournalIoMetrics.Phase.DURABLE_WRITE,System.nanoTime()-started);}
+        }finally{io.record(JournalIoMetrics.Phase.DURABLE_WRITE,io.now()-started);}
     }
     private void forceDirectory(Path directory)throws IOException {
-        long started=System.nanoTime();
+        long started=io.now();
         try{
             try(var ch=FileChannel.open(directory,READ)){ch.force(true);}
             catch(AccessDeniedException|UnsupportedOperationException unsupported){
                 // Windows cannot open a directory FileChannel; file fsync and atomic move still apply.
             }
-        }finally{io.record(JournalIoMetrics.Phase.DIRECTORY_FORCE,System.nanoTime()-started);}
+        }finally{io.record(JournalIoMetrics.Phase.DIRECTORY_FORCE,io.now()-started);}
     }
     private interface Writer{void write(DataOutputStream out)throws IOException;}
     private static byte[] frame(Writer writer)throws IOException {

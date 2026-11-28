@@ -38,7 +38,9 @@ public final class StressRuntime {
     private static final int MAX_ARCHIVES_PER_TICK=4;
     private enum WorkPhase { PROBE, VALIDATE, SEAL, HANDOFF, ARCHIVE }
     private final long[] workCounts=new long[WorkPhase.values().length],workMax=new long[WorkPhase.values().length];
+    private static long workNow(){return LogSelection.enabled(LogSelection.Channel.STRESS)?System.nanoTime():0;}
     private void workTime(WorkPhase phase,long started){
+        if(started==0)return;
         int i=phase.ordinal();long elapsed=Math.max(0,System.nanoTime()-started);
         workCounts[i]++;workMax[i]=Math.max(workMax[i],elapsed);
     }
@@ -160,7 +162,7 @@ public final class StressRuntime {
         this.server=Objects.requireNonNull(server);this.world=world;this.plot=plot;this.log=Objects.requireNonNull(log);
         policy=configuredPolicy();workCap=policy.maxNodesPerTick();
         Path path=server.getWorldPath(LevelResource.ROOT).resolve("data/pdd-stress-0.6.0");
-        journal=new StressReservationJournal(path);
+        journal=new StressReservationJournal(path,LogSelection.enabled(LogSelection.Channel.STRESS));
         long startupGameTick=server.overworld().getGameTime();
         Set<String> activeOutputs=new HashSet<>();
         for(var entry:journal.entries().stream().sorted(Comparator.comparingLong(e->e.reservation().createdGameTick())).toList()){
@@ -522,7 +524,7 @@ public final class StressRuntime {
             }
             if(job.validation==null){
                 int quantum=r.seeds().size()>256?LARGE_QUANTUM:QUANTUM;
-                long probeStarted=System.nanoTime();
+                long probeStarted=workNow();
                 try{
                     for(int i=0;i<quantum&&used<workCap;i++){
                         job.probes.advance(job.session,cell->frozen(job,cell),tick,this::charge);
@@ -564,7 +566,7 @@ public final class StressRuntime {
                     if(journal.get(job.id)==entry)snapshotWritesAvoided++;
                 }
             }
-            long validateStarted=System.nanoTime();
+            long validateStarted=workNow();
             try{while(job.validationIndex<job.validation.size()&&used<workCap){
                 var probe=job.validation.get(job.validationIndex);
                 if(job.published.contains(entry,probe.getKey())){
@@ -613,7 +615,7 @@ public final class StressRuntime {
             // Recovery recomputes from saved graph; do not publish an incomplete old prefix.
             if(job.session.plannedNodes()>=entry.plans().size()){
                 charge();var beforeSeal=journal.get(job.id);
-                long sealStarted=System.nanoTime();
+                long sealStarted=workNow();
                 try{journal.sealProgress(job.id,job.session,job.snapshot);}
                 finally{workTime(WorkPhase.SEAL,sealStarted);}
                 var sealed=journal.get(job.id);job.finished=job.session.finished();
@@ -637,7 +639,7 @@ public final class StressRuntime {
         while(job.deliveryIndex<entry.plans().size()&&handoffs++<QUANTUM&&used<workCap){
             charge();var plan=entry.plans().get(job.deliveryIndex);
             var intent=derivedIntent(job,plan);var key=intent.key();
-            long handoffStarted=System.nanoTime();
+            long handoffStarted=workNow();
             boolean accepted;
             try{accepted=PlotKeyCodec.isPlotStorage(key)?plot!=null&&plot.offerStress(entry,plan,intent,job.deliveryIndex)
                     :world!=null&&world.offerStress(entry,plan,intent,job.deliveryIndex);}
@@ -720,7 +722,7 @@ public final class StressRuntime {
         if(archivesThisTick>=MAX_ARCHIVES_PER_TICK||archivesThisTick>0&&System.nanoTime()-archiveStartedNanos>=2_000_000L)return;
         charge();if(archivesThisTick++==0)archiveStartedNanos=System.nanoTime();
         Entry entry=journal.get(job.id);
-        long archiveStarted=System.nanoTime();
+        long archiveStarted=workNow();
         try{journal.compactHandoff(job.id);}
         finally{workTime(WorkPhase.ARCHIVE,archiveStarted);}
         if(job.clockRolledBack){

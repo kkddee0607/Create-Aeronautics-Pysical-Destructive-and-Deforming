@@ -78,8 +78,8 @@ public final class RealFixRuntimeBridge {
     private static final boolean VERF_ENABLED=Boolean.parseBoolean(
             System.getProperty("pdd.verf.enabled",Boolean.toString(LogSelection.any())));
     private static final boolean DETAIL_ENABLED=(LogSelection.enabled(LogSelection.Channel.CONTACT)||LogSelection.enabled(LogSelection.Channel.NATIVE))&&(DiagnosticMode.debug()||Boolean.getBoolean("pdd.verf.enabled"));
-    private static final boolean NORMAL_SAMPLES_ENABLED=DETAIL_ENABLED
-            ||System.getProperty("pdd.normal.samples.maxPerCredit")!=null;
+    private static final boolean NORMAL_SAMPLES_ENABLED=LogSelection.enabled(LogSelection.Channel.NATIVE)
+            &&(DETAIL_ENABLED||System.getProperty("pdd.normal.samples.maxPerCredit")!=null);
     private static final long VERF_SAMPLE_TICKS=Math.max(20L,
             Long.getLong("pdd.verf.sampleTicks",100L));
     private String runId=UUID.randomUUID().toString();
@@ -142,6 +142,8 @@ public final class RealFixRuntimeBridge {
     }
     private static final class Tracked {
         final RejectionTrace rejectionTrace=new RejectionTrace();
+        boolean nativeCapActive;
+        String lastGrantFailure="";long lastGrantFailureTick=-1;
         final DirectionalContactRegions regionHistory=new DirectionalContactRegions();
         Target a,b;
         Box previousA,previousB;
@@ -385,7 +387,7 @@ public final class RealFixRuntimeBridge {
                         ==ContactBatchStamp.Status.CURRENT)).toList();
         int staleNative=0;
         final boolean fullTrace=DETAIL_ENABLED&&Boolean.parseBoolean(System.getProperty("pdd.diagnostics.fullTrace",
-                Boolean.toString(DiagnosticMode.debug())));
+                "false"));
         if(plotCommit!=null)plotCommit.refreshLifecycle(now);
         final boolean complete=NativeCollisionTelemetry.dropped()==lastDropped
                 && NativeCollisionTelemetry.malformed()==lastMalformed
@@ -528,7 +530,7 @@ public final class RealFixRuntimeBridge {
                 boolean sourceComplete=complete&&batch.invalidRecords()==0&&batch.discardedRecords()==0&&!batch.malformedArray()
                         &&nativeBatchStatus==ContactBatchStamp.Status.CURRENT&&ContactBatchStamp.preStatus(capture,pre)==ContactBatchStamp.Status.CURRENT
                         &&massSafe.maskedFrames()==0;
-                long r2Start=System.nanoTime();
+                long r2Start=LogSelection.enabled(LogSelection.Channel.PERF)?System.nanoTime():0;
                 final DcrtContactBatch selection;
                 try {
                     selection=DcrtContactBatch.select(server,pair,massSafe.contacts(),pre,stamp.tick,now,sourceComplete,fullPairArmed,credit.settings(),t.regionHistory,
@@ -545,7 +547,7 @@ public final class RealFixRuntimeBridge {
                 var targetDirections=selection.directions();
                 boolean auditEligible=selection.authorized();
                 double currentPeak=auditEligible?selection.peak():group.forcePeak();
-                long r2Nanos=System.nanoTime()-r2Start;
+                long r2Nanos=r2Start==0?0:System.nanoTime()-r2Start;
                 if(auditEligible){
                     r2Audits++;r2ShapeChecks+=regions.checksA()+regions.checksB();
                     { if(RogTrace.legacySlot(LogSelection.Channel.PERF)) log.info("[PDD-R2-PERF] pair={}/{} phase=AUTHORIZED_AUDIT nanos={} records={} " +
@@ -555,6 +557,12 @@ public final class RealFixRuntimeBridge {
                 }
                 else r2SkippedDuplicate++;
                 boolean saturatedPoll=records.stream().anyMatch(NativeCollisionTelemetry.Contact::capSaturated);
+                if(LogSelection.enabled(LogSelection.Channel.NATIVE)){
+                    if(saturatedPoll&&RogTrace.periodic(Stage.R01,"NATIVE_CAP_AFFECTED_PAIR"))RogTrace.detail(Stage.R01,"NATIVE_CAP_AFFECTED_PAIR","pair={} records={} totalSaturatedPolls={} cap=100 omittedCount=UNKNOWN",pair,records.size(),NativeCollisionTelemetry.nativeCapSaturatedPolls());
+                    if(saturatedPoll!=t.nativeCapActive){t.nativeCapActive=saturatedPoll;
+                        if(RogTrace.eventSlot(Stage.R01,"NATIVE_CAP_TRANSITION"))RogTrace.detail(Stage.R01,"NATIVE_CAP_TRANSITION","pair={} saturatedObserved={} records={} totalSaturatedPolls={} authority=NONE",pair,saturatedPoll,records.size(),NativeCollisionTelemetry.nativeCapSaturatedPolls());
+                    }
+                }
                 if(RogTrace.sample(Stage.R04,regions.status().name()))RogTrace.detail(Stage.R04,regions.status().name(),"auditEligible={} nativeCap={} checksA={} checksB={} rejected={} regions={} trace={}",auditEligible,saturatedPoll,regions.checksA(),regions.checksB(),regions.rejected(),regions.regions().size(),regions.trace());
                 Target a=regions.verified()?regions.firstA():null;
                 Target b=regions.verified()?regions.firstB():null;
@@ -647,7 +655,7 @@ public final class RealFixRuntimeBridge {
                 // Sample witness separation independent of whether R2 approved.
                 // Effect-phase projected points may span different substeps;
                 // never turn this diagnostic into a hard contact gate.
-                if(DETAIL_ENABLED && VERF_ENABLED && auditEligible && (t.lastPlotRogWitnessTick<0 || now-t.lastPlotRogWitnessTick>=VERF_SAMPLE_TICKS)) {
+                if(LogSelection.enabled(LogSelection.Channel.CONTACT) && DETAIL_ENABLED && VERF_ENABLED && auditEligible && (t.lastPlotRogWitnessTick<0 || now-t.lastPlotRogWitnessTick>=VERF_SAMPLE_TICKS)) {
                     for(int i=0;i<records.size();i++) {
                         var contact=records.get(i);
                         var wd=SableConsumerTargets.witnessDiagnostic(contact);
@@ -668,18 +676,18 @@ public final class RealFixRuntimeBridge {
                     }
                 }
                 boolean incomplete=!complete || batch.invalidRecords()>0 || batch.discardedRecords()>0 || batch.malformedArray();
-                if((fullTrace || incomplete) && logCounts[0]++<MAX_LOG_PER_TICK)
+                if(LogSelection.enabled(LogSelection.Channel.NATIVE)&&(fullTrace||incomplete&&RogTrace.periodic(Stage.R01,"INCOMPLETE_TARGET")) && logCounts[0]++<MAX_LOG_PER_TICK)
                     logNativeTarget(log,stamp,pair,methodA,methodB,regions,r1a!=null,r1b!=null,saturatedPoll);
                 // R4 shadow audit. This only describes plausible loaded world
                 // blocks; WITHOUT in-game ground truth it can never mint credit.
-                if(DETAIL_ENABLED && auditEligible && pair.a().stableKey().startsWith("WORLD:") && a==null) {
+                if(LogSelection.enabled(LogSelection.Channel.CONTACT) && DETAIL_ENABLED && auditEligible && pair.a().stableKey().startsWith("WORLD:") && a==null) {
                     int before=remainingR4Checks[0];
                     R4Probe probe=probeWorldR4(server,stamp.dimension,sweptB,records,remainingR4Checks);
                     if(logCounts[0]++<MAX_LOG_PER_TICK){ if(RogTrace.legacySlot(LogSelection.Channel.CONTACT)) log.info("[PDD-TARGET] source=R4_SWEPT_PROVISIONAL dimension={} tick={} worldCandidate={} credited=false",stamp.dimension,stamp.tick,probe.status()); }
                     if(!probe.status().startsWith("PROVISIONAL_ONLY"))
                         logVerfR4(log,t,now,stamp.tick,pair,probe,records.size(),before,remainingR4Checks[0],sweptB);
                 }
-                if(DETAIL_ENABLED && auditEligible && pair.b().stableKey().startsWith("WORLD:") && b==null) {
+                if(LogSelection.enabled(LogSelection.Channel.CONTACT) && DETAIL_ENABLED && auditEligible && pair.b().stableKey().startsWith("WORLD:") && b==null) {
                     int before=remainingR4Checks[0];
                     R4Probe probe=probeWorldR4(server,stamp.dimension,sweptA,records,remainingR4Checks);
                     if(logCounts[0]++<MAX_LOG_PER_TICK){ if(RogTrace.legacySlot(LogSelection.Channel.CONTACT)) log.info("[PDD-TARGET] source=R4_SWEPT_PROVISIONAL dimension={} tick={} worldCandidate={} credited=false",stamp.dimension,stamp.tick,probe.status()); }
@@ -689,8 +697,8 @@ public final class RealFixRuntimeBridge {
                 if(incomplete) {
                     contactHistory.invalidatePair(pair);
                     zero++;
-                    if(!fullTrace && logCounts[0]++<MAX_LOG_PER_TICK)logObservation(log,group,batch);
-                    if(logCounts[0]++<MAX_LOG_PER_TICK){ if(RogTrace.legacySlot(LogSelection.Channel.CONTACT)) log.info("[PDD-EPISODE] dimension={} tick={} ownerA={} ownerB={} reason=INCOMPLETE_INPUT Q=0 worldMutation=OFF",
+                    if(!fullTrace && RogTrace.periodic(Stage.R01,"INCOMPLETE_INPUT")&&logCounts[0]++<MAX_LOG_PER_TICK)logObservation(log,group,batch);
+                    if(RogTrace.periodic(Stage.R05,"INCOMPLETE_INPUT")&&logCounts[0]++<MAX_LOG_PER_TICK){ if(RogTrace.legacySlot(LogSelection.Channel.CONTACT)) log.info("[PDD-EPISODE] dimension={} tick={} ownerA={} ownerB={} reason=INCOMPLETE_INPUT Q=0 worldMutation=OFF",
                             stamp.dimension,stamp.tick,pair.a().stableKey(),pair.b().stableKey()); }
                     continue;
                 }
@@ -705,6 +713,7 @@ public final class RealFixRuntimeBridge {
                     RogTrace.episode(result.episodeGeneration());
                     if(RogTrace.sample(Stage.R05,result.reason().name()))RogTrace.detail(Stage.R05,result.reason().name(),"decision={} previous={} gapTick={} armedFromGap={} previousSeparated={} approach={} aabbClosing={} regionalReimpact={} rawF={} targetA={} targetB={}",result,phaseBefore,separationEvidenceTick,armedFromGap,previousSeparated,approach,aabbClosing,regionalReimpact,group.forcePeak(),a,b);
                     if(result.credited()) {
+                        selection.reserve(t.regionHistory,now);
                         directAuthorized.add(pair);
                         contactHistory.invalidatePair(pair);
                     } else if(selection.secondarySafe()&&sourceComplete&&eligibleSecondary(result,gapBefore,priorTracking!=null,
@@ -713,13 +722,14 @@ public final class RealFixRuntimeBridge {
                     }
                     // Keep actual audit evidence, every approved credit, all state/rejection changes
                     // and a periodic witness. Suppress only repetitive diagnostic groups, not credit work.
-                    boolean showGroup=t.rejectionTrace.sample(fullTrace,
-                            auditEligible || result.credited() || phaseBefore!=result.phase(),
+                    boolean diagnosticGroup=LogSelection.enabled(LogSelection.Channel.CONTACT)||LogSelection.enabled(LogSelection.Channel.NATIVE);
+                    boolean showGroup=diagnosticGroup&&t.rejectionTrace.sample(false,
+                            result.credited() || phaseBefore!=result.phase(),
                             now,result.reason(),regions.status(),VERF_SAMPLE_TICKS);
-                    if(!showGroup)repeatedDiagnosticGroupsSuppressed++;
+                    if(diagnosticGroup&&!showGroup)repeatedDiagnosticGroupsSuppressed++;
                     if(!fullTrace && showGroup) {
                         if(logCounts[0]++<MAX_LOG_PER_TICK)logObservation(log,group,batch);
-                        if(DETAIL_ENABLED&&logCounts[0]++<MAX_LOG_PER_TICK)
+                        if(LogSelection.enabled(LogSelection.Channel.NATIVE)&&DETAIL_ENABLED&&logCounts[0]++<MAX_LOG_PER_TICK)
                             logNativeTarget(log,stamp,pair,methodA,methodB,regions,r1a!=null,r1b!=null,saturatedPoll);
                     }
                     // A large force is diagnostic evidence, not permission to
@@ -746,11 +756,11 @@ public final class RealFixRuntimeBridge {
                                 pair.a().stableKey(),pair.b().stableKey(),stamp.tick,currentPeak,
                                 result.reason(),nativeApproach,regionMoved,result.phase(),regions.status()); }
                     }
-                    if(result.credited() && group.forcePeak()>GameImpactCredit.MAX_GAME_F
+                    if(result.credited() && selection.peak()>GameImpactCredit.MAX_GAME_F
                             && logCounts[0]++<MAX_LOG_PER_TICK)
-                        { if(RogTrace.legacySlot(LogSelection.Channel.FORCE)) log.info("[PDD-F-CAP] pair={}/{} rawF={} appliedF={} issuedQ={} " +
+                        { if(RogTrace.legacySlot(LogSelection.Channel.FORCE)) log.info("[PDD-F-CAP] pair={}/{} rawPeak={} eligiblePeak={} cappedF={} issuedQ={} " +
                                         "action=SATURATE_NOT_REJECT source=NATIVE_EFFECT_GAME_PROXY mutation=OFF",
-                                pair.a().stableKey(),pair.b().stableKey(),group.forcePeak(),
+                                pair.a().stableKey(),pair.b().stableKey(),group.forcePeak(),selection.peak(),
                                 result.peakForce(),result.issuedQ()); }
                     var gapAfter=credit.evidence(pair);
                     String fsmSignature=DETAIL_ENABLED?result.reason()+":"+gapBefore.phase()+":"+gapAfter.phase():"";
@@ -866,7 +876,7 @@ public final class RealFixRuntimeBridge {
                                             cutoff.rejectedF(),cutoff.reason()); }
                                 }
                             }:null;
-                    long propagationStart=System.nanoTime();
+                    long propagationStart=LogSelection.enabled(LogSelection.Channel.PERF)?System.nanoTime():0;
                     var propagationReader=result.credited()?OwnerResolver.propagationSnapshot(server,stamp.dimension):null;
                     int reserveA=result.credited()?damageRegions.reservedA():0,reserveB=result.credited()?damageRegions.reservedB():0;
                     ContactCreditLedger.Grant grant=result.credited()?regionLedger.issueContactSeeds(
@@ -876,22 +886,28 @@ public final class RealFixRuntimeBridge {
                             nativeNormal.owners(),targetDirections.hasProvenSeed()||fTrace!=null
                                     ?event->{targetDirections.trace(event);if(fTrace!=null)fTrace.accept(event);}:null,
                             contactGraph.planContext(),selection.seedDirections()):null;
-                    long propagationNanos=System.nanoTime()-propagationStart;
+                    long propagationNanos=propagationStart==0?0:System.nanoTime()-propagationStart;
                     if(grant!=null){if(RogTrace.sample(Stage.R06,grant.status().name()))RogTrace.detail(Stage.R06,grant.status().name(),"credit={} issuedQ={} inputF={} dampedF={} unresolvedF={} unusedQ={} targetsA={} targetsB={} failure={} elapsedNs={}",grant.id(),grant.issuedQ(),grant.inputF(),grant.dampedF(),grant.unresolvedF(),grant.unused(),grant.a().size(),grant.b().size(),regionLedger.lastPropagationFailure(),propagationNanos);}
                     boolean granted=grant!=null && grant.credited();
+                    if(granted)selection.finish(true);
                     if(granted&&RogTrace.eventSlot(Stage.R06,"DCRT_CREDIT_SEAL"))RogTrace.detail(Stage.R06,"DCRT_CREDIT_SEAL","credit={} state=GRANTED eligiblePeak={} inputF={} issuedQ={} sideA={} sideB={} seedsA={} seedsB={} unusedQ={}",grant.id(),result.peakForce(),grant.inputF(),grant.issuedQ(),grant.allocatedA(),grant.allocatedB(),grant.a().size(),grant.b().size(),grant.unused());
                     if(result.credited() && !granted) {
                         var pendingId=new ContactCreditLedger.CreditId(pair,result.episodeGeneration());
-                        boolean aborted=regionLedger.lookup(pendingId)==null
-                                && credit.abortUnissued(pair,result);
+                        boolean sealed=regionLedger.lookup(pendingId)!=null;
+                        boolean aborted=!sealed&&credit.abortUnissued(pair,result);
+                        if(sealed)selection.finish(true);else if(aborted)selection.finish(false);else selection.quarantine();
+                        String failure=(grant==null?"NULL":grant.status().name())+":"+regionLedger.lastPropagationFailure()+":"+aborted;
+                        boolean showFailure=!failure.equals(t.lastGrantFailure)||t.lastGrantFailureTick<0||now-t.lastGrantFailureTick>=VERF_SAMPLE_TICKS;
+                        if(showFailure){t.lastGrantFailure=failure;t.lastGrantFailureTick=now;
                         log.warn("[PDD-Q-ISSUE] pair={}/{} tick={} rawF={} cappedF={} " +
                                         "requestedQ={} ledgerStatus={} failure={} rolledBack={} " +
                                         "reason=UNSEALED_NO_WORLD_COMMIT mutation=OFF",
                                 pair.a().stableKey(),pair.b().stableKey(),stamp.tick,
                                 currentPeak,result.peakForce(),result.issuedQ(),
-                                grant==null?"NULL":grant.status(),regionLedger.lastPropagationFailure(),aborted);
+                                grant==null?"NULL":grant.status(),regionLedger.lastPropagationFailure(),aborted);}
                     }
                     if(granted) {
+                        t.lastGrantFailure="";
                         { if(RogTrace.eventSlot(Stage.R06,"CONTACT_SEED_SEALED"))RogTrace.detail(Stage.R06,"CONTACT_SEED_SEALED","credit={} directRegions={} finalRegions={} reservedA={} reservedB={} ownerLocalPatchSeeds={} state=ISSUED",grant.id(),directRegions.regions().size(),damageRegions.regions().size(),reserveA,reserveB,damageRegions.patchSeeds().size()); }
                         if(RogTrace.sample(Stage.R06,"SEALED_CREDIT"))RogTrace.detail(Stage.R06,"SEALED_CREDIT","credit={} propagationA={} propagationB={} owners={} rawF={} cappedF={} Q={}",grant.id(),grant.propagationA()==null?"NONE":grant.propagationA().endReason(),grant.propagationB()==null?"NONE":grant.propagationB().endReason(),nativeNormal.owners(),currentPeak,result.peakForce(),grant.issuedQ());
                         targetDirections.bind(grant,credit.settings(),targetMaterials::material);
@@ -1130,8 +1146,12 @@ public final class RealFixRuntimeBridge {
                     } catch(RuntimeException unsupported) {
                         if(RogTrace.sample(Stage.R06,"PLAN_EXCEPTION"))RogTrace.detail(Stage.R06,"PLAN_EXCEPTION","episode={} type={} message={}",result.episodeGeneration(),unsupported.getClass().getName(),unsupported.getMessage());
                         // An unsealed approval must not consume authorization.
-                        if(result.credited()&&regionLedger.lookup(new ContactCreditLedger.CreditId(pair,result.episodeGeneration()))==null)
-                            credit.abortUnissued(pair,result);
+                        if(result.credited()){
+                            boolean sealed=regionLedger.lookup(new ContactCreditLedger.CreditId(pair,result.episodeGeneration()))!=null;
+                            if(sealed)selection.finish(true);
+                            else if(credit.abortUnissued(pair,result))selection.finish(false);
+                            else selection.quarantine();
+                        }
                         zero++;
                         if(logCounts[0]++<MAX_LOG_PER_TICK)log.warn("[PDD-EPISODE] dimension={} tick={} Q=0 reason=INVALID_PLAN_INPUT type={} worldMutation=OFF",
                                 stamp.dimension,stamp.tick,unsupported.getClass().getSimpleName());
@@ -1140,9 +1160,12 @@ public final class RealFixRuntimeBridge {
                     if(result.credited())deferredPlans.add(deferred);else deferred.run();
                 } catch(RuntimeException unsupported) {
                     if(RogTrace.sample(Stage.R05,"BRIDGE_EXCEPTION"))RogTrace.detail(Stage.R05,"BRIDGE_EXCEPTION","type={} message={}",unsupported.getClass().getName(),unsupported.getMessage());
-                    if(authorization!=null&&authorization.credited()
-                            &&regionLedger.lookup(new ContactCreditLedger.CreditId(pair,authorization.episodeGeneration()))==null)
-                        credit.abortUnissued(pair,authorization);
+                    if(authorization!=null&&authorization.credited()){
+                        boolean sealed=regionLedger.lookup(new ContactCreditLedger.CreditId(pair,authorization.episodeGeneration()))!=null;
+                        if(sealed)selection.finish(true);
+                        else if(credit.abortUnissued(pair,authorization))selection.finish(false);
+                        else selection.quarantine();
+                    }
                     secondary.remove(pair);
                     zero++;
                     if(logCounts[0]++<MAX_LOG_PER_TICK)log.warn("[PDD-EPISODE] dimension={} tick={} Q=0 reason=INVALID_BRIDGE_INPUT type={} worldMutation=OFF",
@@ -1345,7 +1368,7 @@ public final class RealFixRuntimeBridge {
                               long tick,int materialLines,Logger log) {
         boolean fullTrace=previewMode==PreviewMode.FULL;
         try {
-            boolean timePreview=fullTrace&&materialLines<MAX_MATERIAL_LOGS_PER_TICK;
+            boolean timePreview=LogSelection.enabled(LogSelection.Channel.PERF)&&fullTrace&&materialLines<MAX_MATERIAL_LOGS_PER_TICK;
             long start=timePreview?System.nanoTime():0;
             var result=preview.recordTargets(grant,materials.generation(),tick,
                     targetMaterials::material,damageSettings,
@@ -1698,7 +1721,7 @@ public final class RealFixRuntimeBridge {
             var container=SubLevelContainer.getContainer(level);
             if(container==null){worldClearance.contact(pair);return new WorldClearanceVerifier.Result(
                     WorldClearanceVerifier.Status.UNAVAILABLE,0,0,"NO_SABLE_CONTAINER");}
-            long startNanos=VERF_ENABLED?System.nanoTime():0;
+            long startNanos=LogSelection.enabled(LogSelection.Channel.PERF)&&VERF_ENABLED?System.nanoTime():0;
             int[] cellsRead={0};
             var result=worldClearance.inspect(pair,plotBox,now,remaining,confirmationRemaining,(x,y,z)->{
                 cellsRead[0]++;
@@ -1716,7 +1739,7 @@ public final class RealFixRuntimeBridge {
             if(VERF_ENABLED) {
                 clearanceCalls++;
                 clearanceCellReads+=cellsRead[0];
-                clearanceElapsedNanos+=Math.max(0L,System.nanoTime()-startNanos);
+                if(startNanos!=0)clearanceElapsedNanos+=Math.max(0L,System.nanoTime()-startNanos);
                 if(result.proved())clearanceProved++;
             }
             return result;
